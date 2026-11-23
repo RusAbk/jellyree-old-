@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -117,7 +117,9 @@ try {
       persisted: false,
       bucket: "ipc-test",
     }));
-    replace("folders:list", () => []);
+    replace("folders:list", () => [
+      { id: "album", name: "Альбом", parent_id: null },
+    ]);
     replace("stats", () => ({
       files: state.files.length,
       bytes: 40,
@@ -125,16 +127,20 @@ try {
       tags: [],
     }));
     replace("files:list", (input) => {
-      const items = state.files.filter((f) =>
+      let items = state.files.filter((f) =>
         input.section === "trash" ? f.trashed_at : !f.trashed_at,
       );
+      if (input.section === "drive")
+        items = items.filter((f) => f.folder_id === (input.folderId || null));
       return { items, total: items.length, page: 1, hasMore: false };
     });
     replace("files:update", (ids, patch) => {
       state.calls.push({ channel: "update", ids, patch });
       for (const file of state.files.filter((f) => ids.includes(f.id))) {
+        if ("name" in patch) file.name = patch.name;
         if ("trashed" in patch)
           file.trashed_at = patch.trashed ? "2026-11-24" : null;
+        if ("folderId" in patch) file.folder_id = patch.folderId;
       }
     });
     replace("files:delete", (ids) => {
@@ -218,6 +224,7 @@ try {
     const state = { batches: 0, questions: 0, answers: [], pending: null };
     globalThis.__jellyreeUploadFixture = state;
     const transfer = async (_event, ...args) => {
+      const jobId = args.at(-1);
       state.batches++;
       let done = 0,
         skipped = 0,
@@ -233,6 +240,7 @@ try {
               "jellyree:upload-conflict",
               {
                 id,
+                jobId,
                 name: "duplicate.jpg",
                 targetPath: "Photos",
                 suggestedName: `duplicate (${index + 1}).jpg`,
@@ -293,10 +301,18 @@ try {
         );
       });
     } else await window.locator(".upload-button").click();
+    const toggle = window
+      .locator(".topbar")
+      .getByRole("button", { name: "Загрузки", exact: true });
+    if ((await toggle.getAttribute("aria-expanded")) === "false")
+      await toggle.click();
     const dialog = window.getByRole("dialog", {
       name: "Файл с таким именем уже существует",
       exact: true,
     });
+    await window
+      .getByRole("button", { name: "Разобрать совпадение", exact: true })
+      .click();
     await dialog.waitFor();
     if (action === "Проигнорировать")
       await window.screenshot({
@@ -317,9 +333,21 @@ try {
       .check();
     await dialog.getByRole("button", { name: action, exact: true }).click();
     await dialog.waitFor({ state: "hidden" });
-    await window.locator(".transfer-bar").waitFor({ state: "hidden" });
+    await window.locator(".uploads-toggle strong").waitFor({ state: "hidden" });
   }
   await window.locator(".upload-button").click();
+  await window
+    .getByRole("button", { name: "Разобрать совпадение", exact: true })
+    .waitFor();
+  assert.equal(
+    await window.getByRole("dialog").count(),
+    0,
+    "a conflict cannot take focus from the file browser",
+  );
+  assert.equal(await window.locator(".upload-button").isEnabled(), true);
+  await window
+    .getByRole("button", { name: "Разобрать совпадение", exact: true })
+    .click();
   await window
     .getByRole("dialog", {
       name: "Файл с таким именем уже существует",
@@ -329,7 +357,20 @@ try {
   await window.keyboard.press("Tab");
   await window.keyboard.press("Escape");
   await window.getByRole("dialog").waitFor({ state: "hidden" });
-  await window.locator(".transfer-bar").waitFor({ state: "hidden" });
+  assert.equal(
+    await electron.evaluate(
+      () => globalThis.__jellyreeUploadFixture.answers.length,
+    ),
+    3,
+    "dismissing a conflict keeps the batch waiting",
+  );
+  await window
+    .getByRole("button", { name: "Разобрать совпадение", exact: true })
+    .click();
+  await window
+    .getByRole("button", { name: "Отменить оставшиеся загрузки", exact: true })
+    .click();
+  await window.locator(".uploads-toggle strong").waitFor({ state: "hidden" });
   const uploadFixture = await electron.evaluate(() => ({
     questions: globalThis.__jellyreeUploadFixture.questions,
     answers: globalThis.__jellyreeUploadFixture.answers,
@@ -347,6 +388,395 @@ try {
   });
   console.log(
     "PASS: native IPC upload-conflict modal, skip/rename/replace, validation, apply-all counts, drag-and-drop",
+  );
+
+  // Real mouse drags must cross preload/IPC as file IDs, never native uploads.
+  const uploadBatches = await electron.evaluate(
+    () => globalThis.__jellyreeUploadFixture.batches,
+  );
+  await electron.evaluate(() => {
+    const state = globalThis.__jellyreeIpcFixture;
+    state.files[0].trashed_at = null;
+    state.files.push({ ...state.files[0], id: "second", name: "second.txt" });
+    state.calls = [];
+  });
+  await window.reload();
+  const nativeFile = (name) =>
+    window.locator(".file-card").filter({ hasText: name });
+  const nativeAlbum = window
+    .locator(".folder-card")
+    .filter({ hasText: "Альбом" });
+  await nativeFile("keep-me.txt").dragTo(nativeAlbum);
+  await nativeFile("keep-me.txt").waitFor({ state: "hidden" });
+  await nativeAlbum.click();
+  await nativeFile("keep-me.txt").waitFor();
+  await nativeFile("keep-me.txt").dragTo(
+    window.locator(".breadcrumbs button").first(),
+  );
+  await nativeFile("keep-me.txt").waitFor({ state: "hidden" });
+  await window
+    .locator(".main-nav")
+    .getByRole("button", { name: "Мой диск", exact: true })
+    .click();
+  await window
+    .getByRole("button", { name: "Выбрать keep-me.txt", exact: true })
+    .click();
+  await window
+    .getByRole("button", { name: "Выбрать second.txt", exact: true })
+    .click();
+  await nativeFile("second.txt").dragTo(
+    window.locator(".tree-row").filter({ hasText: "Альбом" }),
+  );
+  await window.waitForFunction(
+    () => document.querySelectorAll(".file-card").length === 0,
+  );
+  const moved = await electron.evaluate(() => globalThis.__jellyreeIpcFixture);
+  assert.deepEqual(moved.calls, [
+    { channel: "update", ids: ["keep-me"], patch: { folderId: "album" } },
+    { channel: "update", ids: ["keep-me"], patch: { folderId: null } },
+    {
+      channel: "update",
+      ids: ["keep-me", "second"],
+      patch: { folderId: "album" },
+    },
+  ]);
+  assert.ok(moved.files.every((file) => file.folder_id === "album"));
+  assert.equal(
+    await electron.evaluate(() => globalThis.__jellyreeUploadFixture.batches),
+    uploadBatches,
+  );
+  assert.deepEqual(errors, []);
+  console.log(
+    "PASS: native file and multiselection drags to album card/tree and root breadcrumb use real move IPC, not uploads",
+  );
+
+  // Hold real IPC requests open through the production queue while using the UI.
+  await electron.evaluate(
+    async ({ ipcMain, BrowserWindow }, queuePath) => {
+      const { OperationQueue } = process
+        .getBuiltinModule("module")
+        .createRequire(queuePath)(queuePath);
+      const queue = new OperationQueue();
+      const state = { records: [], active: null, resolve: null, downloads: [] };
+      globalThis.__jellyreeBackgroundFixture = state;
+      const fixture = globalThis.__jellyreeIpcFixture;
+      for (const id of ["during-upload", "extra-1", "extra-2"]) {
+        fixture.files.push({
+          ...fixture.files[0],
+          id,
+          name: `${id}.txt`,
+          folder_id: null,
+        });
+      }
+      ipcMain.removeHandler("jellyree:files:list");
+      ipcMain.handle("jellyree:files:list", (_event, input) => {
+        const items = fixture.files.filter(
+          (file) =>
+            !file.trashed_at &&
+            (input.section !== "drive" ||
+              file.folder_id === (input.folderId || null)),
+        );
+        const page = input.page || 1;
+        return {
+          ok: true,
+          value: {
+            items: items.slice((page - 1) * 2, page * 2),
+            total: items.length,
+            page,
+            hasMore: items.length > page * 2,
+          },
+        };
+      });
+      const report = (job, phase) =>
+        BrowserWindow.getAllWindows()[0].webContents.send("jellyree:progress", {
+          kind: "upload",
+          jobId: job.id,
+          phase,
+          name: "background.jpg",
+          done: 0,
+          total: 2,
+          loaded: 40,
+          totalBytes: 100,
+        });
+      for (const channel of ["files:pick-upload", "files:drop-upload"]) {
+        ipcMain.removeHandler(`jellyree:${channel}`);
+        ipcMain.handle(`jellyree:${channel}`, async (_event, ...args) => {
+          const job = {
+            id: args.at(-1),
+            folderId: channel === "files:pick-upload" ? args[0] : args[1],
+          };
+          state.records.push(job);
+          report(job, "queued");
+          return queue.run(async () => {
+            state.active = job;
+            report(job, "uploading");
+            const result = await new Promise((resolve) => {
+              state.resolve = resolve;
+            });
+            state.active = null;
+            return { ok: true, value: result };
+          });
+        });
+      }
+      ipcMain.removeHandler("jellyree:files:download");
+      ipcMain.handle("jellyree:files:download", (_event, ids) => {
+        state.downloads.push({ ids, duringUpload: !!state.active });
+        return { ok: true, value: { done: ids.length } };
+      });
+      ipcMain.removeHandler("jellyree:files:url");
+      ipcMain.handle("jellyree:files:url", () => ({
+        ok: true,
+        value: "https://preview-test.r2.cloudflarestorage.com/placeholder",
+      }));
+    },
+    path.join(directory, "electron/operation-queue.mjs"),
+  );
+  await window.reload();
+  await nativeFile("during-upload.txt").waitFor();
+  await window.locator(".upload-button").click();
+  const uploads = window.getByRole("region", { name: "Загрузки", exact: true });
+  await window
+    .locator(".upload-compact-percent")
+    .filter({ hasText: "40%" })
+    .waitFor();
+  assert.equal(
+    await uploads.count(),
+    0,
+    "starting an upload does not open a panel or take focus",
+  );
+  await window
+    .locator(".topbar")
+    .getByRole("button", { name: "Загрузки", exact: true })
+    .click();
+  await uploads.locator('.upload-job[data-state="uploading"]').waitFor();
+  assert.equal(
+    await uploads.getByRole("progressbar").getAttribute("value"),
+    "40",
+  );
+  assert.equal(await window.locator(".transfer-bar").count(), 0);
+  assert.equal(await window.locator(".upload-button").isEnabled(), true);
+  await nativeFile("during-upload.txt").click({ button: "right" });
+  await window
+    .getByRole("menuitem", { name: "Переименовать", exact: true })
+    .click();
+  await window
+    .getByRole("dialog")
+    .getByRole("textbox")
+    .fill("renamed-during-upload.txt");
+  await window
+    .getByRole("dialog")
+    .getByRole("button", { name: "Сохранить", exact: true })
+    .click();
+  await nativeFile("renamed-during-upload.txt").waitFor();
+  await nativeFile("renamed-during-upload.txt").dblclick();
+  await window.getByRole("dialog", { name: "Просмотр файла" }).waitFor();
+  await window
+    .getByRole("button", { name: "Закрыть просмотр", exact: true })
+    .click();
+  await nativeAlbum.click();
+  await window.getByRole("heading", { name: "Альбом", exact: true }).waitFor();
+  await window
+    .getByRole("button", { name: "Скрыть загрузки", exact: true })
+    .click();
+  await window.locator(".upload-button").click();
+  await window.waitForFunction(
+    () => document.querySelector(".uploads-toggle strong")?.textContent === "2",
+  );
+  assert.equal(
+    await uploads.count(),
+    0,
+    "adding a queued batch respects the hidden panel",
+  );
+  await window
+    .locator(".topbar")
+    .getByRole("button", { name: "Загрузки", exact: true })
+    .click();
+  await uploads.locator('.upload-job[data-state="queued"]').waitFor();
+  assert.equal(
+    await uploads.locator('.upload-job[data-state="uploading"]').count(),
+    1,
+  );
+  await window.locator(".avatar").click();
+  const connection = window.getByRole("dialog");
+  assert.equal(
+    await connection
+      .getByRole("button", { name: "Сохранить и открыть", exact: true })
+      .isDisabled(),
+    true,
+  );
+  assert.equal(
+    await connection
+      .getByRole("button", { name: "Закрыть", exact: true })
+      .isEnabled(),
+    true,
+  );
+  await connection
+    .getByRole("button", { name: "Закрыть", exact: true })
+    .click();
+  await window
+    .locator(".main-nav")
+    .getByRole("button", { name: "Мой диск", exact: true })
+    .click();
+  await nativeFile("renamed-during-upload.txt").click();
+  await window.getByRole("button", { name: "Скачать", exact: true }).click();
+  await window
+    .locator(".banner.info")
+    .filter({ hasText: "Скачано файлов: 1" })
+    .waitFor();
+  assert.equal(
+    await uploads.getByRole("progressbar").getAttribute("value"),
+    "40",
+    "foreground actions do not reset upload progress",
+  );
+  await window.getByRole("button", { name: /Показать ещё/ }).click();
+  await nativeFile("extra-2.txt").waitFor();
+  await window
+    .getByRole("button", { name: "Выбрать extra-2.txt", exact: true })
+    .click();
+  await window
+    .getByRole("button", { name: "Скрыть загрузки", exact: true })
+    .click();
+  await electron.evaluate(() => {
+    const state = globalThis.__jellyreeBackgroundFixture;
+    const files = globalThis.__jellyreeIpcFixture.files;
+    files.push({
+      ...files[0],
+      id: "uploaded-first",
+      name: "uploaded-first.txt",
+      folder_id: state.active.folderId,
+    });
+    state.resolve({ done: 1, skipped: 0, failures: [] });
+  });
+  await nativeFile("uploaded-first.txt").waitFor();
+  assert.equal(
+    await nativeFile("extra-2.txt").count(),
+    1,
+    "background refresh preserves loaded pages",
+  );
+  assert.equal(
+    await window.locator(".file-card.selected").count(),
+    2,
+    "background refresh preserves selection",
+  );
+  assert.equal(
+    await uploads.count(),
+    0,
+    "a finished batch does not reopen the panel",
+  );
+  await nativeAlbum.click();
+  await window.getByRole("heading", { name: "Альбом", exact: true }).waitFor();
+  await electron.evaluate(() => {
+    const state = globalThis.__jellyreeBackgroundFixture;
+    const files = globalThis.__jellyreeIpcFixture.files;
+    files.unshift({
+      ...files[0],
+      id: "uploaded-second",
+      name: "uploaded-second.txt",
+      folder_id: state.active.folderId,
+    });
+    state.resolve({
+      done: 1,
+      skipped: 0,
+      failures: [{ name: "failed.jpg", message: "Test network failure" }],
+    });
+  });
+  await nativeFile("uploaded-second.txt").waitFor();
+  await window.locator(".uploads-toggle.attention").waitFor();
+  assert.equal(
+    await uploads.count(),
+    0,
+    "errors draw attention in the toolbar without opening a panel",
+  );
+  await window
+    .locator(".topbar")
+    .getByRole("button", { name: "Загрузки", exact: true })
+    .click();
+  await uploads.locator('.upload-job[data-state="issues"]').waitFor();
+  await uploads.getByText("Подробности", { exact: false }).click();
+  await uploads
+    .getByText("failed.jpg: Test network failure", { exact: true })
+    .waitFor();
+  assert.equal(
+    await window.getByRole("heading", { name: "Альбом", exact: true }).count(),
+    1,
+  );
+  assert.equal(
+    await window
+      .locator(".banner.info")
+      .filter({ hasText: "Скачано файлов: 1" })
+      .count(),
+    1,
+    "upload completion cannot overwrite foreground notices",
+  );
+  const background = await electron.evaluate(() => ({
+    records: globalThis.__jellyreeBackgroundFixture.records,
+    downloads: globalThis.__jellyreeBackgroundFixture.downloads,
+  }));
+  assert.deepEqual(
+    background.records.map((job) => job.folderId),
+    [null, "album"],
+  );
+  assert.ok(background.records.every((job) => typeof job.id === "string"));
+  assert.deepEqual(background.downloads, [
+    { ids: ["during-upload"], duringUpload: true },
+  ]);
+  await window.screenshot({
+    path: path.join(os.tmpdir(), "jellyree-background-uploads.png"),
+  });
+  await uploads
+    .getByRole("button", { name: "Убрать завершённые", exact: true })
+    .click();
+  await uploads.getByText("Загрузок пока нет", { exact: true }).waitFor();
+  assert.equal(await window.locator(".uploads-toggle.attention").count(), 0);
+  assert.deepEqual(errors, []);
+  console.log(
+    "PASS: native background upload queue, browsing/preview/rename/download during transfer, captured destinations, isolated progress/errors, pagination and selection preserved",
+  );
+
+  const mp4 = await readFile(path.join(directory, "test/fixtures/preview.mp4"));
+  await window.route(
+    "https://preview-test.r2.cloudflarestorage.com/**",
+    (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: "video/mp4",
+        body: route.request().url().endsWith("broken.mp4")
+          ? Buffer.from("invalid video")
+          : mp4,
+      }),
+  );
+  await electron.evaluate(({ ipcMain }) => {
+    const state = globalThis.__jellyreeIpcFixture;
+    state.files = state.files.filter((file) => file.folder_id !== null);
+    for (const id of ["preview", "broken"]) {
+      state.files.push({
+        ...state.files[0],
+        id,
+        name: `${id}.mp4`,
+        mime_type: "video/mp4",
+        folder_id: null,
+      });
+    }
+    ipcMain.removeHandler("jellyree:files:url");
+    ipcMain.handle("jellyree:files:url", (_event, id) => ({
+      ok: true,
+      value: `https://preview-test.r2.cloudflarestorage.com/${id}.mp4`,
+    }));
+  });
+  await window.reload();
+  const nativeVideo = nativeFile("preview.mp4");
+  await nativeVideo.locator(".video-poster").waitFor({ state: "visible" });
+  assert.equal(await nativeVideo.locator(".video-badge").innerText(), "0:02");
+  assert.equal(await nativeVideo.locator("video").count(), 0);
+  await nativeFile("broken.mp4")
+    .getByText("Превью недоступно", { exact: true })
+    .waitFor();
+  await nativeVideo.screenshot({
+    path: path.join(os.tmpdir(), "jellyree-electron-video.png"),
+  });
+  assert.deepEqual(errors, []);
+  console.log(
+    "PASS: real Electron H.264/MP4 poster and duration, decoder cleanup and broken-video fallback",
   );
   await electron.close();
   electron = null;
@@ -369,6 +799,22 @@ try {
   page.setDefaultTimeout(15000);
   const rendererErrors = [];
   page.on("pageerror", (error) => rendererErrors.push(error.message));
+  const mediaEvents = [];
+  page.on("console", (message) => {
+    if (message.type() === "error") mediaEvents.push(message.text());
+  });
+  const previewBytes = await readFile(
+    path.join(directory, "test/fixtures/preview.webm"),
+  );
+  await page.route(
+    "https://preview-test.r2.cloudflarestorage.com/**",
+    (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: "video/webm",
+        body: previewBytes,
+      }),
+  );
   await page.addInitScript(() => {
     if (!localStorage.getItem("jellyree-desktop-language"))
       localStorage.setItem("jellyree-desktop-language", "ru");
@@ -513,6 +959,8 @@ try {
         );
       },
       url: async (id) => {
+        if (id === "video")
+          return "https://preview-test.r2.cloudflarestorage.com/preview.webm";
         const [width, height] =
           id === "portrait"
             ? [300, 900]
@@ -531,6 +979,10 @@ try {
       pickUpload: async (folderId, folders) => {
         calls.push({ folderId, folders });
         return { done: 0, failures: [] };
+      },
+      dropUpload: async (files, folderId) => {
+        calls.push({ folderId, dropped: files.map((file) => file.name) });
+        return { done: files.length, failures: [] };
       },
       onProgress: () => () => {},
     };
@@ -660,6 +1112,69 @@ try {
     .getByRole("menuitem", { name: "Галерея без обрезки", exact: true })
     .click();
   await page.locator(".files.gallery").waitFor();
+  const videoCard = page
+    .locator(".file-card")
+    .filter({ hasText: "Выходные.mp4" });
+  await videoCard.scrollIntoViewIfNeeded();
+  try {
+    await videoCard.locator(".video-poster").waitFor({ state: "visible" });
+  } catch (error) {
+    console.log(
+      "Video diagnostics",
+      mediaEvents,
+      await videoCard.evaluate((element) => {
+        const video = element.querySelector("video");
+        return {
+          html: element.innerHTML,
+          video: video && {
+            src: video.currentSrc,
+            error: video.error?.message,
+            state: video.readyState,
+            network: video.networkState,
+            time: video.currentTime,
+            duration: video.duration,
+            seeking: video.seeking,
+          },
+        };
+      }),
+    );
+    throw error;
+  }
+  assert.equal(await videoCard.locator(".video-badge").innerText(), "0:02");
+  const videoFrame = await videoCard.locator("canvas").evaluate((canvas) => {
+    const bounds = canvas.getBoundingClientRect();
+    let crossOrigin = false;
+    try {
+      canvas.toDataURL();
+    } catch (error) {
+      crossOrigin = error.name === "SecurityError";
+    }
+    return {
+      width: canvas.width,
+      height: canvas.height,
+      ratio: bounds.width / bounds.height,
+      crossOrigin,
+    };
+  });
+  assert.equal(videoFrame.width, 320);
+  assert.equal(videoFrame.height, 180);
+  assert.ok(Math.abs(videoFrame.ratio - 16 / 9) < 0.03);
+  assert.equal(
+    videoFrame.crossOrigin,
+    true,
+    "a cross-origin R2 video renders without bucket CORS",
+  );
+  assert.equal(
+    await videoCard.locator("video").count(),
+    0,
+    "decoder is released after capturing the frame",
+  );
+  await videoCard.screenshot({
+    path: path.join(os.tmpdir(), "jellyree-video-preview.png"),
+  });
+  console.log(
+    "PASS: cross-origin video poster without CORS, duration, original aspect ratio and decoder cleanup",
+  );
   for (const name of ["Портрет.jpg", "Панорама.jpg", "Поворот.jpg"]) {
     const img = page.locator(`.files.gallery img[alt="${name}"]`);
     await img.scrollIntoViewIfNeeded();
@@ -888,6 +1403,59 @@ try {
     return image?.getAttribute("src") && image.getAttribute("src") !== previous;
   }, previousSrc);
   console.log("PASS: replaced file refreshes its cached thumbnail");
+
+  // Folder destinations support external uploads, internal folders and cycle rejection.
+  const trip = page.locator(".folder-card").filter({ hasText: "Поездки" });
+  await trip.evaluate((element) => {
+    const transfer = new DataTransfer();
+    transfer.items.add(
+      new File(["photo"], "dropped.jpg", { type: "image/jpeg" }),
+    );
+    element.dispatchEvent(
+      new DragEvent("drop", {
+        bubbles: true,
+        cancelable: true,
+        dataTransfer: transfer,
+      }),
+    );
+  });
+  await page.waitForFunction(() => window.__jellyreeBrowserCalls.length === 2);
+  assert.deepEqual(
+    await page.evaluate(() => window.__jellyreeBrowserCalls[1]),
+    { folderId: "travel", dropped: ["dropped.jpg"] },
+  );
+  const work = page.locator(".folder-card").filter({ hasText: "Проекты" });
+  await work.dragTo(trip);
+  await work.waitFor({ state: "hidden" });
+  await trip.click();
+  await work.waitFor();
+  // Dragging the parent into its child must not invoke a move or root fallback.
+  const tripTree = page.locator(".tree-row").filter({ hasText: "Поездки" });
+  await tripTree.dragTo(work);
+  await work.waitFor();
+  assert.equal(
+    await page
+      .locator(".breadcrumbs")
+      .innerText()
+      .then((text) => text.includes("Поездки")),
+    true,
+  );
+  await work.dragTo(
+    page
+      .locator(".main-nav")
+      .getByRole("button", { name: "Мой диск", exact: true }),
+  );
+  await work.waitFor({ state: "hidden" });
+  await page
+    .locator(".main-nav")
+    .getByRole("button", { name: "Мой диск", exact: true })
+    .click();
+  await work.waitFor();
+  assert.equal(await page.locator(".drag-summary").count(), 0);
+  assert.equal(await page.locator(".drop-overlay").count(), 0);
+  console.log(
+    "PASS: external drop uploads into target album; folders move into albums and root; descendant drops rejected",
+  );
   assert.deepEqual(rendererErrors, []);
   console.log(
     "PASS: connected UI, rename, trash, restore, create folder, list, search, preview, edit",
