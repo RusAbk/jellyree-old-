@@ -1,10 +1,13 @@
 `preview.webm` (VP8) and `preview.mp4` (H.264) are two-second, silent 320×180 test videos generated from FFmpeg's `testsrc` pattern. They contain no user media.
 
+`editor.png` is a 600×400 FFmpeg `testsrc2` frame used to exercise real editor pixel processing, geometry and image export.
+
 To regenerate from this directory:
 
 ```sh
 ffmpeg -f lavfi -i testsrc=size=320x180:rate=10 -t 2 -c:v libvpx -pix_fmt yuv420p -an -y preview.webm
 ffmpeg -f lavfi -i testsrc=size=320x180:rate=10 -t 2 -c:v libx264 -pix_fmt yuv420p -movflags +faststart -an -y preview.mp4
+ffmpeg -f lavfi -i testsrc2=size=600x400:rate=1 -frames:v 1 -y editor.png
 ```
 
 Smoke tests serve the fixtures from a mocked cross-origin R2 URL without CORS headers. FFmpeg is only used to regenerate these fixtures; the application and tests do not require it.

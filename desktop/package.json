@@ -17,7 +17,9 @@
     "format": "prettier --write src electron scripts test vite.config.ts",
     "dist:linux": "node scripts/build.mjs linux",
     "dist:win": "node scripts/build.mjs win",
-    "dist:mac": "node scripts/build.mjs mac"
+    "dist:mac": "node scripts/build.mjs mac",
+    "test:editor": "node test/editor-smoke.mjs",
+    "test:thumbnails": "node test/thumbnail-smoke.mjs"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.998.0",

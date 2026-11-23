@@ -301,18 +301,10 @@ try {
         );
       });
     } else await window.locator(".upload-button").click();
-    const toggle = window
-      .locator(".topbar")
-      .getByRole("button", { name: "Загрузки", exact: true });
-    if ((await toggle.getAttribute("aria-expanded")) === "false")
-      await toggle.click();
     const dialog = window.getByRole("dialog", {
       name: "Файл с таким именем уже существует",
       exact: true,
     });
-    await window
-      .getByRole("button", { name: "Разобрать совпадение", exact: true })
-      .click();
     await dialog.waitFor();
     if (action === "Проигнорировать")
       await window.screenshot({
@@ -337,23 +329,12 @@ try {
   }
   await window.locator(".upload-button").click();
   await window
-    .getByRole("button", { name: "Разобрать совпадение", exact: true })
-    .waitFor();
-  assert.equal(
-    await window.getByRole("dialog").count(),
-    0,
-    "a conflict cannot take focus from the file browser",
-  );
-  assert.equal(await window.locator(".upload-button").isEnabled(), true);
-  await window
-    .getByRole("button", { name: "Разобрать совпадение", exact: true })
-    .click();
-  await window
     .getByRole("dialog", {
       name: "Файл с таким именем уже существует",
       exact: true,
     })
     .waitFor();
+  assert.equal(await window.locator(".upload-panel").count(), 1);
   await window.keyboard.press("Tab");
   await window.keyboard.press("Escape");
   await window.getByRole("dialog").waitFor({ state: "hidden" });
@@ -539,18 +520,12 @@ try {
     .locator(".upload-compact-percent")
     .filter({ hasText: "40%" })
     .waitFor();
-  assert.equal(
-    await uploads.count(),
-    0,
-    "starting an upload does not open a panel or take focus",
-  );
-  await window
-    .locator(".topbar")
-    .getByRole("button", { name: "Загрузки", exact: true })
-    .click();
+  assert.equal(await uploads.count(), 1, "starting an upload opens its panel");
   await uploads.locator('.upload-job[data-state="uploading"]').waitFor();
   assert.equal(
-    await uploads.getByRole("progressbar").getAttribute("value"),
+    await uploads
+      .getByRole("progressbar", { name: "Прогресс загрузки", exact: true })
+      .getAttribute("value"),
     "40",
   );
   assert.equal(await window.locator(".transfer-bar").count(), 0);
@@ -584,13 +559,9 @@ try {
   );
   assert.equal(
     await uploads.count(),
-    0,
-    "adding a queued batch respects the hidden panel",
+    1,
+    "adding another batch opens the panel again",
   );
-  await window
-    .locator(".topbar")
-    .getByRole("button", { name: "Загрузки", exact: true })
-    .click();
   await uploads.locator('.upload-job[data-state="queued"]').waitFor();
   assert.equal(
     await uploads.locator('.upload-job[data-state="uploading"]').count(),
@@ -624,7 +595,9 @@ try {
     .filter({ hasText: "Скачано файлов: 1" })
     .waitFor();
   assert.equal(
-    await uploads.getByRole("progressbar").getAttribute("value"),
+    await uploads
+      .getByRole("progressbar", { name: "Прогресс загрузки", exact: true })
+      .getAttribute("value"),
     "40",
     "foreground actions do not reset upload progress",
   );
@@ -633,6 +606,46 @@ try {
   await window
     .getByRole("button", { name: "Выбрать extra-2.txt", exact: true })
     .click();
+  await electron.evaluate(({ BrowserWindow }) => {
+    const jobId = globalThis.__jellyreeBackgroundFixture.records[0].id;
+    for (let index = 0; index < 24; index++)
+      BrowserWindow.getAllWindows()[0].webContents.send("jellyree:progress", {
+        kind: "upload",
+        jobId,
+        fileIndex: index,
+        fileState: "uploaded",
+        name: `completed-${index}.jpg`,
+        done: index + 1,
+        total: 30,
+        loaded: (index + 1) * 10,
+        totalBytes: 300,
+        sizeBytes: 10,
+      });
+  });
+  await uploads.getByRole("tab", { name: /Загруженные/ }).click();
+  await uploads.getByText("completed-23.jpg", { exact: true }).waitFor();
+  assert.equal(
+    await uploads.locator(".upload-job").count(),
+    24,
+    "individual files enter history before their batch finishes",
+  );
+  const scroll = await uploads.getByRole("tabpanel").evaluate((element) => {
+    element.scrollTop = 120;
+    return {
+      scroll: element.scrollTop,
+      scrollable: element.scrollHeight > element.clientHeight,
+    };
+  });
+  assert.equal(scroll.scrollable, true);
+  assert.ok(scroll.scroll > 0);
+  assert.ok(
+    (await uploads.locator(".upload-job").first().boundingBox()).height < 75,
+    "file rows remain compact",
+  );
+  await uploads
+    .getByRole("progressbar", { name: "Общий прогресс загрузки", exact: true })
+    .waitFor();
+  await uploads.getByRole("tab", { name: /В работе/ }).click();
   await window
     .getByRole("button", { name: "Скрыть загрузки", exact: true })
     .click();
@@ -691,6 +704,7 @@ try {
     .locator(".topbar")
     .getByRole("button", { name: "Загрузки", exact: true })
     .click();
+  await uploads.getByRole("tab", { name: /Загруженные/ }).click();
   await uploads.locator('.upload-job[data-state="issues"]').waitFor();
   await uploads.getByText("Подробности", { exact: false }).click();
   await uploads
@@ -726,7 +740,9 @@ try {
   await uploads
     .getByRole("button", { name: "Убрать завершённые", exact: true })
     .click();
-  await uploads.getByText("Загрузок пока нет", { exact: true }).waitFor();
+  await uploads
+    .getByText("Завершённых загрузок пока нет", { exact: true })
+    .waitFor();
   assert.equal(await window.locator(".uploads-toggle.attention").count(), 0);
   assert.deepEqual(errors, []);
   console.log(
@@ -815,7 +831,10 @@ try {
         body: previewBytes,
       }),
   );
-  await page.addInitScript(() => {
+  const editorPng = (
+    await readFile(path.join(directory, "test/fixtures/editor.png"))
+  ).toString("base64");
+  await page.addInitScript((editorPng) => {
     if (!localStorage.getItem("jellyree-desktop-language"))
       localStorage.setItem("jellyree-desktop-language", "ru");
     const config = {
@@ -958,6 +977,10 @@ try {
           1,
         );
       },
+      imageSource: async () => ({
+        data: Uint8Array.from(atob(editorPng), (char) => char.charCodeAt(0)),
+        mimeType: "image/png",
+      }),
       url: async (id) => {
         if (id === "video")
           return "https://preview-test.r2.cloudflarestorage.com/preview.webm";
@@ -986,7 +1009,7 @@ try {
       },
       onProgress: () => () => {},
     };
-  });
+  }, editorPng);
   await page.goto("http://127.0.0.1:4174");
   await page.getByText("Вечер у моря.jpg", { exact: true }).waitFor();
   await page.screenshot({
