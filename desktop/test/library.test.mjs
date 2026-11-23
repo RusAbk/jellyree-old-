@@ -208,6 +208,83 @@ test("bulk metadata and trash restoration preserve object keys and isolate libra
   });
 });
 
+test("image edits round-trip all controls and reject saves against a replaced original", async (t) => {
+  const { library, insert, sqlite } = fixture(t);
+  await library.initialize();
+  insert("edited");
+  const adjustments = {
+    temperature: 30,
+    exposure: 20,
+    flipX: true,
+    cropX: 0.1,
+    cropWidth: 0.8,
+    stretchAmount: 25,
+    strokes: [{ x: 0.4, y: 0.5, dx: 0.1, dy: 0, radius: 0.2, strength: 0.5 }],
+  };
+  await library.updateFiles(["edited"], {
+    adjustments,
+    expectedObjectKey: "objects/edited",
+  });
+  let file = await library.file("edited");
+  assert.equal(file.adjustments.temperature, 30);
+  assert.deepEqual(file.adjustments.strokes, adjustments.strokes);
+  sqlite
+    .prepare("UPDATE jr_files SET object_key = ? WHERE id = ?")
+    .run("replacement", "edited");
+  await assert.rejects(
+    library.updateFiles(["edited"], {
+      adjustments: { temperature: -50 },
+      expectedObjectKey: "objects/edited",
+    }),
+    /Изображение изменилось/,
+  );
+  file = await library.file("edited");
+  assert.equal(file.adjustments.temperature, 30);
+  assert.equal(file.object_key, "replacement");
+});
+
+test("image source reads private R2 bytes with size limits and library isolation", async (t) => {
+  let destroyed = 0,
+    requested = 0,
+    oversized = false;
+  const body = () => ({
+    async *[Symbol.asyncIterator]() {
+      yield oversized
+        ? { length: 64 * 1024 * 1024 + 1 }
+        : Buffer.from([1, 2, 3]);
+    },
+    destroy() {
+      destroyed++;
+    },
+  });
+  const { library, insert } = fixture(t, {
+    s3: {
+      async send(command) {
+        requested++;
+        assert.equal(command.constructor.name, "GetObjectCommand");
+        return { Body: body() };
+      },
+      destroy() {},
+    },
+  });
+  await library.initialize();
+  insert("photo");
+  insert("foreign", { scope: "other-library" });
+  insert("video", { mime: "video/mp4" });
+  insert("large", { size: 65 * 1024 * 1024 });
+  assert.deepEqual(await library.imageSource("photo"), {
+    data: new Uint8Array([1, 2, 3]),
+    mimeType: "image/jpeg",
+  });
+  await assert.rejects(library.imageSource("foreign"), /не найден/);
+  await assert.rejects(library.imageSource("video"), /Выберите изображение/);
+  await assert.rejects(library.imageSource("large"), /64 МБ/);
+  assert.equal(requested, 1);
+  oversized = true;
+  await assert.rejects(library.imageSource("photo"), /64 МБ/);
+  assert.equal(destroyed, 2);
+});
+
 test("permanent deletion refuses active files and keeps records when R2 fails", async (t) => {
   const { library, insert, deleted } = fixture(t);
   await library.initialize();

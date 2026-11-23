@@ -7,6 +7,8 @@ import {
   safeStorage,
   Menu,
   clipboard,
+  protocol,
+  net,
 } from "electron";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -14,6 +16,25 @@ import { ConfigStore } from "./config.mjs";
 import { Library } from "./library.mjs";
 import { UploadConflictBroker } from "./upload-conflicts.mjs";
 import { OperationQueue } from "./operation-queue.mjs";
+import { ThumbnailCache, thumbnailKey } from "./thumbnail-cache.mjs";
+import { ThumbnailMedia } from "./thumbnail-media.mjs";
+protocol.registerSchemesAsPrivileged([
+  {
+    scheme: "jellyree-media",
+    privileges: {
+      standard: true,
+      secure: true,
+      stream: true,
+      supportFetchAPI: true,
+      corsEnabled: true,
+    },
+  },
+]);
+const thumbnailMedia = new ThumbnailMedia((url, options) =>
+  net.fetch(url, options),
+);
+let thumbnailCache;
+const cacheNamespace = () => `${library.id}:${library.config.databaseId}`;
 const uploadConflicts = new UploadConflictBroker();
 const uploads = new OperationQueue();
 import { setLanguage } from "./locales.mjs";
@@ -186,6 +207,7 @@ function registerHandlers() {
           const summary = await store.save(config);
           library?.close();
           library = candidate;
+          thumbnailMedia.clear();
           startupError = "";
           return summary;
         } catch (error) {
@@ -202,6 +224,7 @@ function registerHandlers() {
         await store.clear();
         library?.close();
         library = null;
+        thumbnailMedia.clear();
         return { configured: false, persisted: false };
       }),
     false,
@@ -210,6 +233,50 @@ function registerHandlers() {
   handle("files:update", (ids, patch) => library.updateFiles(ids, patch));
   handle("files:delete", (ids) => library.deletePermanently(ids));
   handle("files:url", (id) => library.url(id));
+  handle("files:image-source", (id) => library.imageSource(id));
+  handle("thumbnails:get", (revision) =>
+    thumbnailCache.get(thumbnailKey(cacheNamespace(), revision)),
+  );
+  handle("thumbnails:put", (revision, entry, epoch) =>
+    thumbnailCache.put(thumbnailKey(cacheNamespace(), revision), entry, epoch),
+  );
+  handle("thumbnails:stats", () => thumbnailCache.stats(), false);
+  handle("thumbnails:clear", () => thumbnailCache.clear(), false);
+  handle("thumbnails:source", async (revision) => {
+    thumbnailKey(cacheNamespace(), revision);
+    const file = await library.file(revision.id);
+    if (
+      file.object_key !== revision.objectKey ||
+      file.size_bytes !== revision.sizeBytes
+    )
+      throw new Error(
+        t(
+          "Изображение изменилось. Откройте его заново перед сохранением правок.",
+        ),
+      );
+    return thumbnailMedia.create(await library.url(file.id));
+  });
+  handle("files:export-image", async (id, data, format) => {
+    const file = await library.file(id);
+    if (
+      !file.mime_type.startsWith("image/") ||
+      !["png", "jpeg", "webp"].includes(format) ||
+      !(data instanceof Uint8Array) ||
+      !data.length ||
+      data.length > 128 * 1024 * 1024
+    )
+      throw new Error(t("Некорректное изображение для экспорта."));
+    const ext = format === "jpeg" ? "jpg" : format;
+    const result = await dialog.showSaveDialog(window, {
+      title: t("Экспорт изображения"),
+      defaultPath: `${path.basename(file.name, path.extname(file.name))}-edited.${ext}`,
+      filters: [{ name: format.toUpperCase(), extensions: [ext] }],
+    });
+    if (result.canceled || !result.filePath) return { saved: false };
+    const { writeFile } = await import("node:fs/promises");
+    await writeFile(result.filePath, data);
+    return { saved: true };
+  });
   handle("files:share", async (id) => {
     const url = await library.url(id, true);
     clipboard.writeText(url);
@@ -354,6 +421,12 @@ else {
     .whenReady()
     .then(async () => {
       app.setName("Jellyree");
+      thumbnailCache = new ThumbnailCache(
+        path.join(app.getPath("userData"), "thumbnails-v1"),
+      );
+      protocol.handle("jellyree-media", (request) =>
+        thumbnailMedia.handle(request),
+      );
       store = new ConfigStore(
         path.join(app.getPath("userData"), "jellyree-cloud"),
         safeStorage,

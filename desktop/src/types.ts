@@ -21,12 +21,9 @@ export type Folder = {
   parent_id: string | null;
   created_at: string;
 };
-export type Adjustments = {
-  brightness?: number;
-  contrast?: number;
-  saturation?: number;
-  rotate?: number;
-};
+export type Adjustments = Partial<
+  import("../electron/image-adjustments.mjs").ImageAdjustments
+>;
 export type DriveFile = {
   id: string;
   folder_id: string | null;
@@ -56,6 +53,7 @@ export type FilePatch = {
   folderId?: string | null;
   tags?: string[];
   adjustments?: Adjustments;
+  expectedObjectKey?: string;
 };
 export type Stats = {
   files: number;
@@ -63,6 +61,20 @@ export type Stats = {
   trashed: number;
   tags: string[];
 };
+export type ThumbnailRevision = {
+  id: string;
+  objectKey: string;
+  sizeBytes: number;
+  mimeType: string;
+  adjustments: Adjustments;
+};
+export type ThumbnailEntry = {
+  data: Uint8Array;
+  width: number;
+  height: number;
+  duration: number;
+};
+export type ThumbnailStats = { count: number; bytes: number; maxBytes: number };
 export type Progress = {
   kind: "upload" | "download" | "import";
   jobId?: string;
@@ -73,6 +85,11 @@ export type Progress = {
   loaded?: number;
   totalBytes?: number;
   failures?: number;
+  fileIndex?: number;
+  fileState?: "uploading" | "uploaded" | "skipped" | "failed" | "canceled";
+  sizeBytes?: number;
+  targetPath?: string;
+  message?: string;
 };
 export type UploadResult = {
   done: number;
@@ -100,6 +117,19 @@ export type UploadConflictAnswer = {
   name?: string;
 };
 export interface Jellyree {
+  thumbnails: {
+    get(
+      revision: ThumbnailRevision,
+    ): Promise<{ epoch: number; entry: ThumbnailEntry | null }>;
+    put(
+      revision: ThumbnailRevision,
+      entry: ThumbnailEntry,
+      epoch: number,
+    ): Promise<boolean>;
+    source(revision: ThumbnailRevision): Promise<string>;
+    stats(): Promise<ThumbnailStats>;
+    clear(): Promise<ThumbnailStats>;
+  };
   setLocale(value: "en" | "ru" | "es"): Promise<void>;
   settings: {
     get(): Promise<Settings>;
@@ -116,6 +146,12 @@ export interface Jellyree {
   update(ids: string[], patch: FilePatch): Promise<void>;
   remove(ids: string[]): Promise<{ done: number }>;
   url(id: string): Promise<string>;
+  imageSource(id: string): Promise<{ data: Uint8Array; mimeType: string }>;
+  exportImage(
+    id: string,
+    data: Uint8Array,
+    format: "png" | "jpeg" | "webp",
+  ): Promise<{ saved: boolean }>;
   share(id: string): Promise<{ expiresIn: number }>;
   download(ids: string[]): Promise<{ done: number }>;
   pickUpload(

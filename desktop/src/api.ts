@@ -3,6 +3,23 @@ import { toIpcData } from "./ipc-data";
 
 export function createApi(bridge: Jellyree): Jellyree {
   return {
+    thumbnails: {
+      get: (revision) => bridge.thumbnails.get(toIpcData(revision)),
+      put: (revision, entry, epoch) =>
+        bridge.thumbnails.put(
+          toIpcData(revision),
+          {
+            data: entry.data,
+            width: entry.width,
+            height: entry.height,
+            duration: entry.duration,
+          },
+          epoch,
+        ),
+      source: (revision) => bridge.thumbnails.source(toIpcData(revision)),
+      stats: () => bridge.thumbnails.stats(),
+      clear: () => bridge.thumbnails.clear(),
+    },
     setLocale: (value) => bridge.setLocale(value),
     settings: {
       get: () => bridge.settings.get(),
@@ -14,6 +31,8 @@ export function createApi(bridge: Jellyree): Jellyree {
     update: (ids, patch) => bridge.update(toIpcData(ids), toIpcData(patch)),
     remove: (ids) => bridge.remove(toIpcData(ids)),
     url: (id) => bridge.url(id),
+    imageSource: (id) => bridge.imageSource(id),
+    exportImage: (id, data, format) => bridge.exportImage(id, data, format),
     share: (id) => bridge.share(id),
     download: (ids) => bridge.download(toIpcData(ids)),
     pickUpload: (folderId, folders, jobId) =>

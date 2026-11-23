@@ -1,3 +1,4 @@
+import { editorMessages } from "./editor-locales.mjs";
 export const messages = {
   "Мой диск": {
     en: "My drive",
@@ -1098,6 +1099,7 @@ Object.assign(messages, {
     es: "Puedes cambiar la conexión cuando finalicen las subidas.",
   },
 });
+Object.assign(messages, editorMessages);
 export const languages = ["en", "ru", "es"];
 export function normalizeLanguage(value) {
   return languages.includes(value) ? value : "en";

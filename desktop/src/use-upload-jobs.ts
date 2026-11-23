@@ -3,6 +3,16 @@ import type { Jellyree, Progress, UploadConflict, UploadResult } from "./types";
 
 export type UploadJob = {
   id: string;
+  wave: number;
+  cleared?: boolean;
+  files: {
+    index: number;
+    name: string;
+    state: NonNullable<Progress["fileState"]>;
+    sizeBytes?: number;
+    destination?: string;
+    error?: string;
+  }[];
   folders: boolean;
   names: string[];
   destination: string;
@@ -20,8 +30,47 @@ export type UploadJob = {
   result?: UploadResult;
   error?: string;
 };
-const finished = (job: UploadJob) =>
+export const uploadFinished = (job: UploadJob) =>
   ["complete", "issues", "failed", "canceled"].includes(job.state);
+const finished = uploadFinished;
+export function uploadSummary(jobs: UploadJob[]) {
+  const wave = Math.max(0, ...jobs.map((job) => job.wave));
+  const current = jobs.filter((job) => job.wave === wave);
+  let total = 0,
+    done = 0,
+    loaded = 0,
+    totalBytes = 0,
+    indeterminate = false;
+  for (const job of current) {
+    const p = job.progress;
+    total +=
+      p?.total ??
+      (job.names.length ||
+        (job.result
+          ? job.result.done +
+            (job.result.skipped || 0) +
+            job.result.failures.length
+          : 0));
+    done +=
+      p?.done ??
+      (job.result
+        ? job.result.done +
+          (job.result.skipped || 0) +
+          job.result.failures.length
+        : 0);
+    loaded += p?.loaded || 0;
+    totalBytes += p?.totalBytes || 0;
+    if (!finished(job) && p?.total === undefined) indeterminate = true;
+  }
+  const percent = uploadPercent({
+    kind: "upload",
+    done,
+    total,
+    loaded,
+    totalBytes,
+  });
+  return { total, done, loaded, totalBytes, percent, indeterminate };
+}
 export function uploadPercent(progress?: Progress) {
   if (!progress) return 0;
   const value = progress.totalBytes
@@ -39,14 +88,25 @@ export function useUploadJobs(
   const panelOpen = ref(false);
   const conflict = ref<UploadConflict | null>(null);
   const conflictOpen = ref(false);
+  let wave = 0;
   const pending = computed(
     () => jobs.value.filter((job) => !finished(job)).length,
   );
-  const hasFinished = computed(() => jobs.value.some(finished));
+  const hasFinished = computed(() =>
+    jobs.value.some(
+      (job) =>
+        (!job.cleared && finished(job)) ||
+        job.files.some((file) => file.state !== "uploading"),
+    ),
+  );
   const issues = computed(
     () =>
-      jobs.value.filter((job) => ["issues", "failed"].includes(job.state))
-        .length,
+      jobs.value.filter(
+        (job) =>
+          !job.cleared &&
+          (["issues", "failed"].includes(job.state) ||
+            job.files.some((file) => file.state === "failed")),
+      ).length,
   );
   const running = computed(() =>
     jobs.value.find((job) => job.state === "uploading"),
@@ -61,14 +121,21 @@ export function useUploadJobs(
     folderId: string | null,
     destination: string,
   ) {
+    if (!pending.value) {
+      wave++;
+      jobs.value = jobs.value.filter((job) => !job.cleared);
+    }
     const job = reactive<UploadJob>({
       id: crypto.randomUUID(),
+      wave,
+      files: [],
       folders,
       names: files?.map((file) => file.name) || [],
       destination,
       state: files ? "queued" : "selecting",
     });
     jobs.value.push(job);
+    panelOpen.value = true;
     try {
       const result = await (files
         ? bridge.dropUpload(files, folderId, job.id)
@@ -79,6 +146,12 @@ export function useUploadJobs(
         : result.failures.length || result.warnings?.length
           ? "issues"
           : "complete";
+      for (const file of job.files.filter((file) => file.state === "uploading"))
+        file.state = result.canceled
+          ? "canceled"
+          : result.failures.some((failure) => failure.name === file.name)
+            ? "failed"
+            : "uploaded";
     } catch (error) {
       job.error = (error as Error).message;
       job.state = "failed";
@@ -94,13 +167,29 @@ export function useUploadJobs(
     const job = findJob(value.jobId);
     if (!job || finished(job)) return;
     job.progress = value;
+    if (value.name) {
+      const index = value.fileIndex ?? value.done;
+      let file = job.files.find((entry) => entry.index === index);
+      if (!file) {
+        file = { index, name: value.name, state: "uploading" };
+        job.files.push(file);
+      }
+      Object.assign(file, {
+        name: value.name,
+        state: value.fileState || "uploading",
+        sizeBytes: value.sizeBytes,
+        destination: value.targetPath,
+        error: value.message,
+      });
+    }
     if (job.state !== "waiting") job.state = value.phase || "uploading";
   }
   function onConflict(value: UploadConflict) {
     const job = findJob(value.jobId);
     conflict.value = { ...value, jobId: job?.id || value.jobId };
     if (job) job.state = "waiting";
-    // The upload waits; the file browser keeps its focus and remains usable.
+    panelOpen.value = true;
+    conflictOpen.value = true;
   }
   function resolveConflict(id: string) {
     if (conflict.value?.id !== id) return;
@@ -110,7 +199,12 @@ export function useUploadJobs(
     conflictOpen.value = false;
   }
   function clearFinished() {
-    jobs.value = jobs.value.filter((job) => !finished(job));
+    if (!pending.value) jobs.value = jobs.value.filter((job) => !finished(job));
+    else
+      for (const job of jobs.value) {
+        if (finished(job)) job.cleared = true;
+        job.files = job.files.filter((file) => file.state === "uploading");
+      }
   }
   return {
     jobs,

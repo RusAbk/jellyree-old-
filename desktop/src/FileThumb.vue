@@ -1,10 +1,13 @@
 <script setup lang="ts">
 import { t } from "./i18n";
 import { computed, ref, onMounted, onBeforeUnmount, watch } from "vue";
-import type { DriveFile } from "./types";
+import type { DriveFile, ThumbnailEntry, ThumbnailRevision } from "./types";
 import { icon, imageStyle } from "./format";
 import { api } from "./api";
 import { runVideoPreview, videoDuration } from "./video-preview";
+import ProcessedImage from "./ProcessedImage.vue";
+import { needsImageProcessing } from "../electron/image-adjustments.mjs";
+import { thumbnailRevision, thumbnailBytes } from "./thumbnail";
 const props = defineProps<{
   file: DriveFile;
   compact?: boolean;
@@ -12,7 +15,15 @@ const props = defineProps<{
 }>();
 const isVideo = computed(() => props.file.mime_type.startsWith("video/"));
 const isImage = computed(() => props.file.mime_type.startsWith("image/"));
+const processed = computed(
+  () => isImage.value && needsImageProcessing(props.file.adjustments),
+);
 const dimensions = ref({ width: 0, height: 0 });
+const revision = computed(() => thumbnailRevision(props.file));
+const cachedEntry = ref<ThumbnailEntry | null>(null);
+let cacheEpoch: number | null = null,
+  blobUrl = "",
+  readable = false;
 const root = ref<HTMLElement>(),
   poster = ref<HTMLCanvasElement>(),
   decoder = ref<HTMLVideoElement>();
@@ -26,9 +37,10 @@ const durationLabel = computed(() => videoDuration(duration.value));
 const geometry = computed(() => {
   const { width, height } = dimensions.value;
   if (!width || !height || !props.natural) return null;
-  const angle = isVideo.value
-    ? 0
-    : ((props.file.adjustments.rotate ?? 0) * Math.PI) / 180;
+  const angle =
+    isVideo.value || processed.value
+      ? 0
+      : ((props.file.adjustments.rotate ?? 0) * Math.PI) / 180;
   return {
     width,
     height,
@@ -46,12 +58,14 @@ const frameStyle = computed(() =>
     : {},
 );
 const thumbnailStyle = computed(() => ({
-  ...(isVideo.value ? {} : imageStyle(props.file.adjustments)),
+  ...(isVideo.value || processed.value
+    ? {}
+    : imageStyle(props.file.adjustments)),
   ...(geometry.value
     ? {
         width: `${(geometry.value.width / geometry.value.boundsWidth) * 100}%`,
         height: `${(geometry.value.height / geometry.value.boundsHeight) * 100}%`,
-        transform: `translate(-50%, -50%) rotate(${isVideo.value ? 0 : (props.file.adjustments.rotate ?? 0)}deg)`,
+        transform: `translate(-50%, -50%) rotate(${isVideo.value || processed.value ? 0 : (props.file.adjustments.rotate ?? 0)}deg)`,
       }
     : {}),
 }));
@@ -63,7 +77,69 @@ let observer: IntersectionObserver | undefined,
 let finishVideo: ((error?: boolean) => void) | undefined;
 function loaded(event: Event) {
   const img = event.target as HTMLImageElement;
+  if (cachedEntry.value) return;
   dimensions.value = { width: img.naturalWidth, height: img.naturalHeight };
+  if (readable && !processed.value) {
+    const scale = Math.min(
+      1,
+      640 / Math.max(img.naturalWidth, img.naturalHeight),
+    );
+    const canvas = document.createElement("canvas");
+    canvas.width = Math.max(1, Math.round(img.naturalWidth * scale));
+    canvas.height = Math.max(1, Math.round(img.naturalHeight * scale));
+    canvas.getContext("2d")?.drawImage(img, 0, 0, canvas.width, canvas.height);
+    void saveThumbnail(canvas);
+  }
+}
+async function saveThumbnail(canvas: HTMLCanvasElement) {
+  if (cacheEpoch === null) return;
+  const generation = request,
+    epoch = cacheEpoch,
+    currentRevision = revision.value;
+  const metadata = { ...dimensions.value, duration: duration.value };
+  const data = await thumbnailBytes(canvas);
+  if (!data || disposed || generation !== request) return;
+  await api.thumbnails
+    .put(currentRevision, { ...metadata, data }, epoch)
+    .catch(() => {});
+}
+function releaseBlob() {
+  if (blobUrl) URL.revokeObjectURL(blobUrl);
+  blobUrl = "";
+}
+async function loadCached(current: () => boolean) {
+  if (typeof window.jellyree.thumbnails?.get !== "function") return false;
+  try {
+    const result = await api.thumbnails.get(revision.value);
+    if (!current()) return false;
+    cacheEpoch = result.epoch;
+    if (!result.entry) return false;
+    cachedEntry.value = result.entry;
+    dimensions.value = {
+      width: result.entry.width,
+      height: result.entry.height,
+    };
+    duration.value = result.entry.duration;
+    blobUrl = URL.createObjectURL(
+      new Blob([new Uint8Array(result.entry.data)], { type: "image/webp" }),
+    );
+    url.value = blobUrl;
+    if (isVideo.value) videoReady.value = true;
+    return true;
+  } catch {
+    return false;
+  }
+}
+async function sourceUrl(currentRevision: ThumbnailRevision) {
+  if (typeof window.jellyree.thumbnails?.source === "function") {
+    try {
+      const value = await api.thumbnails.source(currentRevision);
+      return { url: value, readable: true };
+    } catch {
+      /* The ordinary preview remains available if the cache is unavailable. */
+    }
+  }
+  return { url: await api.url(currentRevision.id), readable: false };
 }
 function releaseDecoder() {
   if (decoder.value) {
@@ -116,12 +192,11 @@ function capture(event: Event) {
     canvas.height = Math.max(1, Math.round(video.videoHeight * scale));
     const context = canvas.getContext("2d", { alpha: false });
     if (!context) throw new Error("Canvas is unavailable");
-    // Drawing a cross-origin video to a canvas is allowed without R2 CORS.
-    // Keep the pixels in the canvas; do not export/read the tainted canvas.
     context.drawImage(video, 0, 0, canvas.width, canvas.height);
     dimensions.value = { width: video.videoWidth, height: video.videoHeight };
     videoReady.value = true;
     failed.value = false;
+    if (readable) void saveThumbnail(canvas);
     finishVideo?.();
   } catch {
     finishVideo?.(true);
@@ -130,17 +205,30 @@ function capture(event: Event) {
 function videoError() {
   if (decoding.value) finishVideo?.(true);
 }
-async function fetchPreview() {
+function imageError() {
+  if (cachedEntry.value) {
+    releaseBlob();
+    cachedEntry.value = null;
+    url.value = "";
+    videoReady.value = false;
+    duration.value = 0;
+    void fetchPreview(false);
+  } else failed.value = true;
+}
+async function fetchPreview(useCache = true) {
   const generation = ++request;
   const current = () => !disposed && request === generation;
-  if (isVideo.value) pending.value = true;
+  pending.value = true;
   try {
+    if (useCache && (await loadCached(current))) return;
+    if (!current()) return;
     if (isVideo.value) {
       await runVideoPreview(async () => {
         if (!current() || !visible) return;
-        const value = await api.url(props.file.id);
+        const value = await sourceUrl(revision.value);
         if (!current() || !visible) return;
-        url.value = value;
+        readable = value.readable;
+        url.value = value.url;
         await new Promise<void>((resolve) => {
           let settled = false;
           const timer = setTimeout(() => finish(true), 20000);
@@ -160,8 +248,11 @@ async function fetchPreview() {
         });
       });
     } else {
-      const value = await api.url(props.file.id);
-      if (current()) url.value = value;
+      const value = await sourceUrl(revision.value);
+      if (current()) {
+        readable = value.readable;
+        url.value = value.url;
+      }
     }
   } catch {
     if (current()) failed.value = true;
@@ -170,10 +261,14 @@ async function fetchPreview() {
   }
 }
 watch(
-  () => props.file.object_key,
+  () => JSON.stringify(revision.value),
   () => {
     request++;
     finishVideo?.();
+    releaseBlob();
+    cachedEntry.value = null;
+    cacheEpoch = null;
+    readable = false;
     url.value = "";
     failed.value = false;
     videoReady.value = false;
@@ -207,6 +302,7 @@ onBeforeUnmount(() => {
   request++;
   finishVideo?.();
   releaseDecoder();
+  releaseBlob();
   observer?.disconnect();
 });
 </script>
@@ -225,18 +321,33 @@ onBeforeUnmount(() => {
     ]"
     :style="frameStyle"
   >
+    <ProcessedImage
+      v-if="processed && url && !failed && !cachedEntry"
+      :file="file"
+      :max-size="640"
+      :style="thumbnailStyle"
+      @loaded="dimensions = $event"
+      @error="imageError"
+      @rendered="saveThumbnail"
+    />
     <img
-      v-if="!isVideo && url && !failed"
+      v-else-if="(cachedEntry || !isVideo) && url && !failed"
       :src="url"
       :alt="file.name"
       :style="thumbnailStyle"
+      :class="{
+        'cached-thumbnail': !!cachedEntry,
+        'processed-image': processed,
+        'video-poster': isVideo,
+      }"
+      :crossorigin="!cachedEntry && readable ? 'anonymous' : undefined"
       loading="lazy"
       draggable="false"
       @load="loaded"
-      @error="failed = true"
+      @error="imageError"
     />
     <canvas
-      v-if="isVideo"
+      v-if="isVideo && !cachedEntry"
       v-show="videoReady"
       ref="poster"
       class="video-poster"
@@ -255,6 +366,7 @@ onBeforeUnmount(() => {
       ref="decoder"
       class="video-decoder"
       :src="url"
+      :crossorigin="readable ? 'anonymous' : undefined"
       muted
       playsinline
       preload="auto"

@@ -16,6 +16,17 @@ contextBridge.exposeInMainWorld("jellyree", {
   update: (ids, patch) => invoke("files:update", ids, patch),
   remove: (ids) => invoke("files:delete", ids),
   url: (id) => invoke("files:url", id),
+  imageSource: (id) => invoke("files:image-source", id),
+  thumbnails: {
+    get: (revision) => invoke("thumbnails:get", revision),
+    put: (revision, entry, epoch) =>
+      invoke("thumbnails:put", revision, entry, epoch),
+    source: (revision) => invoke("thumbnails:source", revision),
+    stats: () => invoke("thumbnails:stats"),
+    clear: () => invoke("thumbnails:clear"),
+  },
+  exportImage: (id, data, format) =>
+    invoke("files:export-image", id, data, format),
   share: (id) => invoke("files:share", id),
   download: (ids) => invoke("files:download", ids),
   pickUpload: (folderId, folders, jobId) =>

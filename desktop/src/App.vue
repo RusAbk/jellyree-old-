@@ -1,14 +1,10 @@
 <script setup lang="ts">
 import { t } from "./i18n";
-import {
-  computed,
-  onBeforeUnmount,
-  onMounted,
-  reactive,
-  ref,
-  watch,
-} from "vue";
+import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import FileThumb from "./FileThumb.vue";
+import PhotoEditor from "./PhotoEditor.vue";
+import ProcessedImage from "./ProcessedImage.vue";
+import { needsImageProcessing } from "../electron/image-adjustments.mjs";
 import SettingsPanel from "./SettingsPanel.vue";
 import ContextMenu, { type MenuItem } from "./ContextMenu.vue";
 import UploadConflictDialog from "./UploadConflictDialog.vue";
@@ -102,12 +98,6 @@ const preview = ref<DriveFile | null>(null),
   previewError = ref(""),
   previewLoading = ref(false),
   editing = ref(false);
-const adjustments = reactive({
-  brightness: 100,
-  contrast: 100,
-  saturation: 100,
-  rotate: 0,
-});
 const expanded = ref(new Set<string>());
 const modal = ref<{
   kind: string;
@@ -500,9 +490,13 @@ async function reload(more = false, background = false) {
     );
     if (preview.value) {
       const updated = files.value.find((f) => f.id === preview.value?.id);
-      if (updated && updated.object_key !== preview.value.object_key)
+      if (
+        updated &&
+        updated.object_key !== preview.value.object_key &&
+        !editing.value
+      )
         void openPreview(updated);
-      else if (updated) preview.value = updated;
+      else if (updated && !editing.value) preview.value = updated;
     }
   } catch (e) {
     if (id === generation && !background) error.value = (e as Error).message;
@@ -803,11 +797,6 @@ async function openPreview(file: DriveFile) {
   previewError.value = "";
   previewLoading.value = true;
   editing.value = false;
-  Object.assign(
-    adjustments,
-    { brightness: 100, contrast: 100, saturation: 100, rotate: 0 },
-    file.adjustments,
-  );
   try {
     const url = await api.url(file.id);
     if (id === previewGeneration) previewUrl.value = url;
@@ -824,20 +813,22 @@ function closePreview() {
   editing.value = false;
 }
 function nextPreview(direction: number) {
+  if (editing.value) return;
   const index = files.value.findIndex((f) => f.id === preview.value?.id),
     next = files.value[index + direction];
   if (next) void openPreview(next);
 }
-async function saveEdits() {
-  if (!preview.value) return;
-  if (
-    await patch(
-      [preview.value.id],
-      { adjustments: { ...adjustments } },
-      t("Коррекция сохранена. Оригинал сохранён в R2."),
-    )
-  )
-    editing.value = false;
+async function saveImageEdits(adjustments: Adjustments) {
+  if (!preview.value) return false;
+  const file = preview.value;
+  await api.update([file.id], {
+    adjustments,
+    expectedObjectKey: file.object_key,
+  });
+  preview.value = { ...file, adjustments };
+  notice.value = t("Коррекция сохранена. Оригинал сохранён в R2.");
+  requestUploadRefresh();
+  return true;
 }
 async function download(ids = selection.value) {
   await action(async () => {
@@ -894,7 +885,11 @@ function keydown(event: KeyboardEvent) {
     }
     return;
   }
-  if (settingsOpen.value || (uploadConflict.value && uploadConflictOpen.value))
+  if (
+    settingsOpen.value ||
+    editing.value ||
+    (uploadConflict.value && uploadConflictOpen.value)
+  )
     return;
   if (
     event.target instanceof HTMLElement &&
@@ -2002,6 +1997,7 @@ onBeforeUnmount(() => {
   <div
     v-if="preview"
     class="preview-overlay"
+    :inert="editing || undefined"
     role="dialog"
     aria-modal="true"
     :aria-label="t('Просмотр файла')"
@@ -2079,11 +2075,19 @@ onBeforeUnmount(() => {
           </button>
         </div>
         <template v-else-if="previewUrl"
-          ><img
-            v-if="preview.mime_type.startsWith('image/')"
+          ><ProcessedImage
+            v-if="
+              preview.mime_type.startsWith('image/') &&
+              needsImageProcessing(preview.adjustments)
+            "
+            :file="preview"
+            @error="previewError = $event.message"
+          />
+          <img
+            v-else-if="preview.mime_type.startsWith('image/')"
             :src="previewUrl"
             :alt="preview.name"
-            :style="imageStyle(editing ? adjustments : preview.adjustments)"
+            :style="imageStyle(preview.adjustments)"
             @error="
               previewError = t(
                 'Формат не поддерживается встроенным просмотром. Скачайте оригинал.',
@@ -2132,48 +2136,6 @@ onBeforeUnmount(() => {
       >
         <i aria-hidden="true" class="ri-arrow-right-s-line"></i>
       </button>
-      <aside v-if="editing" class="editor-panel">
-        <h3>{{ t("Коррекция фото") }}</h3>
-        <p>
-          {{
-            t("Настройки хранятся в D1. При скачивании вы получите оригинал.")
-          }}
-        </p>
-        <label
-          v-for="control in [
-            { key: 'brightness', label: t('Яркость'), min: 0, max: 200 },
-            { key: 'contrast', label: t('Контраст'), min: 0, max: 200 },
-            { key: 'saturation', label: t('Насыщенность'), min: 0, max: 200 },
-            { key: 'rotate', label: t('Поворот'), min: -180, max: 180 },
-          ]"
-          :key="control.key"
-          >{{ control.label
-          }}<span>{{ adjustments[control.key as keyof Adjustments] }}</span
-          ><input
-            v-model.number="
-              adjustments[control.key as keyof typeof adjustments]
-            "
-            type="range"
-            :min="control.min"
-            :max="control.max" /></label
-        ><button class="button primary" :disabled="busy" @click="saveEdits">
-          {{ t("Сохранить коррекцию") }}</button
-        ><button
-          class="button"
-          :disabled="busy"
-          @click="
-            Object.assign(adjustments, {
-              brightness: 100,
-              contrast: 100,
-              saturation: 100,
-              rotate: 0,
-            })
-          "
-        >
-          {{ t("Сбросить") }}
-        </button>
-        <p v-if="error" class="error">{{ error }}</p>
-      </aside>
     </div>
     <footer class="preview-footer">
       <span
@@ -2184,4 +2146,10 @@ onBeforeUnmount(() => {
       ><span>{{ t("← → для переключения · Esc для выхода") }}</span>
     </footer>
   </div>
+  <PhotoEditor
+    v-if="editing && preview"
+    :file="preview"
+    :save="saveImageEdits"
+    @close="editing = false"
+  />
 </template>

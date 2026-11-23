@@ -1,10 +1,30 @@
 <script setup lang="ts">
 import { t } from "./i18n";
-import { reactive, ref, computed } from "vue";
-import type { Connection, Settings } from "./types";
+import { reactive, ref, computed, onMounted } from "vue";
+import type { Connection, Settings, ThumbnailStats } from "./types";
+import { bytes } from "./format";
 import { api } from "./api";
 import LanguageSelect from "./LanguageSelect.vue";
 const props = defineProps<{ settings: Settings; locked?: boolean }>();
+const cache = ref<ThumbnailStats>(),
+  cacheBusy = ref(false),
+  cacheMessage = ref("");
+onMounted(async () => {
+  if (typeof window.jellyree.thumbnails?.stats === "function")
+    cache.value = await api.thumbnails.stats().catch(() => undefined);
+});
+async function clearThumbnails() {
+  cacheBusy.value = true;
+  cacheMessage.value = "";
+  try {
+    cache.value = await api.thumbnails.clear();
+    cacheMessage.value = t("Кэш миниатюр очищен.");
+  } catch (error) {
+    cacheMessage.value = (error as Error).message;
+  } finally {
+    cacheBusy.value = false;
+  }
+}
 const emit = defineEmits<{
   close: [];
   saved: [settings: Settings];
@@ -201,6 +221,35 @@ async function disconnect() {
           </button>
         </footer>
       </form>
+      <section v-if="cache" class="thumbnail-cache-settings">
+        <h3>{{ t("Кэш миниатюр") }}</h3>
+        <p class="muted">
+          {{
+            t("{0} превью · {1} из {2}", {
+              "0": cache.count,
+              "1": bytes(cache.bytes),
+              "2": bytes(cache.maxBytes),
+            })
+          }}
+        </p>
+        <p class="muted">
+          {{
+            t(
+              "Превью хранятся на этом устройстве. Старые удаляются автоматически при заполнении кэша.",
+            )
+          }}
+        </p>
+        <button
+          class="button"
+          :disabled="cacheBusy || busy"
+          @click="clearThumbnails"
+        >
+          {{ cacheBusy ? t("Очистка…") : t("Очистить кэш миниатюр") }}
+        </button>
+        <p v-if="cacheMessage" role="status" class="muted">
+          {{ cacheMessage }}
+        </p>
+      </section>
       <div v-if="settings.configured" class="disconnect">
         <template v-if="forget"
           ><span>{{

@@ -1,11 +1,64 @@
 <script setup lang="ts">
+import { computed, ref, watch } from "vue";
 import { t } from "./i18n";
 import type { UploadJob } from "./use-upload-jobs";
-import { uploadPercent } from "./use-upload-jobs";
+import {
+  uploadPercent,
+  uploadFinished,
+  uploadSummary,
+} from "./use-upload-jobs";
 import { bytes } from "./format";
-defineProps<{ jobs: UploadJob[]; pending: number; hasFinished: boolean }>();
+const props = defineProps<{
+  jobs: UploadJob[];
+  pending: number;
+  hasFinished: boolean;
+}>();
 defineEmits<{ close: []; clear: []; conflict: [] }>();
-function label(state: UploadJob["state"]) {
+const tab = ref(props.pending ? "active" : "completed"),
+  limit = ref(150);
+const summary = computed(() => uploadSummary(props.jobs));
+const active = computed(() => props.jobs.filter((job) => !uploadFinished(job)));
+const completed = computed(() =>
+  props.jobs
+    .flatMap((job) => {
+      if (job.cleared) return [];
+      const files = job.files
+        .filter((file) => file.state !== "uploading")
+        .map((file) => ({ key: `${job.id}:${file.index}`, job, file }));
+      return [
+        ...files,
+        ...(uploadFinished(job) &&
+        (!files.length ||
+          job.result?.failures.length ||
+          job.result?.warnings?.length ||
+          job.error)
+          ? [{ key: job.id, job, file: undefined }]
+          : []),
+      ];
+    })
+    .reverse(),
+);
+watch(
+  () => props.jobs[props.jobs.length - 1]?.id,
+  (id) => {
+    if (!id) return;
+    tab.value = "active";
+    limit.value = 150;
+  },
+);
+watch(
+  () => props.jobs.find((job) => job.state === "waiting")?.id,
+  (id) => {
+    if (id) tab.value = "active";
+  },
+);
+watch(
+  () => props.pending,
+  (value, previous) => {
+    if (!value && previous) tab.value = "completed";
+  },
+);
+function label(state: UploadJob["state"] | "uploaded" | "skipped") {
   return {
     selecting: t("Выбор файлов…"),
     queued: t("В очереди"),
@@ -13,10 +66,22 @@ function label(state: UploadJob["state"]) {
     uploading: t("Загрузка"),
     waiting: t("Нужно решить совпадение имён"),
     complete: t("Загрузка завершена"),
+    uploaded: t("Загружен"),
+    skipped: t("Пропущен"),
     issues: t("Завершено с замечаниями"),
     failed: t("Ошибка загрузки"),
     canceled: t("Загрузка отменена"),
   }[state];
+}
+function title(job: UploadJob) {
+  return (
+    job.progress?.name ||
+    (job.names.length === 1
+      ? job.names[0]
+      : job.folders
+        ? t("Загрузить папку")
+        : t("Загрузить файлы"))
+  );
 }
 </script>
 <template>
@@ -28,125 +93,239 @@ function label(state: UploadJob["state"]) {
   >
     <header>
       <div>
-        <strong>{{ t("Загрузки") }}</strong><small v-if="pending">{{
-          t("Активных задач: {0}", { "0": pending })
-        }}</small
-        ><small v-else>{{ t("Все загрузки завершены") }}</small>
+        <strong>{{ t("Загрузки") }}</strong><small>{{
+          pending
+            ? t("Активных задач: {0}", { "0": pending })
+            : t("Все загрузки завершены")
+        }}</small>
       </div>
       <button
-        class="icon-button"
+        class="icon-button small"
         :aria-label="t('Скрыть загрузки')"
         @click="$emit('close')"
       >
         <i aria-hidden="true" class="ri-subtract-line"></i>
       </button>
     </header>
-    <div class="upload-jobs">
-      <p v-if="!jobs.length" class="muted">{{ t("Загрузок пока нет") }}</p>
+    <div v-if="jobs.length" class="upload-overall" role="status">
+      <div>
+        <span
+          >{{ t("Общий прогресс")
+          }}<template v-if="summary.total">
+            · {{ summary.done }} / {{ summary.total }}</template
+          ></span
+        ><strong>{{
+          summary.indeterminate ? t("Подготовка…") : `${summary.percent}%`
+        }}</strong>
+      </div>
+      <progress
+        :value="summary.indeterminate ? undefined : summary.percent"
+        max="100"
+        :aria-label="t('Общий прогресс загрузки')"
+      ></progress
+      ><small v-if="summary.totalBytes"
+        >{{ bytes(summary.loaded) }} / {{ bytes(summary.totalBytes) }}</small
+      >
+    </div>
+    <div
+      class="upload-tabs"
+      role="tablist"
+      :aria-label="t('Категории загрузок')"
+    >
+      <button
+        id="uploads-active-tab"
+        role="tab"
+        :aria-selected="tab === 'active'"
+        aria-controls="uploads-active"
+        @click="
+          tab = 'active';
+          limit = 150;
+        "
+      >
+        {{ t("В работе") }} <span>{{ active.length }}</span></button
+      ><button
+        id="uploads-completed-tab"
+        role="tab"
+        :aria-selected="tab === 'completed'"
+        aria-controls="uploads-completed"
+        @click="
+          tab = 'completed';
+          limit = 150;
+        "
+      >
+        {{ t("Загруженные") }} <span>{{ completed.length }}</span>
+      </button>
+    </div>
+    <div
+      v-if="tab === 'active'"
+      id="uploads-active"
+      class="upload-jobs"
+      role="tabpanel"
+      aria-labelledby="uploads-active-tab"
+      tabindex="0"
+    >
+      <p v-if="!active.length" class="upload-empty">
+        {{ t("Нет активных загрузок") }}
+      </p>
       <article
-        v-for="job in jobs"
+        v-for="job in active"
         :key="job.id"
-        class="upload-job"
+        class="upload-job compact-upload"
         :data-state="job.state"
       >
-        <div class="upload-job-title">
-          <i
-            aria-hidden="true"
-            :class="
-              job.folders ? 'ri-folder-upload-line' : 'ri-upload-cloud-2-line'
-            "
-          ></i
-          ><strong>{{
-            job.names.length === 1
-              ? job.names[0]
-              : job.folders
-                ? t("Загрузить папку")
-                : t("Загрузить файлы")
-          }}</strong>
-        </div>
-        <small>{{
-          t("Папка: {0}", { "0": job.destination || t("Мой диск") })
-        }}</small>
-        <p
-          class="upload-job-status"
-          :class="{
-            error: job.state === 'failed',
-            success: job.state === 'complete',
-          }"
-        >
-          {{ label(job.state)
-          }}<span
-            v-if="
-              job.progress?.total &&
-              ['uploading', 'waiting'].includes(job.state)
-            "
-          >
-            · {{ job.progress.done }} / {{ job.progress.total }}</span
-          >
-        </p>
-        <template v-if="job.state === 'uploading' && job.progress">
-          <div class="upload-current">
-            <span>{{ job.progress.name }}</span><span
-              >{{ uploadPercent(job.progress) }}%</span
-            >
+        <i
+          aria-hidden="true"
+          :class="
+            job.state === 'waiting'
+              ? 'ri-error-warning-line'
+              : job.state === 'uploading'
+                ? 'ri-loader-4-line spinning'
+                : 'ri-time-line'
+          "
+        ></i>
+        <div class="upload-job-content">
+          <div class="upload-job-heading">
+            <strong :title="title(job)">{{ title(job) }}</strong><span>{{
+              job.progress && job.state === "uploading"
+                ? `${uploadPercent(job.progress)}%`
+                : label(job.state)
+            }}</span>
           </div>
-          <progress
+          <small :title="job.destination || t('Мой диск')"
+            >{{ job.destination || t("Мой диск")
+            }}<template v-if="job.progress?.total">
+              · {{ job.progress.done }} / {{ job.progress.total }}</template
+            ></small
+          ><progress
+            v-if="job.state === 'uploading' && job.progress"
             :value="uploadPercent(job.progress)"
             max="100"
             :aria-label="t('Прогресс загрузки')"
-          ></progress>
-          <small v-if="job.progress.totalBytes"
-            >{{ bytes(job.progress.loaded || 0) }} /
-            {{ bytes(job.progress.totalBytes) }}</small
+          ></progress
+          ><button
+            v-if="job.state === 'waiting'"
+            class="text-button"
+            @click="$emit('conflict')"
           >
-        </template>
-        <button
-          v-if="job.state === 'waiting'"
-          class="button primary"
-          @click="$emit('conflict')"
-        >
-          {{ t("Разобрать совпадение") }}
-        </button>
-        <p v-if="job.result" class="upload-result">
-          {{
-            t("Загружено файлов: {0}. Пропущено: {1}.", {
-              "0": job.result.done,
-              "1": job.result.skipped || 0,
-            })
-          }}
-        </p>
-        <p v-if="job.error" class="error">{{ job.error }}</p>
-        <details
-          v-if="
-            job.result &&
-            (job.result.failures.length || job.result.warnings?.length)
+            {{ t("Разобрать совпадение") }}
+          </button>
+        </div>
+      </article>
+    </div>
+    <div
+      v-else
+      id="uploads-completed"
+      class="upload-jobs"
+      role="tabpanel"
+      aria-labelledby="uploads-completed-tab"
+      tabindex="0"
+    >
+      <p v-if="!completed.length" class="upload-empty">
+        {{ t("Завершённых загрузок пока нет") }}
+      </p>
+      <article
+        v-for="row in completed.slice(0, limit)"
+        :key="row.key"
+        class="upload-job compact-upload"
+        :data-state="
+          row.file
+            ? row.file.state === 'uploaded'
+              ? 'complete'
+              : row.file.state === 'failed'
+                ? 'issues'
+                : row.file.state
+            : row.job.state
+        "
+      >
+        <i
+          aria-hidden="true"
+          :class="
+            row.file?.state === 'failed' ||
+            (!row.file && ['issues', 'failed'].includes(row.job.state))
+              ? 'ri-error-warning-line'
+              : row.file?.state === 'skipped' || row.job.state === 'canceled'
+                ? 'ri-forbid-line'
+                : 'ri-checkbox-circle-line'
           "
-        >
-          <summary>
-            {{ t("Подробности")
-            }}<template v-if="job.result.failures.length">
+        ></i>
+        <div class="upload-job-content">
+          <div class="upload-job-heading">
+            <strong
+              :title="
+                row.file?.name ||
+                (row.job.files.length ? t('Итоги загрузки') : title(row.job))
+              "
+              >{{
+                row.file?.name ||
+                (row.job.files.length ? t("Итоги загрузки") : title(row.job))
+              }}</strong><span>{{
+              label(row.file?.state || row.job.state)
+            }}</span>
+          </div>
+          <small
+            :title="
+              row.file?.destination || row.job.destination || t('Мой диск')
+            "
+            >{{ row.file?.destination || row.job.destination || t("Мой диск")
+            }}<template v-if="row.file?.sizeBytes">
+              · {{ bytes(row.file.sizeBytes) }}</template
+            ><template v-else-if="row.job.result">
               ·
               {{
-                t("Ошибок: {0}", { "0": job.result.failures.length })
+                t("Загружено: {0}, пропущено: {1}", {
+                  "0": row.job.result.done,
+                  "1": row.job.result.skipped || 0,
+                })
               }}</template
-            >
-          </summary>
+            ></small
+          >
           <p
-            v-for="(failure, index) in job.result.failures"
-            :key="index"
+            v-if="row.file?.error || (!row.file && row.job.error)"
             class="error"
           >
-            {{ failure.name }}: {{ failure.message }}
+            {{ row.file?.error || row.job.error }}
           </p>
-          <p
-            v-for="(warning, index) in job.result.warnings"
-            :key="index"
-            class="muted"
+          <details
+            v-if="
+              !row.file &&
+              row.job.result &&
+              (row.job.result.failures.length ||
+                row.job.result.warnings?.length)
+            "
           >
-            {{ warning }}
-          </p>
-        </details>
+            <summary>
+              {{ t("Подробности")
+              }}<template v-if="row.job.result.failures.length">
+                ·
+                {{
+                  t("Ошибок: {0}", { "0": row.job.result.failures.length })
+                }}</template
+              >
+            </summary>
+            <p
+              v-for="(failure, index) in row.job.result.failures"
+              :key="index"
+              class="error"
+            >
+              {{ failure.name }}: {{ failure.message }}
+            </p>
+            <p
+              v-for="(warning, index) in row.job.result.warnings"
+              :key="index"
+              class="muted"
+            >
+              {{ warning }}
+            </p>
+          </details>
+        </div>
       </article>
+      <button
+        v-if="completed.length > limit"
+        class="text-button upload-show-more"
+        @click="limit += 150"
+      >
+        {{ t("Показать ещё") }}
+      </button>
     </div>
     <footer v-if="hasFinished">
       <button class="text-button" @click="$emit('clear')">

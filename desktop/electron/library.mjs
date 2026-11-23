@@ -16,6 +16,7 @@ import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import mime from "mime";
 import { D1 } from "./d1.mjs";
 import { libraryId } from "./config.mjs";
+import { normalizeImageAdjustments } from "./image-adjustments.mjs";
 
 const schema = await readFile(new URL("./schema.sql", import.meta.url), "utf8");
 export function cleanName(value) {
@@ -35,19 +36,11 @@ export function cleanName(value) {
   return name;
 }
 export function normalizeAdjustments(input) {
-  return Object.fromEntries(
-    Object.entries({
-      brightness: [0, 200, 100],
-      contrast: [0, 200, 100],
-      saturation: [0, 200, 100],
-      rotate: [-180, 180, 0],
-    }).map(([key, [min, max, fallback]]) => {
-      const value = Number(input?.[key] ?? fallback);
-      if (!Number.isFinite(value) || value < min || value > max)
-        throw new Error(t("Некорректные параметры изображения."));
-      return [key, value];
-    }),
-  );
+  try {
+    return normalizeImageAdjustments(input);
+  } catch {
+    throw new Error(t("Некорректные параметры изображения."));
+  }
 }
 export function fileRow(row) {
   return {
@@ -235,6 +228,14 @@ export class Library {
   async updateFiles(ids, patch) {
     if (!Array.isArray(ids) || !ids.length || ids.length > 1000)
       throw new Error(t("Выберите от 1 до 1000 файлов."));
+    const guarded = patch.expectedObjectKey !== undefined;
+    if (
+      guarded &&
+      (ids.length !== 1 ||
+        typeof patch.expectedObjectKey !== "string" ||
+        !("adjustments" in patch))
+    )
+      throw new Error(t("Некорректные параметры изображения."));
     const sets = ["updated_at = ?"],
       params = [new Date().toISOString()];
     if ("name" in patch) {
@@ -270,10 +271,21 @@ export class Library {
     // Small batches stay below D1's bound parameter limit.
     for (let offset = 0; offset < ids.length; offset += 50) {
       const part = ids.slice(offset, offset + 50);
-      await this.db.query(
-        `UPDATE jr_files SET ${sets.join(", ")} WHERE library_id = ? AND id IN (${part.map(() => "?").join(",")})`,
-        [...params, this.id, ...part],
+      const updated = await this.db.query(
+        `UPDATE jr_files SET ${sets.join(", ")} WHERE library_id = ? AND id IN (${part.map(() => "?").join(",")})${guarded ? " AND object_key = ? AND trashed_at IS NULL RETURNING id" : ""}`,
+        [
+          ...params,
+          this.id,
+          ...part,
+          ...(guarded ? [patch.expectedObjectKey] : []),
+        ],
       );
+      if (guarded && updated.length !== 1)
+        throw new Error(
+          t(
+            "Изображение изменилось. Откройте его заново перед сохранением правок.",
+          ),
+        );
     }
   }
   async url(id, download = false) {
@@ -292,6 +304,40 @@ export class Library {
       }),
       { expiresIn: 3600 },
     );
+  }
+  async imageSource(id) {
+    const file = await this.file(id),
+      limit = 64 * 1024 * 1024;
+    if (!file.mime_type.startsWith("image/"))
+      throw new Error(t("Выберите изображение."));
+    if (file.size_bytes > limit)
+      throw new Error(t("Для редактирования доступны изображения до 64 МБ."));
+    const result = await this.s3.send(
+      new GetObjectCommand({
+        Bucket: this.config.bucket,
+        Key: file.object_key,
+      }),
+    );
+    const chunks = [];
+    let length = 0;
+    try {
+      if (result.ContentLength > limit)
+        throw new Error(t("Для редактирования доступны изображения до 64 МБ."));
+      for await (const chunk of result.Body) {
+        length += chunk.length;
+        if (length > limit)
+          throw new Error(
+            t("Для редактирования доступны изображения до 64 МБ."),
+          );
+        chunks.push(chunk);
+      }
+      return {
+        data: new Uint8Array(Buffer.concat(chunks)),
+        mimeType: file.mime_type,
+      };
+    } finally {
+      result.Body?.destroy?.();
+    }
   }
   async download(id, destination) {
     const file = await this.file(id);
@@ -539,9 +585,12 @@ export class Library {
       policy = null,
       canceled = false;
     const totalBytes = jobs.reduce((sum, job) => sum + job.size, 0);
+    report({ done: 0, total: jobs.length, loaded: 0, totalBytes });
     for (const job of jobs) {
       let name = job.name,
-        replaceId;
+        replaceId,
+        fileState = "failed",
+        fileMessage;
       try {
         const matches = await existingFile(job.folder, name);
         if (matches.length) {
@@ -596,10 +645,12 @@ export class Library {
           remaining = Math.max(0, remaining - 1);
           if (decision.action === "cancel") {
             canceled = true;
+            fileState = "canceled";
             break;
           }
           if (decision.action === "skip") {
             skipped++;
+            fileState = "skipped";
             continue;
           }
           if (decision.action === "rename") {
@@ -619,12 +670,18 @@ export class Library {
               loaded: bytes + p.loaded,
               totalBytes,
               failures: failures.length,
+              fileIndex: processed,
+              fileState: "uploading",
+              sizeBytes: job.size,
+              targetPath: folderPath(job.folder),
             }),
           { name, replaceId },
         );
         done++;
+        fileState = "uploaded";
         if (result.warning) warnings.push(result.warning);
       } catch (error) {
+        fileMessage = error.message;
         failures.push({ name, message: error.message });
       } finally {
         processed++;
@@ -636,6 +693,11 @@ export class Library {
           loaded: bytes,
           totalBytes,
           failures: failures.length,
+          fileIndex: processed - 1,
+          fileState,
+          sizeBytes: job.size,
+          targetPath: folderPath(job.folder),
+          message: fileMessage,
         });
       }
     }
