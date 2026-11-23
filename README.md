@@ -60,3 +60,15 @@ npm run dev:web
 - UI: http://localhost:5173
 - Uploaded files are stored in Cloudflare R2 (S3-compatible)
 - `server/uploads` is used only as temporary upload buffer
+
+## Standalone desktop client (Electron, R2 + D1)
+
+A separate application lives in [`desktop/`](desktop/README.md). It connects directly to your Cloudflare R2 bucket and D1 database using credentials entered in Settings, without running this project's NestJS server or a Worker.
+
+```bash
+cd desktop
+npm ci
+npm run dev
+```
+
+See [desktop setup, features, migration scope and packaging](desktop/README.md).

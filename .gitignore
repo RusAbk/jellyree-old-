@@ -51,3 +51,6 @@ server/uploads/
 .idea/
 *.swp
 *.swo
+
+# Standalone Electron artifacts
+desktop/release/
