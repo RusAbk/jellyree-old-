@@ -148,6 +148,16 @@ export interface Jellyree {
   remove(ids: string[]): Promise<{ done: number }>;
   url(id: string): Promise<string>;
   imageSource(id: string): Promise<{ data: Uint8Array; mimeType: string }>;
+  documentSource(
+    id: string,
+    expectedObjectKey: string,
+  ): Promise<{ data: Uint8Array; kind: "pdf" | "text" | "markdown" }>;
+  saveTextDocument(
+    id: string,
+    expectedObjectKey: string,
+    data: Uint8Array,
+  ): Promise<{ file: DriveFile; warning?: string }>;
+  setDocumentDraft(owner: string, dirty: boolean): Promise<void>;
   videoSource(revision: ThumbnailRevision): Promise<string>;
   saveVideoFrame(
     id: string,

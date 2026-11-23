@@ -17,6 +17,11 @@ contextBridge.exposeInMainWorld("jellyree", {
   remove: (ids) => invoke("files:delete", ids),
   url: (id) => invoke("files:url", id),
   imageSource: (id) => invoke("files:image-source", id),
+  documentSource: (id, expectedObjectKey) =>
+    invoke("files:document-source", id, expectedObjectKey),
+  saveTextDocument: (id, expectedObjectKey, data) =>
+    invoke("files:save-text-document", id, expectedObjectKey, data),
+  setDocumentDraft: (owner, dirty) => invoke("documents:draft", owner, dirty),
   videoSource: (revision) => invoke("files:video-source", revision),
   saveVideoFrame: (id, expectedObjectKey, timestamp, data) =>
     invoke("files:save-video-frame", id, expectedObjectKey, timestamp, data),

@@ -93,6 +93,215 @@ function fixture(t, overrides = {}) {
   return { library, sqlite, requests, deleted, insert, db };
 }
 
+test("document source validates type, library scope, version and declared size before reading R2", async (t) => {
+  const { library, insert } = fixture(t);
+  await library.initialize();
+  insert("text", { name: "Notes.TXT", mime: "application/octet-stream" });
+  insert("md", { name: "readme.md", mime: "text/plain" });
+  insert("pdf", { name: "guide.pdf", mime: "application/pdf" });
+  insert("foreign", {
+    name: "secret.txt",
+    mime: "text/plain",
+    scope: "another-library",
+  });
+  insert("huge", {
+    name: "huge.txt",
+    mime: "text/plain",
+    size: 5 * 1024 * 1024,
+  });
+  insert("image");
+  const reads = [];
+  let closed = 0;
+  library.s3.send = async (command) => {
+    reads.push(command.input.Key);
+    return {
+      ContentLength: 5,
+      Body: Object.assign(
+        (async function* () {
+          yield Buffer.from("hello");
+        })(),
+        {
+          destroy() {
+            closed++;
+          },
+        },
+      ),
+    };
+  };
+  for (const [id, kind] of [
+    ["text", "text"],
+    ["md", "markdown"],
+    ["pdf", "pdf"],
+  ]) {
+    const result = await library.documentSource(id, `objects/${id}`);
+    assert.equal(result.kind, kind);
+    assert.equal(Buffer.from(result.data).toString(), "hello");
+  }
+  assert.equal(closed, 3);
+  for (const [id, key] of [
+    ["foreign", "objects/foreign"],
+    ["huge", "objects/huge"],
+    ["text", "old-key"],
+    ["image", "objects/image"],
+  ])
+    await assert.rejects(library.documentSource(id, key));
+  assert.equal(reads.length, 3);
+});
+test("document source bounds streamed bytes even when R2 reports an incorrect length and destroys the body", async (t) => {
+  const { library, insert } = fixture(t);
+  await library.initialize();
+  insert("text", { name: "test.txt", mime: "text/plain" });
+  let destroyed = false;
+  library.s3.send = async () => ({
+    ContentLength: 1,
+    Body: Object.assign(
+      (async function* () {
+        yield Buffer.alloc(4 * 1024 * 1024);
+        yield Buffer.from("too much");
+      })(),
+      {
+        destroy() {
+          destroyed = true;
+        },
+      },
+    ),
+  });
+  await assert.rejects(
+    library.documentSource("text", "objects/text"),
+    /до 4 МБ/,
+  );
+  assert.equal(destroyed, true);
+});
+test("text editor saves a new R2 version in place, preserves metadata and cleans up temporary bytes", async (t) => {
+  const uploads = [],
+    paths = [];
+  const { library, insert, deleted } = fixture(t, {
+    createUpload: ({ params }) => ({
+      on() {},
+      async done() {
+        paths.push(params.Body.path);
+        const chunks = [];
+        for await (const chunk of params.Body) chunks.push(chunk);
+        uploads.push({ ...params, Body: Buffer.concat(chunks) });
+      },
+    }),
+  });
+  await library.initialize();
+  const folder = await library.createFolder("Docs");
+  insert("doc", {
+    name: "Readme.MD",
+    mime: "text/plain",
+    folder: folder.id,
+    favorite: 1,
+    tags: ["keep"],
+  });
+  const data = new TextEncoder().encode("# Привет\r\nEspaña\r\n");
+  const { file } = await library.saveTextDocument("doc", "objects/doc", data);
+  assert.equal(file.id, "doc");
+  assert.equal(file.name, "Readme.MD");
+  assert.equal(file.folder_id, folder.id);
+  assert.equal(file.favorite, true);
+  assert.deepEqual(file.tags, ["keep"]);
+  assert.equal(file.created_at, "2026-01-01");
+  assert.equal(file.mime_type, "text/markdown");
+  assert.equal(file.size_bytes, data.length);
+  assert.notEqual(file.object_key, "objects/doc");
+  assert.deepEqual(uploads[0].Body, Buffer.from(data));
+  assert.equal(uploads[0].ContentType, "text/markdown");
+  assert.deepEqual(deleted, ["objects/doc"]);
+  const second = await library.saveTextDocument(
+    "doc",
+    file.object_key,
+    new Uint8Array(),
+  );
+  assert.equal(second.file.size_bytes, 0);
+  for (const source of paths)
+    await assert.rejects(stat(source), { code: "ENOENT" });
+});
+test("text editor refuses stale, foreign, unsupported or invalid content without uploading", async (t) => {
+  let count = 0;
+  const { library, insert } = fixture(t, {
+    createUpload: () => {
+      count++;
+      throw new Error("should not upload");
+    },
+  });
+  await library.initialize();
+  insert("text", { name: "notes.txt", mime: "text/plain" });
+  insert("foreign", { scope: "other", name: "notes.txt", mime: "text/plain" });
+  insert("pdf", { name: "guide.pdf", mime: "application/pdf" });
+  const data = new TextEncoder().encode("changed");
+  for (const [id, key, bytes] of [
+    ["text", "old-version", data],
+    ["foreign", "objects/foreign", data],
+    ["pdf", "objects/pdf", data],
+    ["text", "objects/text", new Uint8Array([0xff])],
+    ["text", "objects/text", new Uint8Array(4 * 1024 * 1024 + 1)],
+  ])
+    await assert.rejects(library.saveTextDocument(id, key, bytes));
+  assert.equal(count, 0);
+});
+test("text editor checks the expected version again before upload, closing the lookup race", async (t) => {
+  let uploads = 0;
+  const { library, insert, sqlite, deleted } = fixture(t, {
+    createUpload: () => {
+      uploads++;
+      throw new Error("unexpected upload");
+    },
+  });
+  await library.initialize();
+  insert("text", { name: "notes.txt", mime: "text/plain" });
+  const file = library.file.bind(library);
+  let reads = 0;
+  library.file = async (id) => {
+    if (++reads === 2)
+      sqlite
+        .prepare("UPDATE jr_files SET object_key = ? WHERE id = ?")
+        .run("other-version", id);
+    return file(id);
+  };
+  await assert.rejects(
+    library.saveTextDocument(
+      "text",
+      "objects/text",
+      new TextEncoder().encode("changes"),
+    ),
+    /Файл изменился/,
+  );
+  assert.equal(uploads, 0);
+  assert.deepEqual(deleted, []);
+  assert.equal((await library.file("text")).object_key, "other-version");
+});
+test("text editor rolls back its upload on a simultaneous write and keeps the winning version intact", async (t) => {
+  let uploaded, temporary;
+  const { library, insert, sqlite, deleted } = fixture(t, {
+    createUpload: ({ params }) => ({
+      on() {},
+      async done() {
+        uploaded = params.Key;
+        temporary = params.Body.path;
+        for await (const _chunk of params.Body) {
+        }
+        sqlite
+          .prepare("UPDATE jr_files SET object_key = ? WHERE id = ?")
+          .run("other-version", "text");
+      },
+    }),
+  });
+  await library.initialize();
+  insert("text", { name: "notes.txt", mime: "text/plain" });
+  await assert.rejects(
+    library.saveTextDocument(
+      "text",
+      "objects/text",
+      new TextEncoder().encode("changes"),
+    ),
+    /Файл изменился/,
+  );
+  assert.equal((await library.file("text")).object_key, "other-version");
+  assert.deepEqual(deleted, [uploaded]);
+  await assert.rejects(stat(temporary), { code: "ENOENT" });
+});
 test("D1 checks HTTP, envelope and individual query errors without leaking the token", async () => {
   for (const response of [
     Response.json(

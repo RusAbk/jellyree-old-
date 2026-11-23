@@ -1,4 +1,5 @@
 import { editorMessages } from "./editor-locales.mjs";
+import { documentMessages } from "./document-locales.mjs";
 export const messages = {
   "Мой диск": {
     en: "My drive",
@@ -1100,6 +1101,7 @@ Object.assign(messages, {
   },
 });
 Object.assign(messages, editorMessages);
+Object.assign(messages, documentMessages);
 export const languages = ["en", "ru", "es"];
 export function normalizeLanguage(value) {
   return languages.includes(value) ? value : "en";

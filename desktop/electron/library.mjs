@@ -26,6 +26,7 @@ import { D1 } from "./d1.mjs";
 import { libraryId } from "./config.mjs";
 import { normalizeImageAdjustments } from "./image-adjustments.mjs";
 import { validateVideoFrame, videoFrameName } from "./video-frames.mjs";
+import { documentKind, documentLimits } from "./document-preview.mjs";
 
 const schema = await readFile(new URL("./schema.sql", import.meta.url), "utf8");
 export function cleanName(value) {
@@ -314,6 +315,71 @@ export class Library {
       { expiresIn: 3600 },
     );
   }
+  async documentSource(id, expectedObjectKey) {
+    const file = await this.file(id),
+      kind = documentKind(file);
+    if (!kind) throw new Error(t("Выберите PDF, TXT или Markdown."));
+    if (file.object_key !== expectedObjectKey)
+      throw new Error(t("Документ изменился. Откройте его заново."));
+    const limit = documentLimits[kind];
+    const tooLarge = () =>
+      new Error(
+        t("Для просмотра доступны PDF до 64 МБ и текстовые файлы до 4 МБ."),
+      );
+    if (file.size_bytes > limit) throw tooLarge();
+    const result = await this.s3.send(
+      new GetObjectCommand({
+        Bucket: this.config.bucket,
+        Key: file.object_key,
+      }),
+    );
+    const chunks = [];
+    let length = 0;
+    try {
+      if (result.ContentLength > limit) throw tooLarge();
+      for await (const chunk of result.Body) {
+        length += chunk.length;
+        if (length > limit) throw tooLarge();
+        chunks.push(chunk);
+      }
+      return { data: new Uint8Array(Buffer.concat(chunks)), kind };
+    } finally {
+      result.Body?.destroy?.();
+    }
+  }
+  async saveTextDocument(id, expectedObjectKey, data) {
+    if (!(data instanceof Uint8Array) || data.length > documentLimits.text)
+      throw new Error(
+        t("Для редактирования доступны текстовые файлы до 4 МБ."),
+      );
+    try {
+      new TextDecoder("utf-8", { fatal: true }).decode(data);
+    } catch {
+      throw new Error(t("Документ должен быть в кодировке UTF-8."));
+    }
+    const file = await this.file(id),
+      kind = documentKind(file);
+    if (!["text", "markdown"].includes(kind))
+      throw new Error(t("Редактирование доступно только для TXT и Markdown."));
+    if (file.object_key !== expectedObjectKey)
+      throw new Error(t("Документ изменился. Откройте его заново."));
+    const directory = await mkdtemp(
+      path.join(os.tmpdir(), "jellyree-document-"),
+    );
+    try {
+      const source = path.join(directory, "document.txt");
+      await writeFile(source, data, { flag: "wx", mode: 0o600 });
+      const result = await this.uploadFile(source, file.folder_id, () => {}, {
+        name: file.name,
+        replaceId: id,
+        expectedObjectKey,
+        mimeType: kind === "markdown" ? "text/markdown" : "text/plain",
+      });
+      return { file: await this.file(id), warning: result.warning };
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  }
   async imageSource(id) {
     const file = await this.file(id),
       limit = 64 * 1024 * 1024;
@@ -437,10 +503,12 @@ export class Library {
       ? await this.file(options.replaceId)
       : null;
     if (
-      previous &&
-      (previous.trashed_at ||
-        previous.folder_id !== (folderId || null) ||
-        previous.name !== name)
+      (options.expectedObjectKey !== undefined &&
+        previous?.object_key !== options.expectedObjectKey) ||
+      (previous &&
+        (previous.trashed_at ||
+          previous.folder_id !== (folderId || null) ||
+          previous.name !== name))
     )
       throw new Error(
         t("Файл изменился во время загрузки. Повторите операцию."),
@@ -452,7 +520,9 @@ export class Library {
       .filter(Boolean)
       .join("/");
     const mimeType =
-      mime.getType(path.basename(source)) || "application/octet-stream";
+      options.mimeType ||
+      mime.getType(path.basename(source)) ||
+      "application/octet-stream";
     const upload = this.createUpload({
       client: this.s3,
       params: {

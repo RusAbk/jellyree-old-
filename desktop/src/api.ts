@@ -32,6 +32,11 @@ export function createApi(bridge: Jellyree): Jellyree {
     remove: (ids) => bridge.remove(toIpcData(ids)),
     url: (id) => bridge.url(id),
     imageSource: (id) => bridge.imageSource(id),
+    documentSource: (id, expectedObjectKey) =>
+      bridge.documentSource(id, expectedObjectKey),
+    saveTextDocument: (id, expectedObjectKey, data) =>
+      bridge.saveTextDocument(id, expectedObjectKey, data),
+    setDocumentDraft: (owner, dirty) => bridge.setDocumentDraft(owner, dirty),
     videoSource: (revision) => bridge.videoSource(toIpcData(revision)),
     saveVideoFrame: (id, key, timestamp, data) =>
       bridge.saveVideoFrame(id, key, timestamp, data),

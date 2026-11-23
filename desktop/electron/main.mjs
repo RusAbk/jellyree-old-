@@ -38,6 +38,8 @@ let thumbnailCache;
 const cacheNamespace = () => `${library.id}:${library.config.databaseId}`;
 const uploadConflicts = new UploadConflictBroker();
 const uploads = new OperationQueue();
+const documentWrites = new OperationQueue();
+let documentDraftOwner = "";
 import { setLanguage } from "./locales.mjs";
 
 const directory = path.dirname(fileURLToPath(import.meta.url));
@@ -86,6 +88,10 @@ function handle(name, fn, needsLibrary = true) {
   });
 }
 async function connectionOperation(fn) {
+  if (documentDraftOwner)
+    throw new Error(
+      t("Сначала сохраните или закройте редактируемый документ."),
+    );
   if (activeOperations || changingConnection)
     throw new Error(t("Дождитесь завершения текущих операций."));
   changingConnection = true;
@@ -235,6 +241,28 @@ function registerHandlers() {
   handle("files:delete", (ids) => library.deletePermanently(ids));
   handle("files:url", (id) => library.url(id));
   handle("files:image-source", (id) => library.imageSource(id));
+  handle("files:document-source", (id, expectedObjectKey) =>
+    library.documentSource(id, expectedObjectKey),
+  );
+  handle("files:save-text-document", (id, expectedObjectKey, data) =>
+    documentWrites.run(() =>
+      library.saveTextDocument(id, expectedObjectKey, data),
+    ),
+  );
+  handle(
+    "documents:draft",
+    (owner, dirty) => {
+      if (
+        typeof owner !== "string" ||
+        owner.length > 128 ||
+        typeof dirty !== "boolean"
+      )
+        throw new TypeError("Invalid document state");
+      if (dirty) documentDraftOwner = owner;
+      else if (documentDraftOwner === owner) documentDraftOwner = "";
+    },
+    false,
+  );
   handle("files:video-source", async (revision) => {
     thumbnailKey(cacheNamespace(), revision);
     const sourceLibrary = library;
@@ -438,6 +466,21 @@ async function createWindow() {
     (_contents, _permission, callback) => callback(false),
   );
   window.webContents.session.setPermissionCheckHandler(() => false);
+  window.webContents.on("will-prevent-unload", (event) => {
+    const choice = dialog.showMessageBoxSync(window, {
+      type: "question",
+      buttons: [t("Продолжить редактирование"), t("Не сохранять")],
+      defaultId: 0,
+      cancelId: 0,
+      message: t(
+        "Есть несохранённые изменения документа. Закрыть без сохранения?",
+      ),
+    });
+    if (choice === 1) {
+      documentDraftOwner = "";
+      event.preventDefault();
+    }
+  });
   window.on("closed", () => uploadConflicts.cancel());
   window.on("close", (event) => {
     if (activeOperations || changingConnection) {

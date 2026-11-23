@@ -3,6 +3,8 @@ import { t } from "./i18n";
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import FileThumb from "./FileThumb.vue";
 import VideoPlayer from "./VideoPlayer.vue";
+import DocumentViewer from "./DocumentViewer.vue";
+import { documentKind } from "../electron/document-preview.mjs";
 import { thumbnailRevision } from "./thumbnail";
 import PhotoEditor from "./PhotoEditor.vue";
 import ProcessedImage from "./ProcessedImage.vue";
@@ -33,6 +35,9 @@ import type {
 } from "./types";
 
 const settings = ref<Settings>({ configured: false, persisted: false });
+const documentViewer = ref<InstanceType<typeof DocumentViewer>>(),
+  documentVersion = ref(0);
+let previewNavigation = 0;
 const settingsOpen = ref(false),
   ready = ref(false),
   section = ref("drive"),
@@ -497,9 +502,9 @@ async function reload(more = false, background = false) {
         updated &&
         updated.object_key !== preview.value.object_key &&
         !editing.value
-      )
-        void openPreview(updated);
-      else if (updated && !editing.value) preview.value = updated;
+      ) {
+        if (!documentViewer.value?.isEditing) void openPreview(updated);
+      } else if (updated && !editing.value) preview.value = updated;
     }
   } catch (e) {
     if (id === generation && !background) error.value = (e as Error).message;
@@ -794,13 +799,19 @@ async function submitModal() {
   if (success) modal.value = null;
 }
 async function openPreview(file: DriveFile) {
+  const navigation = ++previewNavigation;
+  if (documentViewer.value && !(await documentViewer.value.requestLeave()))
+    return;
+  if (navigation !== previewNavigation) return;
   const id = ++previewGeneration;
+  documentVersion.value++;
   preview.value = file;
   previewUrl.value = "";
   previewError.value = "";
   previewLoading.value = true;
   editing.value = false;
   try {
+    if (documentKind(file)) return;
     if (
       file.mime_type.startsWith("video/") &&
       typeof window.jellyree.videoSource !== "function"
@@ -818,11 +829,22 @@ async function openPreview(file: DriveFile) {
     if (id === previewGeneration) previewLoading.value = false;
   }
 }
-function closePreview() {
+async function closePreview() {
+  const navigation = ++previewNavigation;
+  if (documentViewer.value && !(await documentViewer.value.requestLeave()))
+    return;
+  if (navigation !== previewNavigation) return;
   previewGeneration++;
   preview.value = null;
   previewUrl.value = "";
   editing.value = false;
+}
+function documentSaved(file: DriveFile) {
+  if (preview.value?.id === file.id) preview.value = file;
+  files.value = files.value.map((current) =>
+    current.id === file.id ? file : current,
+  );
+  requestUploadRefresh();
 }
 function nextPreview(direction: number) {
   if (editing.value) return;
@@ -2104,6 +2126,15 @@ onBeforeUnmount(() => {
             {{ t("Повторить") }}
           </button>
         </div>
+        <DocumentViewer
+          v-else-if="documentKind(preview)"
+          ref="documentViewer"
+          :key="`${preview.id}:${documentVersion}`"
+          :file="preview"
+          @error="previewError = $event"
+          @close="closePreview"
+          @saved="documentSaved"
+        />
         <template v-else-if="previewUrl"
           ><ProcessedImage
             v-if="
