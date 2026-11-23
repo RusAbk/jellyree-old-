@@ -1,4 +1,69 @@
 export const editorMessages = {
+  "Пробел: пауза · ← →: перемотка · Shift+S: кадр · Esc: выход": {
+    en: "Space: play/pause · ← →: seek · Shift+S: frame · Esc: close",
+    es: "Espacio: reproducir/pausa · ← →: buscar · Shift+S: fotograma · Esc: cerrar",
+  },
+  "Для обновления видеоплеера полностью перезапустите приложение.": {
+    en: "Fully restart the application to update the video player.",
+    es: "Reinicia la aplicación por completo para actualizar el reproductor.",
+  },
+  Видеоплеер: { en: "Video player", es: "Reproductor de vídeo" },
+  "Скорость воспроизведения": {
+    en: "Playback speed",
+    es: "Velocidad de reproducción",
+  },
+  "Сохранить кадр в папку": {
+    en: "Save frame to folder",
+    es: "Guardar fotograma en la carpeta",
+  },
+  "Кадр появится в той же папке, что и видео.": {
+    en: "The frame will appear in the same folder as the video.",
+    es: "El fotograma aparecerá en la misma carpeta que el vídeo.",
+  },
+  "Скачать стопкадр": { en: "Download frame", es: "Descargar fotograma" },
+  "Сохранение кадра…": { en: "Saving frame…", es: "Guardando fotograma…" },
+  "Кадр {0} сохранён: {1}": {
+    en: "Frame {0} saved: {1}",
+    es: "Fotograma {0} guardado: {1}",
+  },
+  "Кадр {0} сохранён на компьютере.": {
+    en: "Frame {0} saved to your computer.",
+    es: "Fotograma {0} guardado en tu equipo.",
+  },
+  "Дождитесь загрузки кадра или окончания перемотки.": {
+    en: "Wait for the frame to load or seeking to finish.",
+    es: "Espera a que se cargue el fotograma o termine la búsqueda.",
+  },
+  "Разрешение кадра слишком большое для сохранения.": {
+    en: "The frame resolution is too large to save.",
+    es: "La resolución del fotograma es demasiado grande para guardarlo.",
+  },
+  "Не удалось получить стопкадр.": {
+    en: "Unable to capture the video frame.",
+    es: "No se pudo capturar el fotograma.",
+  },
+  "Не удалось получить стопкадр. Полностью перезапустите приложение.": {
+    en: "Unable to capture the frame. Fully restart the application.",
+    es: "No se pudo capturar el fotograma. Reinicia la aplicación por completo.",
+  },
+  "Некорректный стопкадр видео.": {
+    en: "Invalid video frame.",
+    es: "Fotograma de vídeo no válido.",
+  },
+  "Выберите видео.": { en: "Choose a video.", es: "Selecciona un vídeo." },
+  "Видео изменилось. Откройте его заново.": {
+    en: "The video has changed. Reopen it.",
+    es: "El vídeo ha cambiado. Ábrelo de nuevo.",
+  },
+  "Полноэкранный режим": { en: "Fullscreen", es: "Pantalla completa" },
+  "Выйти из полноэкранного режима": {
+    en: "Exit fullscreen",
+    es: "Salir de pantalla completa",
+  },
+  "Не удалось открыть полноэкранный режим.": {
+    en: "Unable to enter fullscreen.",
+    es: "No se pudo abrir la pantalla completa.",
+  },
   "Кэш миниатюр": { en: "Thumbnail cache", es: "Caché de miniaturas" },
   "{0} превью · {1} из {2}": {
     en: "{0} previews · {1} of {2}",

@@ -19,7 +19,8 @@
     "dist:win": "node scripts/build.mjs win",
     "dist:mac": "node scripts/build.mjs mac",
     "test:editor": "node test/editor-smoke.mjs",
-    "test:thumbnails": "node test/thumbnail-smoke.mjs"
+    "test:thumbnails": "node test/thumbnail-smoke.mjs",
+    "test:video": "node test/video-smoke.mjs"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.998.0",

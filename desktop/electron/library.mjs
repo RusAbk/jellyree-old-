@@ -1,6 +1,14 @@
 import { t } from "./locales.mjs";
 import { randomUUID } from "node:crypto";
-import { readFile, stat, readdir } from "node:fs/promises";
+import {
+  readFile,
+  stat,
+  readdir,
+  mkdtemp,
+  writeFile,
+  rm,
+} from "node:fs/promises";
+import os from "node:os";
 import { createReadStream, createWriteStream } from "node:fs";
 import { pipeline } from "node:stream/promises";
 import path from "node:path";
@@ -17,6 +25,7 @@ import mime from "mime";
 import { D1 } from "./d1.mjs";
 import { libraryId } from "./config.mjs";
 import { normalizeImageAdjustments } from "./image-adjustments.mjs";
+import { validateVideoFrame, videoFrameName } from "./video-frames.mjs";
 
 const schema = await readFile(new URL("./schema.sql", import.meta.url), "utf8");
 export function cleanName(value) {
@@ -383,6 +392,41 @@ export class Library {
       done++;
     }
     return { done };
+  }
+  async saveVideoFrame(id, expectedObjectKey, timestamp, data) {
+    try {
+      validateVideoFrame(data, timestamp);
+    } catch {
+      throw new Error(t("Некорректный стопкадр видео."));
+    }
+    const video = await this.file(id);
+    if (!video.mime_type.startsWith("video/"))
+      throw new Error(t("Выберите видео."));
+    if (
+      typeof expectedObjectKey !== "string" ||
+      expectedObjectKey !== video.object_key
+    )
+      throw new Error(t("Видео изменилось. Откройте его заново."));
+    const rows = await this.db.query(
+      "SELECT name FROM jr_files WHERE library_id = ? AND folder_id IS ? AND trashed_at IS NULL",
+      [this.id, video.folder_id],
+    );
+    const names = new Set(rows.map((row) => row.name));
+    let suffix = 0,
+      name = videoFrameName(video.name, timestamp);
+    while (names.has(name))
+      name = videoFrameName(video.name, timestamp, ++suffix);
+    const directory = await mkdtemp(path.join(os.tmpdir(), "jellyree-frame-"));
+    try {
+      const source = path.join(directory, "frame.png");
+      await writeFile(source, data, { flag: "wx", mode: 0o600 });
+      const result = await this.uploadFile(source, video.folder_id, () => {}, {
+        name,
+      });
+      return this.file(result.id);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
   }
   async uploadFile(source, folderId, report = () => {}, options = {}) {
     await this.folder(folderId);

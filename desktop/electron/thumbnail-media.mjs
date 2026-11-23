@@ -11,7 +11,10 @@ export class ThumbnailMedia {
     while (this.sources.size >= 512)
       this.sources.delete(this.sources.keys().next().value);
     const token = randomUUID();
-    this.sources.set(token, { url, expires: this.now() + 50 * 60 * 1000 });
+    // Long playback sessions resolve a fresh signed URL on each byte-range request.
+    const lifetime =
+      typeof url === "function" ? 24 * 60 * 60 * 1000 : 50 * 60 * 1000;
+    this.sources.set(token, { url, expires: this.now() + lifetime });
     return `jellyree-media://preview/${token}`;
   }
   clear() {
@@ -36,7 +39,9 @@ export class ThumbnailMedia {
       const headers = new Headers();
       if (request.headers.get("range"))
         headers.set("range", request.headers.get("range"));
-      const response = await this.fetch(source.url, {
+      const target =
+        typeof source.url === "function" ? await source.url() : source.url;
+      const response = await this.fetch(target, {
         method: request.method,
         headers,
         credentials: "omit",

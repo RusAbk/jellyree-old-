@@ -2,6 +2,8 @@
 import { t } from "./i18n";
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import FileThumb from "./FileThumb.vue";
+import VideoPlayer from "./VideoPlayer.vue";
+import { thumbnailRevision } from "./thumbnail";
 import PhotoEditor from "./PhotoEditor.vue";
 import ProcessedImage from "./ProcessedImage.vue";
 import { needsImageProcessing } from "../electron/image-adjustments.mjs";
@@ -21,6 +23,7 @@ import {
 } from "./drag-items";
 import type {
   Adjustments,
+  CapturedVideoFrame,
   DriveFile,
   FilePatch,
   Folder,
@@ -798,7 +801,16 @@ async function openPreview(file: DriveFile) {
   previewLoading.value = true;
   editing.value = false;
   try {
-    const url = await api.url(file.id);
+    if (
+      file.mime_type.startsWith("video/") &&
+      typeof window.jellyree.videoSource !== "function"
+    )
+      throw new Error(
+        t("Для обновления видеоплеера полностью перезапустите приложение."),
+      );
+    const url = file.mime_type.startsWith("video/")
+      ? await api.videoSource(thumbnailRevision(file))
+      : await api.url(file.id);
     if (id === previewGeneration) previewUrl.value = url;
   } catch (e) {
     if (id === previewGeneration) previewError.value = (e as Error).message;
@@ -817,6 +829,24 @@ function nextPreview(direction: number) {
   const index = files.value.findIndex((f) => f.id === preview.value?.id),
     next = files.value[index + direction];
   if (next) void openPreview(next);
+}
+async function saveVideoFrame(file: DriveFile, frame: CapturedVideoFrame) {
+  const saved = await api.saveVideoFrame(
+    file.id,
+    file.object_key,
+    frame.timestamp,
+    frame.data,
+  );
+  requestUploadRefresh();
+  return saved;
+}
+function downloadVideoFrame(file: DriveFile, frame: CapturedVideoFrame) {
+  return api.downloadVideoFrame(
+    file.id,
+    file.object_key,
+    frame.timestamp,
+    frame.data,
+  );
 }
 async function saveImageEdits(adjustments: Adjustments) {
   if (!preview.value) return false;
@@ -2093,18 +2123,16 @@ onBeforeUnmount(() => {
                 'Формат не поддерживается встроенным просмотром. Скачайте оригинал.',
               )
             "
-          /><video
+          /><VideoPlayer
             v-else-if="preview.mime_type.startsWith('video/')"
+            :key="`${preview.id}:${preview.object_key}`"
+            :file="preview"
             :src="previewUrl"
-            controls
-            autoplay
-            @error="
-              previewError = t(
-                'Видеокодек не поддерживается. Скачайте оригинал.',
-              )
-            "
-          ></video
-          ><audio
+            :save-frame="saveVideoFrame"
+            :download-frame="downloadVideoFrame"
+            @error="previewError = $event"
+          />
+          <audio
             v-else-if="preview.mime_type.startsWith('audio/')"
             :src="previewUrl"
             controls
@@ -2143,7 +2171,11 @@ onBeforeUnmount(() => {
         {{ t("{0} загруженных файлов", { "0": files.length }) }}</span
       ><span v-if="notice">{{ notice }}</span
       ><span v-if="error" class="error">{{ error }}</span
-      ><span>{{ t("← → для переключения · Esc для выхода") }}</span>
+      ><span>{{
+        preview.mime_type.startsWith("video/")
+          ? t("Пробел: пауза · ← →: перемотка · Shift+S: кадр · Esc: выход")
+          : t("← → для переключения · Esc для выхода")
+      }}</span>
     </footer>
   </div>
   <PhotoEditor

@@ -18,6 +18,7 @@ import { UploadConflictBroker } from "./upload-conflicts.mjs";
 import { OperationQueue } from "./operation-queue.mjs";
 import { ThumbnailCache, thumbnailKey } from "./thumbnail-cache.mjs";
 import { ThumbnailMedia } from "./thumbnail-media.mjs";
+import { validateVideoFrame, videoFrameName } from "./video-frames.mjs";
 protocol.registerSchemesAsPrivileged([
   {
     scheme: "jellyree-media",
@@ -234,6 +235,51 @@ function registerHandlers() {
   handle("files:delete", (ids) => library.deletePermanently(ids));
   handle("files:url", (id) => library.url(id));
   handle("files:image-source", (id) => library.imageSource(id));
+  handle("files:video-source", async (revision) => {
+    thumbnailKey(cacheNamespace(), revision);
+    const sourceLibrary = library;
+    const resolve = async () => {
+      const file = await sourceLibrary.file(revision.id);
+      if (
+        !file.mime_type.startsWith("video/") ||
+        file.object_key !== revision.objectKey
+      )
+        throw new Error(t("Видео изменилось. Откройте его заново."));
+      return sourceLibrary.url(file.id);
+    };
+    await resolve();
+    return thumbnailMedia.create(resolve);
+  });
+  handle("files:save-video-frame", (id, expectedObjectKey, timestamp, data) =>
+    uploads.run(() =>
+      library.saveVideoFrame(id, expectedObjectKey, timestamp, data),
+    ),
+  );
+  handle(
+    "files:download-video-frame",
+    async (id, expectedObjectKey, timestamp, data) => {
+      try {
+        validateVideoFrame(data, timestamp);
+      } catch {
+        throw new Error(t("Некорректный стопкадр видео."));
+      }
+      const file = await library.file(id);
+      if (
+        !file.mime_type.startsWith("video/") ||
+        file.object_key !== expectedObjectKey
+      )
+        throw new Error(t("Видео изменилось. Откройте его заново."));
+      const result = await dialog.showSaveDialog(window, {
+        title: t("Скачать стопкадр"),
+        defaultPath: videoFrameName(file.name, timestamp),
+        filters: [{ name: "PNG", extensions: ["png"] }],
+      });
+      if (result.canceled || !result.filePath) return { saved: false };
+      const { writeFile } = await import("node:fs/promises");
+      await writeFile(result.filePath, data);
+      return { saved: true };
+    },
+  );
   handle("thumbnails:get", (revision) =>
     thumbnailCache.get(thumbnailKey(cacheNamespace(), revision)),
   );

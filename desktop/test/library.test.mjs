@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { DatabaseSync } from "node:sqlite";
-import { mkdtemp, writeFile, rm } from "node:fs/promises";
+import { mkdtemp, writeFile, rm, readFile, stat } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { setLanguage } from "../electron/locales.mjs";
@@ -241,6 +241,104 @@ test("image edits round-trip all controls and reject saves against a replaced or
   file = await library.file("edited");
   assert.equal(file.adjustments.temperature, 30);
   assert.equal(file.object_key, "replacement");
+});
+
+test("video frames create distinct PNG files in the video's folder without changing the original", async (t) => {
+  const uploads = [],
+    paths = [];
+  const { library, insert } = fixture(t, {
+    createUpload: ({ params }) => ({
+      on() {},
+      async done() {
+        paths.push(params.Body.path);
+        const chunks = [];
+        for await (const chunk of params.Body) chunks.push(chunk);
+        uploads.push({ ...params, Body: Buffer.concat(chunks) });
+      },
+    }),
+  });
+  await library.initialize();
+  const folder = await library.createFolder("Movies");
+  insert("video", {
+    name: "Holiday.mp4",
+    mime: "video/mp4",
+    folder: folder.id,
+  });
+  insert("foreign", { mime: "video/mp4", scope: "another-library" });
+  insert("photo");
+  const png = new Uint8Array(
+    await readFile(new URL("fixtures/editor.png", import.meta.url)),
+  );
+  const first = await library.saveVideoFrame(
+    "video",
+    "objects/video",
+    1.25,
+    png,
+  );
+  const second = await library.saveVideoFrame(
+    "video",
+    "objects/video",
+    1.25,
+    png,
+  );
+  assert.equal(first.mime_type, "image/png");
+  assert.equal(first.folder_id, folder.id);
+  assert.equal(first.name, "Holiday-frame-00-00-01.250.png");
+  assert.equal(second.name, "Holiday-frame-00-00-01.250 (1).png");
+  assert.notEqual(first.id, second.id);
+  assert.notEqual(first.object_key, second.object_key);
+  assert.equal((await library.file("video")).object_key, "objects/video");
+  assert.equal(uploads[0].ContentType, "image/png");
+  assert.deepEqual(new Uint8Array(uploads[0].Body), png);
+  for (const file of paths)
+    await assert.rejects(stat(file), { code: "ENOENT" });
+  await assert.rejects(
+    library.saveVideoFrame("video", "stale-version", 0, png),
+    /Видео изменилось/,
+  );
+  await assert.rejects(
+    library.saveVideoFrame("photo", "objects/photo", 0, png),
+    /Выберите видео/,
+  );
+  await assert.rejects(
+    library.saveVideoFrame("foreign", "objects/foreign", 0, png),
+    /не найден/,
+  );
+  assert.equal(uploads.length, 2);
+});
+
+test("failed video frame metadata writes roll back the new object and clean temporary PNGs", async (t) => {
+  const paths = [];
+  const { library, insert, db, deleted } = fixture(t, {
+    createUpload: ({ params }) => ({
+      on() {},
+      async done() {
+        paths.push(params.Body.path);
+        for await (const _ of params.Body) {
+        }
+      },
+    }),
+  });
+  await library.initialize();
+  insert("video", { mime: "video/mp4" });
+  const query = db.query.bind(db);
+  db.query = async (sql, params) => {
+    if (sql.startsWith("INSERT INTO jr_files"))
+      throw new Error("D1 unavailable");
+    return query(sql, params);
+  };
+  const png = new Uint8Array(
+    await readFile(new URL("fixtures/editor.png", import.meta.url)),
+  );
+  await assert.rejects(
+    library.saveVideoFrame("video", "objects/video", 0, png),
+    /D1 unavailable/,
+  );
+  assert.equal(deleted.length, 1);
+  assert.notEqual(deleted[0], "objects/video");
+  for (const file of paths)
+    await assert.rejects(stat(file), { code: "ENOENT" });
+  assert.equal((await library.file("video")).object_key, "objects/video");
 });
 
 test("image source reads private R2 bytes with size limits and library isolation", async (t) => {

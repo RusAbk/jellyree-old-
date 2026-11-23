@@ -75,6 +75,7 @@ export type ThumbnailEntry = {
   duration: number;
 };
 export type ThumbnailStats = { count: number; bytes: number; maxBytes: number };
+export type CapturedVideoFrame = { timestamp: number; data: Uint8Array };
 export type Progress = {
   kind: "upload" | "download" | "import";
   jobId?: string;
@@ -147,6 +148,19 @@ export interface Jellyree {
   remove(ids: string[]): Promise<{ done: number }>;
   url(id: string): Promise<string>;
   imageSource(id: string): Promise<{ data: Uint8Array; mimeType: string }>;
+  videoSource(revision: ThumbnailRevision): Promise<string>;
+  saveVideoFrame(
+    id: string,
+    expectedObjectKey: string,
+    timestamp: number,
+    data: Uint8Array,
+  ): Promise<DriveFile>;
+  downloadVideoFrame(
+    id: string,
+    expectedObjectKey: string,
+    timestamp: number,
+    data: Uint8Array,
+  ): Promise<{ saved: boolean }>;
   exportImage(
     id: string,
     data: Uint8Array,
