@@ -1,0 +1,39 @@
+const { contextBridge, ipcRenderer, webUtils } = require("electron");
+const invoke = async (channel, ...args) => {
+  const result = await ipcRenderer.invoke(`jellyree:${channel}`, ...args);
+  if (!result.ok) throw new Error(result.error);
+  return result.value;
+};
+contextBridge.exposeInMainWorld("jellyree", {
+  settings: {
+    get: () => invoke("settings:get"),
+    test: (input) => invoke("settings:test", input),
+    save: (input) => invoke("settings:save", input),
+    clear: () => invoke("settings:clear"),
+  },
+  list: (input) => invoke("files:list", input),
+  update: (ids, patch) => invoke("files:update", ids, patch),
+  remove: (ids) => invoke("files:delete", ids),
+  url: (id) => invoke("files:url", id),
+  share: (id) => invoke("files:share", id),
+  download: (ids) => invoke("files:download", ids),
+  pickUpload: (folderId, folders) =>
+    invoke("files:pick-upload", folderId, folders),
+  dropUpload: (files, folderId) =>
+    invoke(
+      "files:drop-upload",
+      Array.from(files, (file) => webUtils.getPathForFile(file)),
+      folderId,
+    ),
+  importBucket: () => invoke("files:import"),
+  folders: () => invoke("folders:list"),
+  createFolder: (name, parent) => invoke("folders:create", name, parent),
+  updateFolder: (id, patch) => invoke("folders:update", id, patch),
+  deleteFolder: (id) => invoke("folders:delete", id),
+  stats: () => invoke("stats"),
+  onProgress: (callback) => {
+    const listener = (_event, value) => callback(value);
+    ipcRenderer.on("jellyree:progress", listener);
+    return () => ipcRenderer.removeListener("jellyree:progress", listener);
+  },
+});
