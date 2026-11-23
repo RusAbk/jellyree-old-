@@ -13,6 +13,9 @@
     "dev:desktop": "npm --prefix desktop run dev",
     "build:desktop": "npm --prefix desktop run build",
     "test:desktop": "npm --prefix desktop test",
-    "dist:desktop": "npm --prefix desktop run dist"
+    "dist:desktop": "npm --prefix desktop run dist --",
+    "dist:desktop:linux": "npm --prefix desktop run dist:linux --",
+    "dist:desktop:win": "npm --prefix desktop run dist:win --",
+    "dist:desktop:mac": "npm --prefix desktop run dist:mac --"
   }
 }

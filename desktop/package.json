@@ -12,9 +12,12 @@
     "build": "vue-tsc --noEmit && vite build",
     "test": "node --test --test-isolation=none test/*.test.mjs",
     "pack": "npm run build && electron-builder --dir",
-    "dist": "npm run build && electron-builder",
+    "dist": "node scripts/build.mjs",
     "test:smoke": "node test/smoke.mjs",
-    "format": "prettier --write src electron scripts test vite.config.ts"
+    "format": "prettier --write src electron scripts test vite.config.ts",
+    "dist:linux": "node scripts/build.mjs linux",
+    "dist:win": "node scripts/build.mjs win",
+    "dist:mac": "node scripts/build.mjs mac"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.998.0",
@@ -62,7 +65,8 @@
         "dmg"
       ],
       "category": "public.app-category.productivity"
-    }
+    },
+    "artifactName": "${productName}-${version}-${os}-${arch}.${ext}"
   },
   "license": "UNLICENSED",
   "engines": {
