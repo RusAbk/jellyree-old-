@@ -227,10 +227,11 @@ export class Library {
     );
     return { ...stats, tags: tags.map((t) => t.name) };
   }
-  async file(id) {
+  async file(id, options) {
     const [row] = await this.db.query(
       "SELECT * FROM jr_files WHERE id = ? AND library_id = ?",
       [id, this.id],
+      options,
     );
     if (!row) throw new Error(t("Файл не найден в этом хранилище."));
     return fileRow(row);
@@ -300,6 +301,9 @@ export class Library {
   }
   async url(id, download = false) {
     const file = await this.file(id);
+    return this.urlForFile(file, download);
+  }
+  async urlForFile(file, download = false) {
     // URLs are generated locally. Cloudflare API tokens and the R2 secret never reach the UI.
     return getSignedUrl(
       this.s3,
@@ -380,8 +384,8 @@ export class Library {
       await rm(directory, { recursive: true, force: true });
     }
   }
-  async imageSource(id) {
-    const file = await this.file(id),
+  async imageSource(id, { signal } = {}) {
+    const file = await this.file(id, { signal }),
       limit = 64 * 1024 * 1024;
     if (!file.mime_type.startsWith("image/"))
       throw new Error(t("Выберите изображение."));
@@ -392,6 +396,7 @@ export class Library {
         Bucket: this.config.bucket,
         Key: file.object_key,
       }),
+      { abortSignal: signal },
     );
     const chunks = [];
     let length = 0;
@@ -399,6 +404,7 @@ export class Library {
       if (result.ContentLength > limit)
         throw new Error(t("Для редактирования доступны изображения до 64 МБ."));
       for await (const chunk of result.Body) {
+        signal?.throwIfAborted();
         length += chunk.length;
         if (length > limit)
           throw new Error(

@@ -35,6 +35,7 @@ const thumbnailMedia = new ThumbnailMedia((url, options) =>
   net.fetch(url, options),
 );
 let thumbnailCache;
+const previewRequests = new Map();
 const cacheNamespace = () => `${library.id}:${library.config.databaseId}`;
 const uploadConflicts = new UploadConflictBroker();
 const uploads = new OperationQueue();
@@ -61,6 +62,38 @@ const redact = (message) => {
       result = result.replaceAll(store.current[key], t("[скрыто]"));
   return result;
 };
+async function previewRequest(id, operation, timeoutMs = 45000) {
+  if (id !== undefined && (typeof id !== "string" || !id || id.length > 128))
+    throw new TypeError("Invalid preview request");
+  const controller = new AbortController();
+  if (id) {
+    previewRequests.get(id)?.abort();
+    previewRequests.set(id, controller);
+  }
+  const timer = setTimeout(
+    () =>
+      controller.abort(
+        new DOMException("Preview request timed out", "TimeoutError"),
+      ),
+    timeoutMs,
+  );
+  let abort;
+  const interrupted = new Promise((_, reject) => {
+    abort = () => reject(controller.signal.reason);
+    controller.signal.addEventListener("abort", abort, { once: true });
+  });
+  try {
+    return await Promise.race([
+      Promise.resolve().then(() => operation(controller.signal)),
+      interrupted,
+    ]);
+  } finally {
+    clearTimeout(timer);
+    controller.signal.removeEventListener("abort", abort);
+    if (id && previewRequests.get(id) === controller)
+      previewRequests.delete(id);
+  }
+}
 function handle(name, fn, needsLibrary = true) {
   ipcMain.handle(`jellyree:${name}`, async (event, ...args) => {
     const url = event.senderFrame?.url;
@@ -240,7 +273,20 @@ function registerHandlers() {
   handle("files:update", (ids, patch) => library.updateFiles(ids, patch));
   handle("files:delete", (ids) => library.deletePermanently(ids));
   handle("files:url", (id) => library.url(id));
-  handle("files:image-source", (id) => library.imageSource(id));
+  handle("files:image-source", (id, requestId) => {
+    const sourceLibrary = library;
+    return previewRequest(requestId, (signal) =>
+      sourceLibrary.imageSource(id, { signal }),
+    );
+  });
+  handle(
+    "previews:cancel",
+    (id) => {
+      previewRequests.get(id)?.abort();
+    },
+    false,
+  );
+  handle("media:release", (url) => thumbnailMedia.release(url), false);
   handle("files:document-source", (id, expectedObjectKey) =>
     library.documentSource(id, expectedObjectKey),
   );
@@ -273,7 +319,7 @@ function registerHandlers() {
         file.object_key !== revision.objectKey
       )
         throw new Error(t("Видео изменилось. Откройте его заново."));
-      return sourceLibrary.url(file.id);
+      return sourceLibrary.urlForFile(file);
     };
     await resolve();
     return thumbnailMedia.create(resolve);
@@ -309,27 +355,57 @@ function registerHandlers() {
     },
   );
   handle("thumbnails:get", (revision) =>
-    thumbnailCache.get(thumbnailKey(cacheNamespace(), revision)),
+    previewRequest(
+      undefined,
+      () => thumbnailCache.get(thumbnailKey(cacheNamespace(), revision)),
+      5000,
+    ),
   );
   handle("thumbnails:put", (revision, entry, epoch) =>
-    thumbnailCache.put(thumbnailKey(cacheNamespace(), revision), entry, epoch),
-  );
-  handle("thumbnails:stats", () => thumbnailCache.stats(), false);
-  handle("thumbnails:clear", () => thumbnailCache.clear(), false);
-  handle("thumbnails:source", async (revision) => {
-    thumbnailKey(cacheNamespace(), revision);
-    const file = await library.file(revision.id);
-    if (
-      file.object_key !== revision.objectKey ||
-      file.size_bytes !== revision.sizeBytes
-    )
-      throw new Error(
-        t(
-          "Изображение изменилось. Откройте его заново перед сохранением правок.",
+    previewRequest(
+      undefined,
+      () =>
+        thumbnailCache.put(
+          thumbnailKey(cacheNamespace(), revision),
+          entry,
+          epoch,
         ),
-      );
-    return thumbnailMedia.create(await library.url(file.id));
-  });
+      5000,
+    ),
+  );
+  handle(
+    "thumbnails:stats",
+    () => previewRequest(undefined, () => thumbnailCache.stats(), 10000),
+    false,
+  );
+  handle(
+    "thumbnails:clear",
+    () => previewRequest(undefined, () => thumbnailCache.clear(), 10000),
+    false,
+  );
+  handle("thumbnails:source", (revision, requestId) =>
+    previewRequest(
+      requestId,
+      async (signal) => {
+        thumbnailKey(cacheNamespace(), revision);
+        const sourceLibrary = library;
+        const file = await sourceLibrary.file(revision.id, { signal });
+        if (
+          file.object_key !== revision.objectKey ||
+          file.size_bytes !== revision.sizeBytes
+        )
+          throw new Error(
+            t(
+              "Изображение изменилось. Откройте его заново перед сохранением правок.",
+            ),
+          );
+        const url = await sourceLibrary.urlForFile(file);
+        signal.throwIfAborted();
+        return thumbnailMedia.create(url);
+      },
+      15000,
+    ),
+  );
   handle("files:export-image", async (id, data, format) => {
     const file = await library.file(id);
     if (

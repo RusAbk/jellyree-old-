@@ -805,6 +805,7 @@ async function openPreview(file: DriveFile) {
   if (navigation !== previewNavigation) return;
   const id = ++previewGeneration;
   documentVersion.value++;
+  releasePreviewMedia(previewUrl.value);
   preview.value = file;
   previewUrl.value = "";
   previewError.value = "";
@@ -823,6 +824,7 @@ async function openPreview(file: DriveFile) {
       ? await api.videoSource(thumbnailRevision(file))
       : await api.url(file.id);
     if (id === previewGeneration) previewUrl.value = url;
+    else releasePreviewMedia(url);
   } catch (e) {
     if (id === previewGeneration) previewError.value = (e as Error).message;
   } finally {
@@ -835,9 +837,17 @@ async function closePreview() {
     return;
   if (navigation !== previewNavigation) return;
   previewGeneration++;
+  releasePreviewMedia(previewUrl.value);
   preview.value = null;
   previewUrl.value = "";
   editing.value = false;
+}
+function releasePreviewMedia(url: string) {
+  if (
+    url.startsWith("jellyree-media:") &&
+    typeof window.jellyree.releaseMedia === "function"
+  )
+    void api.releaseMedia(url).catch(() => {});
 }
 function documentSaved(file: DriveFile) {
   if (preview.value?.id === file.id) preview.value = file;

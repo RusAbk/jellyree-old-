@@ -16,7 +16,8 @@ export function createApi(bridge: Jellyree): Jellyree {
           },
           epoch,
         ),
-      source: (revision) => bridge.thumbnails.source(toIpcData(revision)),
+      source: (revision, requestId) =>
+        bridge.thumbnails.source(toIpcData(revision), requestId),
       stats: () => bridge.thumbnails.stats(),
       clear: () => bridge.thumbnails.clear(),
     },
@@ -31,7 +32,9 @@ export function createApi(bridge: Jellyree): Jellyree {
     update: (ids, patch) => bridge.update(toIpcData(ids), toIpcData(patch)),
     remove: (ids) => bridge.remove(toIpcData(ids)),
     url: (id) => bridge.url(id),
-    imageSource: (id) => bridge.imageSource(id),
+    imageSource: (id, requestId) => bridge.imageSource(id, requestId),
+    cancelPreview: (requestId) => bridge.cancelPreview(requestId),
+    releaseMedia: (url) => bridge.releaseMedia(url),
     documentSource: (id, expectedObjectKey) =>
       bridge.documentSource(id, expectedObjectKey),
     saveTextDocument: (id, expectedObjectKey, data) =>

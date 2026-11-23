@@ -761,24 +761,71 @@ try {
           : mp4,
       }),
   );
-  await electron.evaluate(({ ipcMain }) => {
-    const state = globalThis.__jellyreeIpcFixture;
-    state.files = state.files.filter((file) => file.folder_id !== null);
-    for (const id of ["preview", "broken"]) {
-      state.files.push({
-        ...state.files[0],
-        id,
-        name: `${id}.mp4`,
-        mime_type: "video/mp4",
-        folder_id: null,
+  await electron.evaluate(
+    ({ ipcMain, protocol }, input) => {
+      const state = globalThis.__jellyreeIpcFixture;
+      state.files = state.files.filter((file) => file.folder_id !== null);
+      for (const id of ["preview", "broken"]) {
+        state.files.push({
+          ...state.files[0],
+          id,
+          name: `${id}.mp4`,
+          mime_type: "video/mp4",
+          folder_id: null,
+        });
+      }
+      ipcMain.removeHandler("jellyree:files:url");
+      ipcMain.handle("jellyree:files:url", (_event, id) => ({
+        ok: true,
+        value: `https://preview-test.r2.cloudflarestorage.com/${id}.mp4`,
+      }));
+      // Keep the real private-media transport: a metadata failure must no longer
+      // trigger another signed-URL/D1 request as an automatic fallback.
+      const require = process
+        .getBuiltinModule("module")
+        .createRequire(input.module);
+      const { ThumbnailMedia } = require(input.module);
+      const media = new ThumbnailMedia(async (url, options) => {
+        const bytes = url.endsWith("broken")
+          ? Buffer.from("invalid video")
+          : Buffer.from(input.bytes);
+        const match = options.headers
+            .get("range")
+            ?.match(/^bytes=(\d+)-(\d*)$/),
+          start = match ? Number(match[1]) : 0,
+          end = match?.[2]
+            ? Math.min(bytes.length - 1, Number(match[2]))
+            : bytes.length - 1;
+        return new Response(bytes.subarray(start, end + 1), {
+          status: match ? 206 : 200,
+          headers: {
+            "Content-Type": "video/mp4",
+            "Content-Length": String(end - start + 1),
+            "Accept-Ranges": "bytes",
+            ...(match
+              ? { "Content-Range": `bytes ${start}-${end}/${bytes.length}` }
+              : {}),
+          },
+        });
       });
-    }
-    ipcMain.removeHandler("jellyree:files:url");
-    ipcMain.handle("jellyree:files:url", (_event, id) => ({
-      ok: true,
-      value: `https://preview-test.r2.cloudflarestorage.com/${id}.mp4`,
-    }));
-  });
+      protocol.unhandle("jellyree-media");
+      protocol.handle("jellyree-media", (request) => media.handle(request));
+      ipcMain.removeHandler("jellyree:thumbnails:source");
+      ipcMain.handle("jellyree:thumbnails:source", (_event, revision) => ({
+        ok: true,
+        value: media.create(`https://fixture.invalid/${revision.id}`),
+      }));
+      ipcMain.removeHandler("jellyree:media:release");
+      ipcMain.handle("jellyree:media:release", (_event, url) => ({
+        ok: true,
+        value: media.release(url),
+      }));
+    },
+    {
+      module: path.join(directory, "electron/thumbnail-media.mjs"),
+      bytes: [...mp4],
+    },
+  );
   await window.reload();
   const nativeVideo = nativeFile("preview.mp4");
   await nativeVideo.locator(".video-poster").waitFor({ state: "visible" });

@@ -5,7 +5,7 @@ export class D1 {
     this.token = config.apiToken;
     this.request = request;
   }
-  async execute(body) {
+  async execute(body, { signal } = {}) {
     const response = await this.request(this.url, {
       method: "POST",
       headers: {
@@ -13,7 +13,9 @@ export class D1 {
         "Content-Type": "application/json",
       },
       body: JSON.stringify(body),
-      signal: AbortSignal.timeout(60000),
+      signal: signal
+        ? AbortSignal.any([signal, AbortSignal.timeout(60000)])
+        : AbortSignal.timeout(60000),
       redirect: "error",
     });
     const data = await response.json().catch(() => null);
@@ -35,8 +37,8 @@ export class D1 {
       throw new Error(t("Cloudflare D1: некорректный ответ API."));
     return data.result;
   }
-  async query(sql, params = []) {
-    return (await this.execute({ sql, params }))[0]?.results ?? [];
+  async query(sql, params = [], options) {
+    return (await this.execute({ sql, params }, options))[0]?.results ?? [];
   }
   async batch(statements) {
     return this.execute({ batch: statements });

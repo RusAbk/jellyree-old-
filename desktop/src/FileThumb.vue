@@ -4,7 +4,7 @@ import { computed, ref, onMounted, onBeforeUnmount, watch } from "vue";
 import type { DriveFile, ThumbnailEntry, ThumbnailRevision } from "./types";
 import { icon, imageStyle } from "./format";
 import { api } from "./api";
-import { runVideoPreview, videoDuration } from "./video-preview";
+import { runThumbnailPreview, videoDuration } from "./video-preview";
 import ProcessedImage from "./ProcessedImage.vue";
 import { needsImageProcessing } from "../electron/image-adjustments.mjs";
 import { thumbnailRevision, thumbnailBytes } from "./thumbnail";
@@ -73,44 +73,61 @@ let observer: IntersectionObserver | undefined,
   disposed = false,
   visible = false,
   request = 0,
-  seekRequested = false;
-let finishVideo: ((error?: boolean) => void) | undefined;
-function loaded(event: Event) {
-  const img = event.target as HTMLImageElement;
-  if (cachedEntry.value) return;
-  dimensions.value = { width: img.naturalWidth, height: img.naturalHeight };
-  if (readable && !processed.value) {
-    const scale = Math.min(
-      1,
-      640 / Math.max(img.naturalWidth, img.naturalHeight),
-    );
-    const canvas = document.createElement("canvas");
-    canvas.width = Math.max(1, Math.round(img.naturalWidth * scale));
-    canvas.height = Math.max(1, Math.round(img.naturalHeight * scale));
-    canvas.getContext("2d")?.drawImage(img, 0, 0, canvas.width, canvas.height);
-    void saveThumbnail(canvas);
-  }
-}
-async function saveThumbnail(canvas: HTMLCanvasElement) {
-  if (cacheEpoch === null) return;
-  const generation = request,
-    epoch = cacheEpoch,
-    currentRevision = revision.value;
-  const metadata = { ...dimensions.value, duration: duration.value };
-  const data = await thumbnailBytes(canvas);
-  if (!data || disposed || generation !== request) return;
-  await api.thumbnails
-    .put(currentRevision, { ...metadata, data }, epoch)
-    .catch(() => {});
+  seekRequested = false,
+  capturing = false;
+let work: AbortController | undefined,
+  retryTimer: ReturnType<typeof setTimeout> | undefined,
+  retries = 0,
+  mediaUrl = "";
+let displaySignal: AbortSignal | undefined;
+let finishDisplay: ((error?: Error) => void) | undefined;
+const ready = ref(false);
+function releaseMedia(value: string) {
+  if (value === mediaUrl) mediaUrl = "";
+  if (
+    value.startsWith("jellyree-media:") &&
+    typeof window.jellyree.releaseMedia === "function"
+  )
+    void api.releaseMedia(value).catch(() => {});
 }
 function releaseBlob() {
   if (blobUrl) URL.revokeObjectURL(blobUrl);
   blobUrl = "";
 }
-async function loadCached(current: () => boolean) {
+function releaseDecoder() {
+  if (decoder.value) {
+    decoder.value.pause();
+    decoder.value.removeAttribute("src");
+    decoder.value.load();
+  }
+}
+function stop() {
+  request++;
+  clearTimeout(retryTimer);
+  releaseDecoder();
+  work?.abort();
+  finishDisplay?.(new DOMException("Preview canceled", "AbortError"));
+  releaseMedia(mediaUrl);
+  decoding.value = false;
+  pending.value = false;
+  if (!ready.value) url.value = "";
+}
+async function loadCached(current: () => boolean, signal: AbortSignal) {
   if (typeof window.jellyree.thumbnails?.get !== "function") return false;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let abort: (() => void) | undefined;
   try {
-    const result = await api.thumbnails.get(revision.value);
+    const result = await Promise.race([
+      api.thumbnails.get(revision.value),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(
+          () => reject(new Error("Cache read timed out")),
+          2000,
+        );
+        abort = () => reject(signal.reason);
+        signal.addEventListener("abort", abort, { once: true });
+      }),
+    ]);
     if (!current()) return false;
     cacheEpoch = result.epoch;
     if (!result.entry) return false;
@@ -120,32 +137,99 @@ async function loadCached(current: () => boolean) {
       height: result.entry.height,
     };
     duration.value = result.entry.duration;
+    releaseBlob();
     blobUrl = URL.createObjectURL(
       new Blob([new Uint8Array(result.entry.data)], { type: "image/webp" }),
     );
     url.value = blobUrl;
+    ready.value = true;
     if (isVideo.value) videoReady.value = true;
+    retries = 0;
     return true;
   } catch {
     return false;
+  } finally {
+    clearTimeout(timer);
+    if (abort) signal.removeEventListener("abort", abort);
   }
 }
-async function sourceUrl(currentRevision: ThumbnailRevision) {
-  if (typeof window.jellyree.thumbnails?.source === "function") {
-    try {
-      const value = await api.thumbnails.source(currentRevision);
-      return { url: value, readable: true };
-    } catch {
-      /* The ordinary preview remains available if the cache is unavailable. */
+async function sourceUrl(
+  currentRevision: ThumbnailRevision,
+  signal: AbortSignal,
+) {
+  if (typeof window.jellyree.thumbnails?.source !== "function")
+    return { url: await api.url(currentRevision.id), readable: false };
+  const id = crypto.randomUUID();
+  const abort = () => {
+    if (typeof window.jellyree.cancelPreview === "function")
+      void api.cancelPreview(id).catch(() => {});
+  };
+  signal.addEventListener("abort", abort, { once: true });
+  try {
+    signal.throwIfAborted();
+    const value = await api.thumbnails.source(currentRevision, id);
+    if (signal.aborted) {
+      releaseMedia(value);
+      signal.throwIfAborted();
     }
+    return { url: value, readable: true };
+  } finally {
+    signal.removeEventListener("abort", abort);
   }
-  return { url: await api.url(currentRevision.id), readable: false };
 }
-function releaseDecoder() {
-  if (decoder.value) {
-    decoder.value.pause();
-    decoder.value.removeAttribute("src");
-    decoder.value.load();
+async function saveThumbnail(canvas: HTMLCanvasElement) {
+  const generation = request,
+    currentRevision = revision.value,
+    epoch = cacheEpoch,
+    signal = displaySignal;
+  const metadata = { ...dimensions.value, duration: duration.value };
+  try {
+    const data = await thumbnailBytes(canvas);
+    if (disposed || generation !== request || signal?.aborted) return;
+    // Keep only the small decoded thumbnail in the grid, rather than every full-size photo.
+    if (data) {
+      const entry = { ...metadata, data };
+      releaseBlob();
+      cachedEntry.value = entry;
+      blobUrl = URL.createObjectURL(
+        new Blob([new Uint8Array(data)], { type: "image/webp" }),
+      );
+      url.value = blobUrl;
+      if (epoch !== null)
+        void api.thumbnails.put(currentRevision, entry, epoch).catch(() => {});
+    }
+    ready.value = true;
+    retries = 0;
+    finishDisplay?.();
+  } catch (error) {
+    if (generation === request) finishDisplay?.(error as Error);
+  }
+}
+function loaded(event: Event) {
+  if (cachedEntry.value) return;
+  const image = event.target as HTMLImageElement;
+  if (image.currentSrc !== url.value && image.src !== url.value) return;
+  dimensions.value = { width: image.naturalWidth, height: image.naturalHeight };
+  if (!readable) {
+    ready.value = true;
+    retries = 0;
+    finishDisplay?.();
+    return;
+  }
+  try {
+    const scale = Math.min(
+      1,
+      640 / Math.max(image.naturalWidth, image.naturalHeight),
+    );
+    const canvas = document.createElement("canvas");
+    canvas.width = Math.max(1, Math.round(image.naturalWidth * scale));
+    canvas.height = Math.max(1, Math.round(image.naturalHeight * scale));
+    canvas
+      .getContext("2d")
+      ?.drawImage(image, 0, 0, canvas.width, canvas.height);
+    void saveThumbnail(canvas);
+  } catch (error) {
+    finishDisplay?.(error as Error);
   }
 }
 function metadata(event: Event) {
@@ -162,6 +246,7 @@ function metadata(event: Event) {
 function capture(event: Event) {
   const video = event.currentTarget as HTMLVideoElement;
   if (
+    capturing ||
     !decoding.value ||
     video !== decoder.value ||
     video.currentSrc !== url.value ||
@@ -169,21 +254,18 @@ function capture(event: Event) {
     video.readyState < 2
   )
     return;
-  // Wait for an actual decoded frame before seeking. Some streaming responses
-  // initially clamp seeks to zero; their first frame is still a valid preview.
   if (!seekRequested && event.type === "loadeddata") {
     seekRequested = true;
     try {
       video.currentTime =
         duration.value > 0 ? Math.min(1, duration.value / 2) : 0;
-    } catch {
-      // A non-seekable stream can still provide its current frame.
-    }
+    } catch {}
     if (video.seeking || video.readyState < 2) return;
   }
   const canvas = poster.value;
   if (!canvas || !video.videoWidth || !video.videoHeight) return;
   try {
+    capturing = true;
     const scale = Math.min(
       1,
       640 / Math.max(video.videoWidth, video.videoHeight),
@@ -197,65 +279,102 @@ function capture(event: Event) {
     videoReady.value = true;
     failed.value = false;
     if (readable) void saveThumbnail(canvas);
-    finishVideo?.();
-  } catch {
-    finishVideo?.(true);
+    else {
+      ready.value = true;
+      retries = 0;
+      finishDisplay?.();
+    }
+  } catch (error) {
+    finishDisplay?.(error as Error);
   }
 }
 function videoError() {
-  if (decoding.value) finishVideo?.(true);
+  if (decoding.value) finishDisplay?.(new Error("Video preview failed"));
 }
 function imageError() {
   if (cachedEntry.value) {
+    stop();
     releaseBlob();
     cachedEntry.value = null;
-    url.value = "";
+    ready.value = false;
     videoReady.value = false;
-    duration.value = 0;
+    url.value = "";
     void fetchPreview(false);
-  } else failed.value = true;
+  } else finishDisplay?.(new Error("Image preview failed"));
+}
+function retry() {
+  stop();
+  retries = 0;
+  failed.value = false;
+  if (visible) void fetchPreview(false);
 }
 async function fetchPreview(useCache = true) {
-  const generation = ++request;
-  const current = () => !disposed && request === generation;
+  const generation = ++request,
+    controller = new AbortController();
+  work = controller;
+  const current = () =>
+    !disposed && generation === request && !controller.signal.aborted;
   pending.value = true;
+  failed.value = false;
   try {
-    if (useCache && (await loadCached(current))) return;
-    if (!current()) return;
-    if (isVideo.value) {
-      await runVideoPreview(async () => {
-        if (!current() || !visible) return;
-        const value = await sourceUrl(revision.value);
-        if (!current() || !visible) return;
-        readable = value.readable;
-        url.value = value.url;
-        await new Promise<void>((resolve) => {
-          let settled = false;
-          const timer = setTimeout(() => finish(true), 20000);
-          const finish = (error = false) => {
-            if (settled) return;
-            settled = true;
-            clearTimeout(timer);
-            if (current() && error) failed.value = true;
-            decoding.value = false;
+    if (useCache && (await loadCached(current, controller.signal))) return;
+    if (!current() || !visible) return;
+    await runThumbnailPreview(
+      async (signal) => {
+        displaySignal = signal;
+        let acquired = "";
+        try {
+          if (!current() || !visible || signal.aborted) return;
+          const value = processed.value
+            ? { url: "processed", readable: true }
+            : await sourceUrl(revision.value, signal);
+          acquired = value.url;
+          if (!current() || !visible || signal.aborted) return;
+          readable = value.readable;
+          if (acquired.startsWith("jellyree-media:")) mediaUrl = acquired;
+          await new Promise<void>((resolve, reject) => {
+            let settled = false;
+            const abort = () => finish(signal.reason);
+            const finish = (error?: Error) => {
+              if (settled) return;
+              settled = true;
+              signal.removeEventListener("abort", abort);
+              if (finishDisplay === finish) finishDisplay = undefined;
+              if (error) reject(error);
+              else resolve();
+            };
+            finishDisplay = finish;
+            signal.addEventListener("abort", abort, { once: true });
+            seekRequested = false;
+            capturing = false;
+            url.value = value.url;
+            if (isVideo.value) decoding.value = true;
+          });
+        } finally {
+          if (displaySignal === signal) displaySignal = undefined;
+          if (current()) {
             releaseDecoder();
-            if (finishVideo === finish) finishVideo = undefined;
-            resolve();
-          };
-          finishVideo = finish;
-          seekRequested = false;
-          decoding.value = true;
-        });
-      });
-    } else {
-      const value = await sourceUrl(revision.value);
-      if (current()) {
-        readable = value.readable;
-        url.value = value.url;
+            decoding.value = false;
+          }
+          releaseMedia(acquired);
+        }
+      },
+      { signal: controller.signal },
+    );
+  } catch {
+    if (current()) {
+      failed.value = true;
+      releaseDecoder();
+      decoding.value = false;
+      if (!ready.value) url.value = "";
+      if (visible && retries < 2) {
+        retries++;
+        retryTimer = setTimeout(() => {
+          if (!disposed && visible && generation === request)
+            void fetchPreview(false);
+        }, 750 * retries);
       }
     }
-  } catch {
-    if (current()) failed.value = true;
   } finally {
     if (current()) pending.value = false;
   }
@@ -263,18 +382,18 @@ async function fetchPreview(useCache = true) {
 watch(
   () => JSON.stringify(revision.value),
   () => {
-    request++;
-    finishVideo?.();
+    stop();
     releaseBlob();
     cachedEntry.value = null;
     cacheEpoch = null;
     readable = false;
+    ready.value = false;
     url.value = "";
     failed.value = false;
     videoReady.value = false;
     duration.value = 0;
-    pending.value = false;
     dimensions.value = { width: 0, height: 0 };
+    retries = 0;
     if (visible && (isImage.value || isVideo.value)) void fetchPreview();
   },
 );
@@ -284,13 +403,27 @@ onMounted(() => {
     (entries) => {
       visible = entries.some((entry) => entry.isIntersecting);
       if (visible) {
-        if (isImage.value) observer?.disconnect();
-        if (!videoReady.value && !pending.value && !failed.value)
+        if (ready.value && cachedEntry.value && !url.value) {
+          blobUrl = URL.createObjectURL(
+            new Blob([new Uint8Array(cachedEntry.value.data)], {
+              type: "image/webp",
+            }),
+          );
+          url.value = blobUrl;
+        } else if (
+          !ready.value &&
+          !pending.value &&
+          (!failed.value || retries < 2)
+        ) {
+          clearTimeout(retryTimer);
           void fetchPreview();
-      } else if (isVideo.value && pending.value) {
-        request++;
-        finishVideo?.();
-        pending.value = false;
+        }
+      } else {
+        if (pending.value) stop();
+        if (ready.value && cachedEntry.value) {
+          releaseBlob();
+          url.value = "";
+        }
       }
     },
     { rootMargin: "180px" },
@@ -299,9 +432,7 @@ onMounted(() => {
 });
 onBeforeUnmount(() => {
   disposed = true;
-  request++;
-  finishVideo?.();
-  releaseDecoder();
+  stop();
   releaseBlob();
   observer?.disconnect();
 });
@@ -341,7 +472,7 @@ onBeforeUnmount(() => {
         'video-poster': isVideo,
       }"
       :crossorigin="!cachedEntry && readable ? 'anonymous' : undefined"
-      loading="lazy"
+      loading="eager"
       draggable="false"
       @load="loaded"
       @error="imageError"
@@ -377,6 +508,17 @@ onBeforeUnmount(() => {
       @seeked="capture"
       @error="videoError"
     ></video>
+    <button
+      v-if="failed && !pending"
+      class="thumbnail-retry"
+      :aria-label="t('Повторить')"
+      :title="t('Повторить')"
+      @click.stop="retry"
+      @dblclick.stop
+      @keydown.stop
+    >
+      <i aria-hidden="true" class="ri-refresh-line"></i>
+    </button>
     <span v-if="isVideo && videoReady" class="video-badge"
       ><i aria-hidden="true" class="ri-play-fill"></i
       ><span v-if="!compact">{{ durationLabel }}</span></span

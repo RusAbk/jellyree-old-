@@ -127,7 +127,7 @@ export interface Jellyree {
       entry: ThumbnailEntry,
       epoch: number,
     ): Promise<boolean>;
-    source(revision: ThumbnailRevision): Promise<string>;
+    source(revision: ThumbnailRevision, requestId?: string): Promise<string>;
     stats(): Promise<ThumbnailStats>;
     clear(): Promise<ThumbnailStats>;
   };
@@ -147,7 +147,12 @@ export interface Jellyree {
   update(ids: string[], patch: FilePatch): Promise<void>;
   remove(ids: string[]): Promise<{ done: number }>;
   url(id: string): Promise<string>;
-  imageSource(id: string): Promise<{ data: Uint8Array; mimeType: string }>;
+  imageSource(
+    id: string,
+    requestId?: string,
+  ): Promise<{ data: Uint8Array; mimeType: string }>;
+  cancelPreview(requestId: string): Promise<void>;
+  releaseMedia(url: string): Promise<boolean>;
   documentSource(
     id: string,
     expectedObjectKey: string,

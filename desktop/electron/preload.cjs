@@ -16,7 +16,9 @@ contextBridge.exposeInMainWorld("jellyree", {
   update: (ids, patch) => invoke("files:update", ids, patch),
   remove: (ids) => invoke("files:delete", ids),
   url: (id) => invoke("files:url", id),
-  imageSource: (id) => invoke("files:image-source", id),
+  imageSource: (id, requestId) => invoke("files:image-source", id, requestId),
+  cancelPreview: (requestId) => invoke("previews:cancel", requestId),
+  releaseMedia: (url) => invoke("media:release", url),
   documentSource: (id, expectedObjectKey) =>
     invoke("files:document-source", id, expectedObjectKey),
   saveTextDocument: (id, expectedObjectKey, data) =>
@@ -37,7 +39,8 @@ contextBridge.exposeInMainWorld("jellyree", {
     get: (revision) => invoke("thumbnails:get", revision),
     put: (revision, entry, epoch) =>
       invoke("thumbnails:put", revision, entry, epoch),
-    source: (revision) => invoke("thumbnails:source", revision),
+    source: (revision, requestId) =>
+      invoke("thumbnails:source", revision, requestId),
     stats: () => invoke("thumbnails:stats"),
     clear: () => invoke("thumbnails:clear"),
   },

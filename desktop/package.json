@@ -20,6 +20,7 @@
     "dist:mac": "node scripts/build.mjs mac",
     "test:editor": "node test/editor-smoke.mjs",
     "test:thumbnails": "node test/thumbnail-smoke.mjs",
+    "test:thumbnail-stress": "node test/thumbnail-stress.mjs",
     "test:video": "node test/video-smoke.mjs",
     "test:documents": "node test/document-smoke.mjs"
   },

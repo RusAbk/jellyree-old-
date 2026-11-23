@@ -133,3 +133,111 @@ test("local media proxy forwards byte ranges with readable CORS without exposing
     404,
   );
 });
+test("releasing a thumbnail aborts upstream traffic and recovers registry capacity without expiring an open player", async () => {
+  let signal;
+  const media = new ThumbnailMedia(
+    async (_url, options) => {
+      signal = options.signal;
+      return new Response(new ReadableStream({ start() {} }));
+    },
+    { maxSources: 2 },
+  );
+  const player = media.create(async () => "https://fixture.invalid/player");
+  const thumb = media.create("https://fixture.invalid/image");
+  const response = await media.handle(new Request(thumb));
+  const body = response.arrayBuffer();
+  const rejected = assert.rejects(body);
+  assert.equal(media.release(thumb), true);
+  await rejected;
+  assert.equal(signal.aborted, true);
+  assert.equal(media.sources.size, 1);
+  for (let i = 0; i < 600; i++)
+    media.release(media.create(`https://fixture.invalid/image-${i}`));
+  assert.equal(media.sources.size, 1);
+  assert.ok(media.sources.has(new URL(player).pathname.slice(1)));
+  assert.equal(media.release("https://fixture.invalid/image"), false);
+  media.clear();
+});
+test("media header and body stalls time out and abort the actual fetch, rather than occupying connections forever", async () => {
+  let headerSignal;
+  const media = new ThumbnailMedia(
+    async (_url, options) => {
+      headerSignal = options.signal;
+      return new Promise(() => {});
+    },
+    { headerTimeoutMs: 15, idleTimeoutMs: 15 },
+  );
+  const response = await media.handle(
+    new Request(media.create("https://fixture.invalid/stalled")),
+  );
+  assert.equal(response.status, 502);
+  assert.equal(headerSignal.aborted, true);
+  let bodySignal;
+  media.fetch = async (_url, options) => {
+    bodySignal = options.signal;
+    return new Response(new ReadableStream({ start() {} }));
+  };
+  const streaming = await media.handle(
+    new Request(media.create("https://fixture.invalid/stalled-body")),
+  );
+  await assert.rejects(streaming.arrayBuffer(), { name: "TimeoutError" });
+  assert.equal(bodySignal.aborted, true);
+  media.fetch = async () => new Response(new Uint8Array([1, 2, 3]));
+  assert.deepEqual(
+    [
+      ...new Uint8Array(
+        await (
+          await media.handle(
+            new Request(media.create("https://fixture.invalid/healthy")),
+          )
+        ).arrayBuffer(),
+      ),
+    ],
+    [1, 2, 3],
+  );
+  media.clear();
+});
+test("canceling the browser response or original request propagates to the upstream fetch", async () => {
+  let upstream;
+  const media = new ThumbnailMedia(async (_url, options) => {
+    upstream = options.signal;
+    return new Response(new ReadableStream({ start() {} }));
+  });
+  const response = await media.handle(
+    new Request(media.create("https://fixture.invalid/body")),
+  );
+  await response.body.cancel();
+  assert.equal(upstream.aborted, true);
+  const controller = new AbortController();
+  const streaming = await media.handle(
+    new Request(media.create("https://fixture.invalid/body"), {
+      signal: controller.signal,
+    }),
+  );
+  const pending = streaming.arrayBuffer();
+  const rejected = assert.rejects(pending);
+  controller.abort();
+  await rejected;
+  assert.equal(upstream.aborted, true);
+  media.clear();
+});
+test("media backpressure while a player is paused does not trigger the network idle timeout", async () => {
+  let signal;
+  const media = new ThumbnailMedia(
+    async (_url, options) => {
+      signal = options.signal;
+      return new Response(new Uint8Array([1, 2, 3]));
+    },
+    { idleTimeoutMs: 15 },
+  );
+  const response = await media.handle(
+    new Request(media.create(async () => "https://fixture.invalid/player")),
+  );
+  await new Promise((resolve) => setTimeout(resolve, 40));
+  assert.equal(signal.aborted, false);
+  assert.deepEqual(
+    [...new Uint8Array(await response.arrayBuffer())],
+    [1, 2, 3],
+  );
+  media.clear();
+});

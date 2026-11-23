@@ -28,6 +28,9 @@ type Job = {
   options: ImageRenderRequest;
   priority: boolean;
   canceled?: boolean;
+  posted?: boolean;
+  controller: AbortController;
+  timer?: ReturnType<typeof setTimeout>;
   resolve(value: ImageRenderResult): void;
   reject(error: Error): void;
 };
@@ -54,16 +57,32 @@ function failure(code: string) {
     ),
   );
 }
+function stopJob(job: Job, error: Error) {
+  job.canceled = true;
+  clearTimeout(job.timer);
+  job.controller.abort();
+  if (active === job) {
+    active = undefined;
+    if (job.posted) {
+      worker?.terminate();
+      worker = undefined;
+      cached.clear();
+    }
+  }
+  job.reject(error);
+}
 function createWorker() {
-  worker = new ImageWorker();
-  worker.onmessage = ({ data }) => {
-    cached = new Set(data.cached || []);
+  const currentWorker = new ImageWorker();
+  worker = currentWorker;
+  currentWorker.onmessage = ({ data }) => {
     const job = active;
-    if (!job || job.id !== data.id) {
+    if (worker !== currentWorker || !job || job.id !== data.id) {
       data.bitmap?.close();
       return;
     }
+    cached = new Set(data.cached || []);
     active = undefined;
+    clearTimeout(job.timer);
     if (job.canceled) {
       data.bitmap?.close();
       job.reject(abort());
@@ -71,14 +90,21 @@ function createWorker() {
     else job.resolve(data);
     void pump();
   };
-  worker.onerror = (event) => {
+  currentWorker.onerror = (event) => {
     event.preventDefault();
-    worker?.terminate();
+    if (worker !== currentWorker) return;
+    currentWorker.terminate();
     worker = undefined;
     cached.clear();
-    const job = active;
-    active = undefined;
-    job?.reject(failure("worker-failed"));
+    if (active) stopJob(active, failure("worker-failed"));
+    void pump();
+  };
+  currentWorker.onmessageerror = () => {
+    if (worker !== currentWorker) return;
+    currentWorker.terminate();
+    worker = undefined;
+    cached.clear();
+    if (active) stopJob(active, failure("worker-failed"));
     void pump();
   };
 }
@@ -86,6 +112,12 @@ async function pump() {
   if (active || !queue.length) return;
   const job = queue.shift()!;
   active = job;
+  job.timer = setTimeout(() => {
+    if (active === job) {
+      stopJob(job, failure("worker-timeout"));
+      void pump();
+    }
+  }, 45000);
   try {
     if (!worker) createWorker();
     const key = keyFor(job.file);
@@ -97,7 +129,18 @@ async function pump() {
           throw new Error(
             t("Перезапустите приложение, чтобы обновить обработку загрузки."),
           );
-        entry = await api.imageSource(job.file.id);
+        const requestId = crypto.randomUUID();
+        const cancel = () => {
+          if (typeof window.jellyree.cancelPreview === "function")
+            void api.cancelPreview(requestId).catch(() => {});
+        };
+        job.controller.signal.addEventListener("abort", cancel, { once: true });
+        try {
+          entry = await api.imageSource(job.file.id, requestId);
+        } finally {
+          job.controller.signal.removeEventListener("abort", cancel);
+        }
+        if (active !== job) return;
         sources.set(key, entry);
         let total = [...sources.values()].reduce(
           (sum, value) => sum + value.data.byteLength,
@@ -114,25 +157,46 @@ async function pump() {
       source = new Uint8Array(entry.data).buffer;
       mimeType = entry.mimeType;
     }
-    if (job.canceled) throw abort();
+    if (active !== job) return;
+    if (job.canceled) {
+      active = undefined;
+      clearTimeout(job.timer);
+      job.reject(abort());
+      void pump();
+      return;
+    }
+    job.posted = true;
     worker!.postMessage(
       { ...job.options, id: job.id, key, source, mimeType },
       source ? [source] : [],
     );
   } catch (error) {
-    active = undefined;
-    job.reject(error as Error);
-    void pump();
+    if (active === job) {
+      active = undefined;
+      clearTimeout(job.timer);
+      job.reject(error as Error);
+      void pump();
+    }
   }
 }
-export function cancelImageWork(owner: string) {
+function cancelOwner(owner: string, force: boolean) {
   for (let index = queue.length - 1; index >= 0; index--) {
     if (queue[index]!.owner === owner) {
-      queue[index]!.reject(abort());
+      stopJob(queue[index]!, abort());
       queue.splice(index, 1);
     }
   }
-  if (active?.owner === owner) active.canceled = true;
+  if (active?.owner === owner) {
+    if (force) stopJob(active, abort());
+    else {
+      active.canceled = true;
+      active.reject(abort());
+    }
+  }
+}
+export function cancelImageWork(owner: string) {
+  cancelOwner(owner, true);
+  void pump();
 }
 export function renderImage(
   owner: string,
@@ -140,11 +204,12 @@ export function renderImage(
   options: ImageRenderRequest,
   priority = false,
 ): Promise<ImageRenderResult> {
-  cancelImageWork(owner);
+  cancelOwner(owner, false);
   return new Promise((resolve, reject) => {
     const job: Job = {
       id: ++serial,
       owner,
+      controller: new AbortController(),
       file,
       options: {
         ...options,

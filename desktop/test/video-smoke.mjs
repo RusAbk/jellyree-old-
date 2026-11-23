@@ -95,6 +95,7 @@ try {
           }
         });
       };
+      replace("media:release", (url) => media.release(url));
       replace("settings:get", () => ({
         configured: true,
         persisted: false,

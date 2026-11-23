@@ -57,3 +57,58 @@ test("duration labels handle short videos, hours and unknown metadata", () => {
     assert.equal(videoDuration(seconds), label);
   }
 });
+test("canceling active or queued thumbnails frees slots even when the old operation ignores cancellation", async () => {
+  const run = createPreviewQueue(1),
+    first = new AbortController(),
+    queued = new AbortController();
+  let started = 0,
+    late;
+  const stalled = run(
+    async () => {
+      started++;
+      return new Promise((resolve) => {
+        late = resolve;
+      });
+    },
+    { signal: first.signal },
+  );
+  const rejected = assert.rejects(stalled, { name: "AbortError" });
+  const skipped = run(
+    async () => {
+      throw new Error("Canceled queue entry must never run");
+    },
+    { signal: queued.signal },
+  );
+  const skippedRejected = assert.rejects(skipped, { name: "AbortError" });
+  const healthy = run(async () => {
+    started++;
+    return "healthy";
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  queued.abort();
+  first.abort();
+  await rejected;
+  await skippedRejected;
+  assert.equal(await healthy, "healthy");
+  assert.equal(started, 2);
+  late("late result");
+  assert.equal(await run(async () => "still healthy"), "still healthy");
+});
+test("a timeout bounds the whole thumbnail operation, including fetching its source URL", async () => {
+  const run = createPreviewQueue(1);
+  let aborted = false;
+  const stalled = run(
+    async (signal) => {
+      signal.addEventListener("abort", () => {
+        aborted = true;
+      });
+      return new Promise(() => {});
+    },
+    { timeoutMs: 15 },
+  );
+  const rejected = assert.rejects(stalled, { name: "TimeoutError" });
+  const healthy = run(async () => "next");
+  await rejected;
+  assert.equal(aborted, true);
+  assert.equal(await healthy, "next");
+});

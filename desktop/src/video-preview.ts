@@ -2,25 +2,74 @@ export function createPreviewQueue(limit = 3) {
   if (!Number.isInteger(limit) || limit < 1)
     throw new RangeError("Invalid preview concurrency");
   let active = 0;
-  const waiting: Array<() => void> = [];
-  return async <T>(job: () => Promise<T>): Promise<T> => {
-    await new Promise<void>((resolve) => {
-      const enter = () => {
-        active++;
-        resolve();
+  const waiting: Array<{ start(): void }> = [];
+  const pump = () => {
+    while (active < limit && waiting.length) waiting.shift()!.start();
+  };
+  return <T>(
+    job: (signal: AbortSignal) => Promise<T>,
+    {
+      signal,
+      timeoutMs = 30000,
+    }: { signal?: AbortSignal; timeoutMs?: number } = {},
+  ): Promise<T> => {
+    return new Promise((resolve, reject) => {
+      const controller = new AbortController();
+      let started = false,
+        settled = false,
+        timer: ReturnType<typeof setTimeout> | undefined;
+      const finish = (error?: unknown, value?: T) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        signal?.removeEventListener("abort", abort);
+        if (started) active--;
+        else {
+          const index = waiting.indexOf(entry);
+          if (index >= 0) waiting.splice(index, 1);
+        }
+        if (error !== undefined) reject(error);
+        else resolve(value as T);
+        pump();
       };
-      if (active < limit) enter();
-      else waiting.push(enter);
+      const abort = () => {
+        const error =
+          signal?.reason || new DOMException("Preview canceled", "AbortError");
+        controller.abort(error);
+        finish(error);
+      };
+      const entry = {
+        start() {
+          started = true;
+          active++;
+          timer = setTimeout(() => {
+            const error = new DOMException("Preview timed out", "TimeoutError");
+            controller.abort(error);
+            finish(error);
+          }, timeoutMs);
+          Promise.resolve()
+            .then(() => {
+              controller.signal.throwIfAborted();
+              return job(controller.signal);
+            })
+            .then(
+              (value) => finish(undefined, value),
+              (error) => finish(error),
+            );
+        },
+      };
+      if (signal?.aborted) {
+        abort();
+        return;
+      }
+      signal?.addEventListener("abort", abort, { once: true });
+      waiting.push(entry);
+      pump();
     });
-    try {
-      return await job();
-    } finally {
-      active--;
-      waiting.shift()?.();
-    }
   };
 }
 export const runVideoPreview = createPreviewQueue();
+export const runThumbnailPreview = createPreviewQueue(3);
 export function videoDuration(seconds: number) {
   if (!Number.isFinite(seconds) || seconds < 0) return "";
   const total = Math.floor(seconds),

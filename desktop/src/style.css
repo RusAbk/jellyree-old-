@@ -1334,6 +1334,25 @@ button {
   max-height: 100%;
   object-fit: contain;
 }
+.thumbnail-retry {
+  position: absolute;
+  right: 8px;
+  bottom: 8px;
+  z-index: 2;
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border: 1px solid #a7afc4;
+  border-radius: 50%;
+  background: #ffffffee;
+  color: #57627f;
+  cursor: pointer;
+}
+.thumbnail-retry:hover {
+  background: #eae4ff;
+  color: #6247a5;
+}
 .document-viewer {
   display: flex;
   flex-direction: column;

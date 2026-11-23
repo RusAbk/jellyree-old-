@@ -302,6 +302,54 @@ test("text editor rolls back its upload on a simultaneous write and keeps the wi
   assert.deepEqual(deleted, [uploaded]);
   await assert.rejects(stat(temporary), { code: "ENOENT" });
 });
+test("preview cancellation reaches D1 fetch and the R2 image stream", async (t) => {
+  const controller = new AbortController();
+  let d1Signal;
+  const client = new D1(config, async (_url, options) => {
+    d1Signal = options.signal;
+    return new Promise((_, reject) =>
+      options.signal.addEventListener(
+        "abort",
+        () => reject(options.signal.reason),
+        { once: true },
+      ),
+    );
+  });
+  const pending = client.query("SELECT 1", [], { signal: controller.signal });
+  const rejected = assert.rejects(pending, { name: "AbortError" });
+  controller.abort();
+  await rejected;
+  assert.equal(d1Signal.aborted, true);
+  const { library, insert } = fixture(t);
+  await library.initialize();
+  insert("image");
+  const imageController = new AbortController();
+  let r2Signal,
+    destroyed = false;
+  library.s3.send = async (_command, options) => {
+    r2Signal = options.abortSignal;
+    return {
+      Body: Object.assign(
+        (async function* () {
+          yield Buffer.from([1]);
+          imageController.abort();
+          yield Buffer.from([2]);
+        })(),
+        {
+          destroy() {
+            destroyed = true;
+          },
+        },
+      ),
+    };
+  };
+  await assert.rejects(
+    library.imageSource("image", { signal: imageController.signal }),
+    { name: "AbortError" },
+  );
+  assert.equal(r2Signal, imageController.signal);
+  assert.equal(destroyed, true);
+});
 test("D1 checks HTTP, envelope and individual query errors without leaking the token", async () => {
   for (const response of [
     Response.json(
