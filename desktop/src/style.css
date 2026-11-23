@@ -1741,3 +1741,237 @@ button {
   margin-top: 18px;
   display: block;
 }
+.file-thumb {
+  position: relative;
+}
+.file-thumb .video-poster {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.file-thumb .video-decoder {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
+}
+.file-thumb.natural-loaded .video-poster {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  max-width: none;
+  max-height: none;
+}
+.file-thumb.natural.video-ready {
+  height: auto;
+  min-height: 0;
+}
+.video-badge {
+  position: absolute;
+  bottom: 8px;
+  right: 8px;
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  padding: 3px 6px;
+  border-radius: 5px;
+  background: #242332b8;
+  color: white;
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  pointer-events: none;
+}
+.video-badge i {
+  font-size: 14px;
+}
+.compact .video-badge {
+  bottom: 1px;
+  right: 1px;
+  padding: 0;
+  background: #242332a6;
+}
+.video-unavailable {
+  font-size: 10px;
+  color: #9c90ad;
+  padding: 0 8px;
+  text-align: center;
+}
+.folder-card.drop-target,
+.tree-row.drop-target,
+.main-nav button.drop-target,
+.breadcrumbs button.drop-target {
+  background: #ebe4ff;
+  box-shadow: inset 0 0 0 2px #a38be5;
+  border-color: #ad96e9;
+  color: #7757b6;
+}
+.drag-source {
+  opacity: 0.5;
+}
+.drag-summary {
+  position: fixed;
+  bottom: 25px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 130;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 11px 17px;
+  background: #7560cf;
+  box-shadow: 0 6px 25px #4b386f35;
+  color: white;
+  border-radius: 9px;
+  font-size: 12px;
+  pointer-events: none;
+}
+.uploads-toggle {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 8px 10px;
+  border: 1px solid #e9e4f5;
+  border-radius: 8px;
+  background: #faf8ff;
+  color: #8271ab;
+  font-size: 11px;
+  white-space: nowrap;
+}
+.uploads-toggle i {
+  font-size: 18px;
+}
+.upload-compact-percent {
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  min-width: 3ch;
+}
+.uploads-toggle.attention {
+  color: #a46e27;
+  background: #fff6e9;
+  border-color: #efd7ae;
+}
+.uploads-toggle strong {
+  border-radius: 4px;
+  background: #ebe4fc;
+  padding: 1px 5px;
+}
+.upload-panel {
+  position: fixed;
+  z-index: 55;
+  bottom: 22px;
+  right: 24px;
+  width: min(410px, calc(100vw - 40px));
+  max-height: min(600px, calc(100vh - 140px));
+  display: flex;
+  flex-direction: column;
+  background: #fff;
+  border: 1px solid #e6e0f1;
+  box-shadow: 0 10px 42px #39324b26;
+  border-radius: 13px;
+  overflow: hidden;
+}
+.upload-panel > header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 15px 18px;
+  background: #faf8ff;
+  border-bottom: 1px solid #eee9f6;
+}
+.upload-panel > header > div {
+  display: grid;
+  gap: 4px;
+}
+.upload-panel > header strong {
+  font-size: 14px;
+  color: #6e608e;
+}
+.upload-panel small {
+  font-size: 10px;
+  color: #9591a4;
+  overflow-wrap: anywhere;
+}
+.upload-jobs {
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 0 18px;
+}
+.upload-jobs > p {
+  padding: 16px 0;
+  font-size: 12px;
+}
+.upload-job {
+  padding: 16px 0;
+  border-bottom: 1px solid #f0edf5;
+}
+.upload-job:last-child {
+  border-bottom: 0;
+}
+.upload-job-title {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin-bottom: 5px;
+  color: #807098;
+}
+.upload-job-title strong {
+  font-size: 12px;
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.upload-job-status,
+.upload-result {
+  font-size: 11px;
+  margin: 9px 0;
+  color: #8a819b;
+}
+.upload-job-status.error {
+  color: #c45872;
+}
+.upload-job-status.success {
+  color: #4b9c7f;
+}
+.upload-current {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 10px;
+  color: #9382b3;
+}
+.upload-current > span:first-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.upload-job progress {
+  width: 100%;
+  height: 5px;
+  margin: 8px 0;
+  accent-color: #a391d4;
+}
+.upload-job details {
+  margin-top: 10px;
+  font-size: 11px;
+  color: #a17b53;
+  overflow-wrap: anywhere;
+}
+.upload-job summary {
+  cursor: pointer;
+}
+.upload-job .button {
+  margin: 5px 0;
+  font-size: 11px;
+}
+.upload-panel > footer {
+  padding: 10px 18px;
+  border-top: 1px solid #eee9f6;
+  background: #faf8ff;
+}
+@media (max-width: 1200px) {
+  .uploads-toggle > span {
+    display: none;
+  }
+}

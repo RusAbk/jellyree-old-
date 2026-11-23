@@ -65,6 +65,8 @@ export type Stats = {
 };
 export type Progress = {
   kind: "upload" | "download" | "import";
+  jobId?: string;
+  phase?: "queued" | "preparing" | "uploading";
   name?: string;
   done: number;
   total?: number;
@@ -80,6 +82,7 @@ export type UploadResult = {
   failures: { name: string; message: string }[];
 };
 export type UploadConflict = {
+  jobId?: string;
   id: string;
   name: string;
   targetPath: string;
@@ -115,8 +118,16 @@ export interface Jellyree {
   url(id: string): Promise<string>;
   share(id: string): Promise<{ expiresIn: number }>;
   download(ids: string[]): Promise<{ done: number }>;
-  pickUpload(folderId: string | null, folders: boolean): Promise<UploadResult>;
-  dropUpload(files: File[], folderId: string | null): Promise<UploadResult>;
+  pickUpload(
+    folderId: string | null,
+    folders: boolean,
+    jobId?: string,
+  ): Promise<UploadResult>;
+  dropUpload(
+    files: File[],
+    folderId: string | null,
+    jobId?: string,
+  ): Promise<UploadResult>;
   importBucket(): Promise<{ scanned: number }>;
   answerUploadConflict(input: UploadConflictAnswer): Promise<void>;
   onUploadConflict(callback: (conflict: UploadConflict) => void): () => void;

@@ -1040,6 +1040,64 @@ Object.assign(messages, {
     es: "Reinicia la aplicación para actualizar la gestión de subidas.",
   },
 });
+Object.assign(messages, {
+  "Превью видео: {0}": {
+    en: "Video preview: {0}",
+    es: "Vista previa del vídeo: {0}",
+  },
+  "Превью недоступно": {
+    en: "Preview unavailable",
+    es: "Vista previa no disponible",
+  },
+  "Папка перемещена.": { en: "Folder moved.", es: "Carpeta movida." },
+  "Файлы уже находятся в этой папке.": {
+    en: "The files are already in this folder.",
+    es: "Los archivos ya están en esta carpeta.",
+  },
+  "Перемещено файлов: {0}": {
+    en: "Files moved: {0}",
+    es: "Archivos movidos: {0}",
+  },
+  "Перенос файлов: {0}": {
+    en: "Moving files: {0}",
+    es: "Moviendo archivos: {0}",
+  },
+  "Перенос папки": { en: "Moving folder", es: "Moviendo carpeta" },
+});
+Object.assign(messages, {
+  Загрузки: { en: "Uploads", es: "Subidas" },
+  "Выбор файлов…": { en: "Choosing files…", es: "Seleccionando archivos…" },
+  "В очереди": { en: "Queued", es: "En cola" },
+  "Подготовка загрузки…": { en: "Preparing upload…", es: "Preparando subida…" },
+  "Нужно решить совпадение имён": {
+    en: "Name conflict needs your decision",
+    es: "Un conflicto de nombres requiere tu decisión",
+  },
+  "Загрузка завершена": { en: "Upload complete", es: "Subida completada" },
+  "Завершено с замечаниями": {
+    en: "Finished with issues",
+    es: "Finalizado con incidencias",
+  },
+  "Ошибка загрузки": { en: "Upload failed", es: "Error de subida" },
+  "Загрузка отменена": { en: "Upload canceled", es: "Subida cancelada" },
+  "Активных задач: {0}": { en: "Active tasks: {0}", es: "Tareas activas: {0}" },
+  "Все загрузки завершены": {
+    en: "All uploads finished",
+    es: "Todas las subidas han finalizado",
+  },
+  "Скрыть загрузки": { en: "Hide uploads", es: "Ocultar subidas" },
+  "Загрузок пока нет": { en: "No uploads yet", es: "Aún no hay subidas" },
+  "Прогресс загрузки": { en: "Upload progress", es: "Progreso de subida" },
+  "Разобрать совпадение": { en: "Resolve conflict", es: "Resolver conflicto" },
+  Подробности: { en: "Details", es: "Detalles" },
+  "Ошибок: {0}": { en: "Errors: {0}", es: "Errores: {0}" },
+  "Убрать завершённые": { en: "Clear finished", es: "Quitar finalizadas" },
+  "Вернуться к файлам": { en: "Back to files", es: "Volver a los archivos" },
+  "Изменить подключение можно после завершения загрузок.": {
+    en: "You can change the connection after uploads finish.",
+    es: "Puedes cambiar la conexión cuando finalicen las subidas.",
+  },
+});
 export const languages = ["en", "ru", "es"];
 export function normalizeLanguage(value) {
   return languages.includes(value) ? value : "en";

@@ -4,7 +4,7 @@ import { reactive, ref, computed } from "vue";
 import type { Connection, Settings } from "./types";
 import { api } from "./api";
 import LanguageSelect from "./LanguageSelect.vue";
-const props = defineProps<{ settings: Settings }>();
+const props = defineProps<{ settings: Settings; locked?: boolean }>();
 const emit = defineEmits<{
   close: [];
   saved: [settings: Settings];
@@ -29,6 +29,7 @@ const placeholder = computed(() =>
     : "",
 );
 async function run(save: boolean) {
+  if (busy.value || props.locked) return;
   busy.value = true;
   error.value = "";
   message.value = "";
@@ -48,6 +49,7 @@ async function run(save: boolean) {
   }
 }
 async function disconnect() {
+  if (busy.value || props.locked) return;
   busy.value = true;
   try {
     await api.settings.clear();
@@ -94,7 +96,10 @@ async function disconnect() {
         }}
       </p>
       <form @submit.prevent="run(true)">
-        <fieldset :disabled="busy">
+        <p v-if="locked" class="info-note">
+          {{ t("Изменить подключение можно после завершения загрузок.") }}
+        </p>
+        <fieldset :disabled="busy || locked">
           <label
             >{{ t("ID аккаунта Cloudflare")
             }}<input
@@ -183,12 +188,15 @@ async function disconnect() {
           <button
             type="button"
             class="button"
-            :disabled="busy"
+            :disabled="busy || locked"
             @click="run(false)"
           >
             {{
               busy ? t("Подключение…") : t("Проверить подключение")
-            }}</button><button class="button primary" :disabled="busy">
+            }}</button><button
+            class="button primary"
+            :disabled="busy || locked"
+          >
             {{ t("Сохранить и открыть") }}
           </button>
         </footer>
@@ -200,7 +208,7 @@ async function disconnect() {
           }}</span
           ><button
             class="text-button danger"
-            :disabled="busy"
+            :disabled="busy || locked"
             @click="disconnect"
           >
             {{ t("Отключить") }}</button
@@ -210,7 +218,7 @@ async function disconnect() {
         ><button
           v-else
           class="text-button danger"
-          :disabled="busy"
+          :disabled="busy || locked"
           @click="forget = true"
         >
           {{ t("Забыть подключение на этом устройстве") }}

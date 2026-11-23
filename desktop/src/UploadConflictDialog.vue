@@ -32,7 +32,7 @@ function tab(event: KeyboardEvent) {
     : (index + 1) % items.length;
   items[next]?.focus();
 }
-const emit = defineEmits<{ resolved: [id: string] }>();
+const emit = defineEmits<{ resolved: [id: string]; close: [] }>();
 const name = ref(props.conflict.suggestedName),
   applyToAll = ref(false),
   busy = ref(false),
@@ -59,7 +59,7 @@ async function answer(action: UploadConflictAnswer["action"]) {
 <template>
   <div
     class="overlay upload-conflict-overlay"
-    @keydown.esc.stop.prevent="answer('cancel')"
+    @keydown.esc.stop.prevent="!busy && emit('close')"
     @keydown.tab.stop.prevent="tab"
   >
     <section
@@ -74,6 +74,14 @@ async function answer(action: UploadConflictAnswer["action"]) {
         <h2 id="conflict-title">
           {{ t("Файл с таким именем уже существует") }}
         </h2>
+        <button
+          class="icon-button"
+          :disabled="busy"
+          :aria-label="t('Вернуться к файлам')"
+          @click="emit('close')"
+        >
+          <i aria-hidden="true" class="ri-close-line"></i>
+        </button>
       </header>
       <p class="conflict-filename">{{ conflict.name }}</p>
       <p class="muted">

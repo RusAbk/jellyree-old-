@@ -18,13 +18,14 @@ contextBridge.exposeInMainWorld("jellyree", {
   url: (id) => invoke("files:url", id),
   share: (id) => invoke("files:share", id),
   download: (ids) => invoke("files:download", ids),
-  pickUpload: (folderId, folders) =>
-    invoke("files:pick-upload", folderId, folders),
-  dropUpload: (files, folderId) =>
+  pickUpload: (folderId, folders, jobId) =>
+    invoke("files:pick-upload", folderId, folders, jobId),
+  dropUpload: (files, folderId, jobId) =>
     invoke(
       "files:drop-upload",
       Array.from(files, (file) => webUtils.getPathForFile(file)),
       folderId,
+      jobId,
     ),
   importBucket: () => invoke("files:import"),
   answerUploadConflict: (input) => invoke("uploads:answer", input),

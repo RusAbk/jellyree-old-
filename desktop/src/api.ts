@@ -16,10 +16,11 @@ export function createApi(bridge: Jellyree): Jellyree {
     url: (id) => bridge.url(id),
     share: (id) => bridge.share(id),
     download: (ids) => bridge.download(toIpcData(ids)),
-    pickUpload: (folderId, folders) => bridge.pickUpload(folderId, folders),
+    pickUpload: (folderId, folders, jobId) =>
+      bridge.pickUpload(folderId, folders, jobId),
     // Native File objects must reach webUtils unchanged; they are not DTOs.
-    dropUpload: (files, folderId) =>
-      bridge.dropUpload(Array.from(files), folderId),
+    dropUpload: (files, folderId, jobId) =>
+      bridge.dropUpload(Array.from(files), folderId, jobId),
     importBucket: () => bridge.importBucket(),
     answerUploadConflict: (input) =>
       bridge.answerUploadConflict(toIpcData(input)),

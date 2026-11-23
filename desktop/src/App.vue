@@ -12,10 +12,17 @@ import FileThumb from "./FileThumb.vue";
 import SettingsPanel from "./SettingsPanel.vue";
 import ContextMenu, { type MenuItem } from "./ContextMenu.vue";
 import UploadConflictDialog from "./UploadConflictDialog.vue";
+import UploadPanel from "./UploadPanel.vue";
+import { useUploadJobs, uploadPercent } from "./use-upload-jobs";
 import LanguageSelect from "./LanguageSelect.vue";
 import { syncLanguage } from "./i18n";
 import { bytes, date, icon, imageStyle } from "./format";
 import { api } from "./api";
+import {
+  INTERNAL_DRAG_TYPE,
+  canMoveFolder,
+  type DragItems,
+} from "./drag-items";
 import type {
   Adjustments,
   DriveFile,
@@ -24,8 +31,6 @@ import type {
   Progress,
   Settings,
   Stats,
-  UploadResult,
-  UploadConflict,
 } from "./types";
 
 const settings = ref<Settings>({ configured: false, persisted: false });
@@ -69,11 +74,29 @@ const selection = ref<string[]>([]),
   total = ref(0),
   hasMore = ref(false),
   page = ref(1);
-const uploadConflict = ref<UploadConflict | null>(null);
+const {
+  jobs: uploadJobs,
+  panelOpen: uploadsOpen,
+  pending: pendingUploads,
+  issues: uploadIssues,
+  running: runningUpload,
+  hasFinished: hasFinishedUploads,
+  conflict: uploadConflict,
+  conflictOpen: uploadConflictOpen,
+  start: startUpload,
+  onProgress: uploadProgress,
+  onConflict: uploadConflictReceived,
+  resolveConflict: resolveUploadConflict,
+  clearFinished: clearFinishedUploads,
+} = useUploadJobs(api, requestUploadRefresh);
+let uploadRefreshPending = false;
 const error = ref(""),
   notice = ref(""),
   progress = ref<Progress | null>(null),
   dragging = ref(false);
+const draggedItems = ref<DragItems | null>(null);
+const dropTarget = ref<string | null | undefined>(undefined);
+const dragSession = crypto.randomUUID();
 const preview = ref<DriveFile | null>(null),
   previewUrl = ref(""),
   previewError = ref(""),
@@ -419,26 +442,53 @@ function navigate(next: string, id: string | null = null, nextTag = "") {
   for (const f of breadcrumbs.value) expanded.value.add(f.id);
   void reload();
 }
-async function reload(more = false) {
+function requestUploadRefresh() {
+  uploadRefreshPending = true;
+  flushUploadRefresh();
+}
+function flushUploadRefresh() {
+  if (
+    !uploadRefreshPending ||
+    busy.value ||
+    loading.value ||
+    !settings.value.configured
+  )
+    return;
+  uploadRefreshPending = false;
+  void reload(false, true);
+}
+watch([busy, loading], flushUploadRefresh);
+async function reload(more = false, background = false) {
   if (!settings.value.configured) return;
   const id = ++generation,
-    nextPage = more ? page.value + 1 : 1;
+    nextPage = more ? page.value + 1 : background ? page.value : 1;
   loading.value = true;
-  error.value = "";
+  if (!background) error.value = "";
   try {
-    const [result, tree, usage] = await Promise.all([
-      api.list({
-        section: section.value,
-        folderId: folderId.value,
-        search: search.value,
-        tag: tag.value,
-        sort: sort.value,
-        page: nextPage,
-      }),
+    const pages = background
+      ? Array.from({ length: nextPage }, (_, index) => index + 1)
+      : [nextPage];
+    const [results, tree, usage] = await Promise.all([
+      Promise.all(
+        pages.map((requestedPage) =>
+          api.list({
+            section: section.value,
+            folderId: folderId.value,
+            search: search.value,
+            tag: tag.value,
+            sort: sort.value,
+            page: requestedPage,
+          }),
+        ),
+      ),
       more ? Promise.resolve(folders.value) : api.folders(),
       more ? Promise.resolve(stats.value) : api.stats(),
     ]);
     if (id !== generation) return;
+    const result = {
+      ...results[results.length - 1]!,
+      items: results.flatMap((result) => result.items),
+    };
     files.value = more ? [...files.value, ...result.items] : result.items;
     folders.value = tree;
     stats.value = usage;
@@ -455,7 +505,7 @@ async function reload(more = false) {
       else if (updated) preview.value = updated;
     }
   } catch (e) {
-    if (id === generation) error.value = (e as Error).message;
+    if (id === generation && !background) error.value = (e as Error).message;
   } finally {
     if (id === generation) loading.value = false;
   }
@@ -484,11 +534,144 @@ async function action(fn: () => Promise<unknown>, message = "") {
   }
 }
 function dragleave(event: DragEvent) {
-  if (!event.relatedTarget) dragging.value = false;
+  if (!event.relatedTarget) {
+    dragging.value = false;
+    dropTarget.value = undefined;
+  }
 }
 function dragover(event: DragEvent) {
+  if (busy.value || !settings.value.configured) return;
+  dropTarget.value = undefined;
+  if (isInternalDrag(event)) {
+    dragging.value = false;
+    if (section.value === "drive" && acceptsFolderDrop(event, folderId.value)) {
+      event.preventDefault();
+      if (event.dataTransfer) event.dataTransfer.dropEffect = "move";
+    }
+  } else if (event.dataTransfer?.types.includes("Files")) {
+    event.preventDefault();
+    dragging.value = true;
+    event.dataTransfer.dropEffect = "copy";
+  }
+}
+function isInternalDrag(event: DragEvent) {
+  return (
+    !!draggedItems.value &&
+    !!event.dataTransfer?.types.includes(INTERNAL_DRAG_TYPE)
+  );
+}
+function finishDrag() {
+  draggedItems.value = null;
+  dropTarget.value = undefined;
+  dragging.value = false;
+}
+function fileDragStart(event: DragEvent, file: DriveFile) {
+  if (busy.value || file.trashed_at || !event.dataTransfer) {
+    event.preventDefault();
+    return;
+  }
+  closeContextMenu();
+  if (!selection.value.includes(file.id)) selection.value = [file.id];
+  draggedItems.value = { kind: "files", ids: [...selection.value] };
+  event.dataTransfer.effectAllowed = "move";
+  event.dataTransfer.setData(INTERNAL_DRAG_TYPE, dragSession);
+  event.dataTransfer.setData("text/plain", file.name);
+}
+function folderDragStart(event: DragEvent, folder: Folder) {
+  if (busy.value || !event.dataTransfer) {
+    event.preventDefault();
+    return;
+  }
+  closeContextMenu();
+  selection.value = [];
+  draggedItems.value = { kind: "folder", id: folder.id };
+  event.dataTransfer.effectAllowed = "move";
+  event.dataTransfer.setData(INTERNAL_DRAG_TYPE, dragSession);
+  event.dataTransfer.setData("text/plain", folder.name);
+}
+function acceptsFolderDrop(event: DragEvent, target: string | null) {
+  if (
+    busy.value ||
+    !settings.value.configured ||
+    (target !== null && !folders.value.some((folder) => folder.id === target))
+  )
+    return false;
+  if (isInternalDrag(event)) {
+    const items = draggedItems.value!;
+    return (
+      items.kind === "files" || canMoveFolder(folders.value, items.id, target)
+    );
+  }
+  return !!event.dataTransfer?.types.includes("Files");
+}
+function folderDragOver(event: DragEvent, target: string | null) {
+  event.stopPropagation();
+  dragging.value = false;
+  if (!acceptsFolderDrop(event, target)) {
+    dropTarget.value = undefined;
+    if (event.dataTransfer) event.dataTransfer.dropEffect = "none";
+    return;
+  }
   event.preventDefault();
-  if (event.dataTransfer?.types.includes("Files")) dragging.value = true;
+  dropTarget.value = target;
+  if (event.dataTransfer)
+    event.dataTransfer.dropEffect = isInternalDrag(event) ? "move" : "copy";
+}
+function folderDragLeave(event: DragEvent, target: string | null) {
+  const next = event.relatedTarget;
+  if (
+    !(next instanceof Node) ||
+    !(event.currentTarget as HTMLElement).contains(next)
+  ) {
+    if (dropTarget.value === target) dropTarget.value = undefined;
+  }
+}
+async function moveDropped(event: DragEvent, target: string | null) {
+  const items = draggedItems.value;
+  const trusted =
+    event.dataTransfer?.getData(INTERNAL_DRAG_TYPE) === dragSession;
+  finishDrag();
+  if (!items || !trusted || busy.value) return;
+  if (items.kind === "folder") {
+    if (!canMoveFolder(folders.value, items.id, target)) return;
+    await action(
+      () => api.updateFolder(items.id, { parentId: target }),
+      t("Папка перемещена."),
+    );
+  } else {
+    const ids = items.ids.filter((id) =>
+      files.value.some(
+        (file) =>
+          file.id === id && !file.trashed_at && file.folder_id !== target,
+      ),
+    );
+    if (!ids.length) {
+      notice.value = t("Файлы уже находятся в этой папке.");
+      return;
+    }
+    await patch(
+      ids,
+      { folderId: target },
+      t("Перемещено файлов: {0}", { "0": ids.length }),
+    );
+  }
+}
+async function folderDrop(event: DragEvent, target: string | null) {
+  event.preventDefault();
+  event.stopPropagation();
+  const accepted = acceptsFolderDrop(event, target);
+  dropTarget.value = undefined;
+  dragging.value = false;
+  if (!accepted) {
+    finishDrag();
+    return;
+  }
+  if (isInternalDrag(event)) await moveDropped(event, target);
+  else if (event.dataTransfer?.files.length) {
+    const files = Array.from(event.dataTransfer.files);
+    finishDrag();
+    await upload(false, files, target);
+  }
 }
 function select(file: DriveFile, event?: MouseEvent) {
   if (event?.metaKey || event?.ctrlKey || event?.shiftKey) {
@@ -520,28 +703,22 @@ async function upload(
     settingsOpen.value = true;
     return;
   }
-  await action(async () => {
-    const result: UploadResult = dropped
-      ? await api.dropUpload(dropped, targetFolderId)
-      : await api.pickUpload(targetFolderId, folders);
-    if (result.failures.length) {
-      error.value = t("Загружено: {0}. Ошибок: {1}. {2}", {
-        "0": result.done,
-        "1": result.failures.length,
-        "2": result.failures.map((f) => `${f.name}: ${f.message}`).join("; "),
-      });
-    }
-    notice.value = t("Загружено файлов: {0}. Пропущено: {1}.", {
-      "0": result.done,
-      "1": result.skipped || 0,
-    });
-    if (result.canceled) notice.value += t(" Оставшиеся загрузки отменены.");
-    if (result.warnings?.length) error.value = result.warnings.join("; ");
-  });
+  const destination =
+    folderOptions.value.find((folder) => folder.id === targetFolderId)?.name ||
+    "";
+  await startUpload(folders, dropped, targetFolderId, destination);
 }
 async function drop(event: DragEvent) {
-  event.preventDefault();
   dragging.value = false;
+  dropTarget.value = undefined;
+  if (isInternalDrag(event)) {
+    event.preventDefault();
+    if (section.value === "drive") await moveDropped(event, folderId.value);
+    else finishDrag();
+    return;
+  }
+  if (!event.dataTransfer?.files.length) return;
+  event.preventDefault();
   if (!busy.value && event.dataTransfer?.files.length)
     await upload(false, Array.from(event.dataTransfer.files));
 }
@@ -717,7 +894,8 @@ function keydown(event: KeyboardEvent) {
     }
     return;
   }
-  if (settingsOpen.value) return;
+  if (settingsOpen.value || (uploadConflict.value && uploadConflictOpen.value))
+    return;
   if (
     event.target instanceof HTMLElement &&
     (["INPUT", "TEXTAREA", "SELECT"].includes(event.target.tagName) ||
@@ -798,12 +976,12 @@ onMounted(async () => {
   }
   await syncLanguage();
   unsubscribe = api.onProgress((p) => {
-    progress.value = p;
+    if (p.kind === "upload") uploadProgress(p);
+    else progress.value = p;
   });
   if (typeof window.jellyree.onUploadConflict === "function")
     unsubscribeConflict = api.onUploadConflict((conflict) => {
-      uploadConflict.value = conflict;
-      closeContextMenu();
+      uploadConflictReceived(conflict);
     });
   try {
     settings.value = await api.settings.get();
@@ -830,6 +1008,7 @@ onBeforeUnmount(() => {
     @dragover="dragover"
     @dragleave="dragleave"
     @drop="drop"
+    @dragend="finishDrag"
   >
     <aside class="sidebar">
       <a class="brand" href="#" @click.prevent="navigate('drive')"
@@ -850,8 +1029,14 @@ onBeforeUnmount(() => {
         <button
           v-for="item in nav"
           :key="item.id"
-          :class="{ active: section === item.id && !folderId && !tag }"
+          :class="{
+            active: section === item.id && !folderId && !tag,
+            'drop-target': item.id === 'drive' && dropTarget === null,
+          }"
           @click="navigate(item.id)"
+          @dragover="item.id === 'drive' && folderDragOver($event, null)"
+          @dragleave="item.id === 'drive' && folderDragLeave($event, null)"
+          @drop="item.id === 'drive' && folderDrop($event, null)"
         >
           <i aria-hidden="true" :class="item.icon"></i>{{ item.label
           }}<span
@@ -882,9 +1067,18 @@ onBeforeUnmount(() => {
           class="tree-row"
           :class="{
             active: folderId === node.folder.id && section === 'drive',
+            'drop-target': dropTarget === node.folder.id,
+            'drag-source':
+              draggedItems?.kind === 'folder' &&
+              draggedItems.id === node.folder.id,
           }"
           :style="{ paddingLeft: `${8 + node.depth * 14}px` }"
           @contextmenu="folderContext($event, node.folder)"
+          :draggable="!busy"
+          @dragstart.stop="folderDragStart($event, node.folder)"
+          @dragover="folderDragOver($event, node.folder.id)"
+          @dragleave="folderDragLeave($event, node.folder.id)"
+          @drop="folderDrop($event, node.folder.id)"
         >
           <button
             class="tree-chevron"
@@ -975,6 +1169,35 @@ onBeforeUnmount(() => {
           ><kbd>Ctrl A</kbd>
         </div>
         <LanguageSelect :disabled="busy" />
+        <button
+          class="uploads-toggle"
+          :class="{ attention: !!uploadConflict || uploadIssues > 0 }"
+          :aria-label="t('Загрузки')"
+          :title="
+            uploadConflict
+              ? t('Нужно решить совпадение имён')
+              : uploadIssues
+                ? t('Завершено с замечаниями')
+                : t('Загрузки')
+          "
+          :aria-expanded="uploadsOpen"
+          aria-controls="upload-panel"
+          @click="uploadsOpen = !uploadsOpen"
+        >
+          <i
+            aria-hidden="true"
+            :class="
+              uploadConflict || uploadIssues
+                ? 'ri-error-warning-line'
+                : 'ri-upload-cloud-2-line'
+            "
+          ></i
+          ><span>{{ t("Загрузки") }}</span
+          ><strong v-if="pendingUploads">{{ pendingUploads }}</strong>
+          <small v-if="runningUpload?.progress" class="upload-compact-percent"
+            >{{ uploadPercent(runningUpload.progress) }}%</small
+          >
+        </button>
         <span class="direct-badge"
           ><span
             class="status-dot"
@@ -1049,12 +1272,24 @@ onBeforeUnmount(() => {
       </div>
       <section class="content" @contextmenu="emptyContext">
         <div v-if="section === 'drive' && folderId" class="breadcrumbs">
-          <button @click="navigate('drive')">
+          <button
+            @click="navigate('drive')"
+            :class="{ 'drop-target': dropTarget === null }"
+            @dragover="folderDragOver($event, null)"
+            @dragleave="folderDragLeave($event, null)"
+            @drop="folderDrop($event, null)"
+          >
             {{ t("Мой диск") }}</button><template
             v-for="crumb in breadcrumbs"
             :key="crumb.id"
             ><i aria-hidden="true" class="ri-arrow-right-s-line"></i
-            ><button @click="navigate('drive', crumb.id)">
+            ><button
+              @click="navigate('drive', crumb.id)"
+              :class="{ 'drop-target': dropTarget === crumb.id }"
+              @dragover="folderDragOver($event, crumb.id)"
+              @dragleave="folderDragLeave($event, crumb.id)"
+              @drop="folderDrop($event, crumb.id)"
+            >
               {{ crumb.name }}
             </button></template
           >
@@ -1153,9 +1388,20 @@ onBeforeUnmount(() => {
               v-for="folder in childFolders"
               :key="folder.id"
               class="folder-card"
+              :class="{
+                'drop-target': dropTarget === folder.id,
+                'drag-source':
+                  draggedItems?.kind === 'folder' &&
+                  draggedItems.id === folder.id,
+              }"
               :title="folder.name"
               @click="navigate('drive', folder.id)"
               @contextmenu="folderContext($event, folder)"
+              :draggable="!busy"
+              @dragstart.stop="folderDragStart($event, folder)"
+              @dragover="folderDragOver($event, folder.id)"
+              @dragleave="folderDragLeave($event, folder.id)"
+              @drop="folderDrop($event, folder.id)"
             >
               <span class="folder-card-icon"
                 ><i aria-hidden="true" class="ri-folder-3-fill"></i></span
@@ -1355,7 +1601,14 @@ onBeforeUnmount(() => {
               v-for="file in files"
               :key="file.id"
               class="file-card"
-              :class="{ selected: selection.includes(file.id) }"
+              :class="{
+                selected: selection.includes(file.id),
+                'drag-source':
+                  draggedItems?.kind === 'files' &&
+                  draggedItems.ids.includes(file.id),
+              }"
+              :draggable="!busy && !file.trashed_at"
+              @dragstart.stop="fileDragStart($event, file)"
               tabindex="0"
               @click="select(file, $event)"
               @dblclick="openPreview(file)"
@@ -1512,7 +1765,7 @@ onBeforeUnmount(() => {
         ><button
           v-if="settings.configured"
           class="text-button"
-          :disabled="busy"
+          :disabled="busy || pendingUploads > 0"
           @click="openModal('import')"
         >
           {{ t("Индексировать R2") }}</button
@@ -1590,17 +1843,31 @@ onBeforeUnmount(() => {
       <h2>{{ t("Отпустите, чтобы загрузить") }}</h2>
       <p>{{ uploadFolder ? currentFolder?.name : t("Мой диск") }}</p>
     </div>
+    <div v-if="draggedItems" class="drag-summary" role="status">
+      <i aria-hidden="true" class="ri-folder-transfer-line"></i
+      >{{
+        draggedItems.kind === "files"
+          ? t("Перенос файлов: {0}", { "0": draggedItems.ids.length })
+          : t("Перенос папки")
+      }}
+    </div>
   </div>
 
+  <UploadPanel
+    v-if="uploadsOpen"
+    :jobs="uploadJobs"
+    :pending="pendingUploads"
+    :has-finished="hasFinishedUploads"
+    @close="uploadsOpen = false"
+    @clear="clearFinishedUploads"
+    @conflict="uploadConflictOpen = true"
+  />
   <UploadConflictDialog
-    v-if="uploadConflict"
+    v-if="uploadConflict && uploadConflictOpen"
     :key="uploadConflict.id"
     :conflict="uploadConflict"
-    @resolved="
-      (id) => {
-        if (uploadConflict?.id === id) uploadConflict = null;
-      }
-    "
+    @resolved="resolveUploadConflict"
+    @close="uploadConflictOpen = false"
   />
   <ContextMenu
     v-if="contextMenu"
@@ -1621,6 +1888,7 @@ onBeforeUnmount(() => {
   <SettingsPanel
     v-if="settingsOpen"
     :settings="settings"
+    :locked="pendingUploads > 0"
     @close="settingsOpen = false"
     @saved="saved"
     @disconnected="disconnected"

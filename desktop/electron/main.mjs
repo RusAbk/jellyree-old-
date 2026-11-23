@@ -13,7 +13,9 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { ConfigStore } from "./config.mjs";
 import { Library } from "./library.mjs";
 import { UploadConflictBroker } from "./upload-conflicts.mjs";
+import { OperationQueue } from "./operation-queue.mjs";
 const uploadConflicts = new UploadConflictBroker();
+const uploads = new OperationQueue();
 import { setLanguage } from "./locales.mjs";
 
 const directory = path.dirname(fileURLToPath(import.meta.url));
@@ -85,16 +87,24 @@ function progress(value) {
   if (!window?.isDestroyed())
     window.webContents.send("jellyree:progress", value);
 }
-function uploadPaths(paths, folderId) {
-  return library.uploadPaths(
-    paths,
-    folderId,
-    (value) => progress({ kind: "upload", ...value }),
-    (info, validate) =>
-      uploadConflicts.request(info, validate, (value) =>
-        window.webContents.send("jellyree:upload-conflict", value),
-      ),
-  );
+function uploadPaths(paths, folderId, jobId) {
+  progress({ kind: "upload", jobId, phase: "queued", done: 0 });
+  return uploads.run(() => {
+    progress({ kind: "upload", jobId, phase: "preparing", done: 0 });
+    return library.uploadPaths(
+      paths,
+      folderId,
+      (value) =>
+        progress({ kind: "upload", jobId, phase: "uploading", ...value }),
+      (info, validate) =>
+        uploadConflicts.request(info, validate, (value) =>
+          window.webContents.send("jellyree:upload-conflict", {
+            ...value,
+            jobId,
+          }),
+        ),
+    );
+  });
 }
 function refreshMenu() {
   Menu.setApplicationMenu(
@@ -256,31 +266,29 @@ function registerHandlers() {
       return { done };
     }),
   );
-  handle("files:pick-upload", (folderId, folders = false) =>
-    transferOperation(async () => {
-      const result = await dialog.showOpenDialog(window, {
-        title: folders ? t("Загрузить папку") : t("Загрузить файлы"),
-        buttonLabel: t("Загрузить"),
-        properties: folders
-          ? ["openDirectory", "multiSelections"]
-          : ["openFile", "multiSelections"],
-      });
-      if (result.canceled)
-        return {
-          done: 0,
-          skipped: 0,
-          canceled: true,
-          failures: [],
-          warnings: [],
-        };
-      return uploadPaths(result.filePaths, folderId);
-    }),
-  );
-  handle("files:drop-upload", (paths, folderId) =>
-    transferOperation(() => uploadPaths(paths, folderId)),
+  handle("files:pick-upload", async (folderId, folders = false, jobId) => {
+    const result = await dialog.showOpenDialog(window, {
+      title: folders ? t("Загрузить папку") : t("Загрузить файлы"),
+      buttonLabel: t("Загрузить"),
+      properties: folders
+        ? ["openDirectory", "multiSelections"]
+        : ["openFile", "multiSelections"],
+    });
+    if (result.canceled)
+      return {
+        done: 0,
+        skipped: 0,
+        canceled: true,
+        failures: [],
+        warnings: [],
+      };
+    return uploadPaths(result.filePaths, folderId, jobId);
+  });
+  handle("files:drop-upload", (paths, folderId, jobId) =>
+    uploadPaths(paths, folderId, jobId),
   );
   handle("files:import", () =>
-    transferOperation(() =>
+    uploads.run(() =>
       library.importBucket((value) => progress({ kind: "import", ...value })),
     ),
   );
