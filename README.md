@@ -72,3 +72,5 @@ npm run dev
 ```
 
 See [desktop setup, features, migration scope and packaging](desktop/README.md).
+
+Build installers from the repository root with `npm run dist:desktop:linux`, `npm run dist:desktop:win`, or `npm run dist:desktop:mac`. See the desktop README for architecture options and the manual GitHub Actions workflow.
