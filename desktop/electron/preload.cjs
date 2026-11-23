@@ -5,6 +5,7 @@ const invoke = async (channel, ...args) => {
   return result.value;
 };
 contextBridge.exposeInMainWorld("jellyree", {
+  setLocale: (value) => invoke("app:locale", value),
   settings: {
     get: () => invoke("settings:get"),
     test: (input) => invoke("settings:test", input),
@@ -26,6 +27,13 @@ contextBridge.exposeInMainWorld("jellyree", {
       folderId,
     ),
   importBucket: () => invoke("files:import"),
+  answerUploadConflict: (input) => invoke("uploads:answer", input),
+  onUploadConflict: (callback) => {
+    const listener = (_event, value) => callback(value);
+    ipcRenderer.on("jellyree:upload-conflict", listener);
+    return () =>
+      ipcRenderer.removeListener("jellyree:upload-conflict", listener);
+  },
   folders: () => invoke("folders:list"),
   createFolder: (name, parent) => invoke("folders:create", name, parent),
   updateFolder: (id, patch) => invoke("folders:update", id, patch),

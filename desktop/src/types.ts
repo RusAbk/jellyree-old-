@@ -74,9 +74,30 @@ export type Progress = {
 };
 export type UploadResult = {
   done: number;
+  skipped?: number;
+  canceled?: boolean;
+  warnings?: string[];
   failures: { name: string; message: string }[];
 };
+export type UploadConflict = {
+  id: string;
+  name: string;
+  targetPath: string;
+  suggestedName: string;
+  remaining: number;
+  total: number;
+  incomingBytes: number;
+  existing: { name: string; sizeBytes: number; updatedAt: string };
+  existingCount: number;
+};
+export type UploadConflictAnswer = {
+  id: string;
+  action: "skip" | "rename" | "replace" | "cancel";
+  applyToAll: boolean;
+  name?: string;
+};
 export interface Jellyree {
+  setLocale(value: "en" | "ru" | "es"): Promise<void>;
   settings: {
     get(): Promise<Settings>;
     test(input: Connection): Promise<{ ok: boolean }>;
@@ -97,6 +118,8 @@ export interface Jellyree {
   pickUpload(folderId: string | null, folders: boolean): Promise<UploadResult>;
   dropUpload(files: File[], folderId: string | null): Promise<UploadResult>;
   importBucket(): Promise<{ scanned: number }>;
+  answerUploadConflict(input: UploadConflictAnswer): Promise<void>;
+  onUploadConflict(callback: (conflict: UploadConflict) => void): () => void;
   folders(): Promise<Folder[]>;
   createFolder(name: string, parentId: string | null): Promise<Folder>;
   updateFolder(

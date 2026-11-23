@@ -1,3 +1,4 @@
+import { t } from "./locales.mjs";
 import { randomUUID } from "node:crypto";
 import { readFile, stat, readdir } from "node:fs/promises";
 import { createReadStream, createWriteStream } from "node:fs";
@@ -27,7 +28,9 @@ export function cleanName(value) {
     name === ".."
   )
     throw new Error(
-      "Имя должно содержать от 1 до 255 символов без слешей и управляющих символов.",
+      t(
+        "Имя должно содержать от 1 до 255 символов без слешей и управляющих символов.",
+      ),
     );
   return name;
 }
@@ -41,7 +44,7 @@ export function normalizeAdjustments(input) {
     }).map(([key, [min, max, fallback]]) => {
       const value = Number(input?.[key] ?? fallback);
       if (!Number.isFinite(value) || value < min || value > max)
-        throw new Error("Некорректные параметры изображения.");
+        throw new Error(t("Некорректные параметры изображения."));
       return [key, value];
     }),
   );
@@ -96,7 +99,7 @@ export class Library {
       "SELECT * FROM jr_folders WHERE id = ? AND library_id = ?",
       [id, this.id],
     );
-    if (!row) throw new Error("Папка не найдена в этом хранилище.");
+    if (!row) throw new Error(t("Папка не найдена в этом хранилище."));
     return row;
   }
   async createFolder(name, parentId = null) {
@@ -125,7 +128,7 @@ export class Library {
       const seen = new Set();
       while (ancestor) {
         if (ancestor === id || seen.has(ancestor))
-          throw new Error("Нельзя переместить папку внутрь самой себя.");
+          throw new Error(t("Нельзя переместить папку внутрь самой себя."));
         seen.add(ancestor);
         ancestor = byId.get(ancestor)?.parent_id;
       }
@@ -146,7 +149,9 @@ export class Library {
     );
     if (counts.total)
       throw new Error(
-        "Удалить можно только пустую папку. Переместите файлы, включая файлы в корзине, и вложенные папки.",
+        t(
+          "Удалить можно только пустую папку. Переместите файлы, включая файлы в корзине, и вложенные папки.",
+        ),
       );
     await this.db.query(
       "DELETE FROM jr_folders WHERE id = ? AND library_id = ?",
@@ -224,17 +229,17 @@ export class Library {
       "SELECT * FROM jr_files WHERE id = ? AND library_id = ?",
       [id, this.id],
     );
-    if (!row) throw new Error("Файл не найден в этом хранилище.");
+    if (!row) throw new Error(t("Файл не найден в этом хранилище."));
     return fileRow(row);
   }
   async updateFiles(ids, patch) {
     if (!Array.isArray(ids) || !ids.length || ids.length > 1000)
-      throw new Error("Выберите от 1 до 1000 файлов.");
+      throw new Error(t("Выберите от 1 до 1000 файлов."));
     const sets = ["updated_at = ?"],
       params = [new Date().toISOString()];
     if ("name" in patch) {
       if (ids.length !== 1)
-        throw new Error("Переименовывать можно по одному файлу.");
+        throw new Error(t("Переименовывать можно по одному файлу."));
       sets.push("name = ?");
       params.push(cleanName(patch.name));
     }
@@ -253,7 +258,7 @@ export class Library {
     }
     if ("tags" in patch) {
       if (!Array.isArray(patch.tags) || patch.tags.length > 50)
-        throw new Error("Не более 50 тегов.");
+        throw new Error(t("Не более 50 тегов."));
       const tags = [...new Set(patch.tags.map((t) => cleanName(t)))];
       sets.push("tags = ?");
       params.push(JSON.stringify(tags));
@@ -312,12 +317,12 @@ export class Library {
   }
   async deletePermanently(ids) {
     if (!Array.isArray(ids) || ids.length > 1000)
-      throw new Error("Слишком много файлов.");
+      throw new Error(t("Слишком много файлов."));
     let done = 0;
     for (const id of ids) {
       const file = await this.file(id);
       if (!file.trashed_at)
-        throw new Error("Сначала переместите файл в корзину.");
+        throw new Error(t("Сначала переместите файл в корзину."));
       // Delete object first; keep the record on R2 failure so deletion is retryable.
       await this.s3.send(
         new DeleteObjectCommand({
@@ -333,16 +338,31 @@ export class Library {
     }
     return { done };
   }
-  async uploadFile(source, folderId, report = () => {}) {
+  async uploadFile(source, folderId, report = () => {}, options = {}) {
     await this.folder(folderId);
     const info = await stat(source);
-    if (!info.isFile()) throw new Error("Ожидался обычный файл.");
-    const name = cleanName(path.basename(source)),
-      id = randomUUID();
-    const key = [this.config.prefix, "objects", id, name]
+    if (!info.isFile()) throw new Error(t("Ожидался обычный файл."));
+    const name = cleanName(options.name || path.basename(source));
+    const previous = options.replaceId
+      ? await this.file(options.replaceId)
+      : null;
+    if (
+      previous &&
+      (previous.trashed_at ||
+        previous.folder_id !== (folderId || null) ||
+        previous.name !== name)
+    )
+      throw new Error(
+        t("Файл изменился во время загрузки. Повторите операцию."),
+      );
+    const id = previous?.id || randomUUID();
+    // Always upload to a new object, including replacement. The previous bytes
+    // remain available until D1 has committed and the result has been verified.
+    const key = [this.config.prefix, "objects", randomUUID(), name]
       .filter(Boolean)
       .join("/");
-    const mimeType = mime.getType(name) || "application/octet-stream";
+    const mimeType =
+      mime.getType(path.basename(source)) || "application/octet-stream";
     const upload = this.createUpload({
       client: this.s3,
       params: {
@@ -362,51 +382,82 @@ export class Library {
     await upload.done();
     const now = new Date().toISOString();
     try {
-      await this.db.query(
-        "INSERT INTO jr_files (id, library_id, folder_id, object_key, name, mime_type, size_bytes, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        [
-          id,
-          this.id,
-          folderId || null,
-          key,
-          name,
-          mimeType,
-          info.size,
-          now,
-          now,
-        ],
-      );
-    } catch (error) {
-      // A timeout may mean D1 committed the INSERT. Check before removing the object.
-      let exists;
-      try {
-        exists =
-          (
-            await this.db.query(
-              "SELECT id FROM jr_files WHERE id = ? AND library_id = ?",
-              [id, this.id],
-            )
-          ).length > 0;
-      } catch {
-        throw new Error(
-          `Не удалось подтвердить запись D1 для ${name}. Объект сохранён в R2; проверьте подключение. Ключ: ${key}`,
+      if (previous) {
+        await this.db.query(
+          "UPDATE jr_files SET object_key = ?, mime_type = ?, size_bytes = ?, adjustments = '{}', updated_at = ? WHERE id = ? AND library_id = ? AND object_key = ? AND trashed_at IS NULL",
+          [key, mimeType, info.size, now, id, this.id, previous.object_key],
+        );
+        const [verified] = await this.db.query(
+          "SELECT id, object_key FROM jr_files WHERE id = ? AND library_id = ?",
+          [id, this.id],
+        );
+        if (verified?.object_key !== key)
+          throw new Error(
+            t("Файл изменился во время загрузки. Повторите операцию."),
+          );
+      } else {
+        await this.db.query(
+          "INSERT INTO jr_files (id, library_id, folder_id, object_key, name, mime_type, size_bytes, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+          [
+            id,
+            this.id,
+            folderId || null,
+            key,
+            name,
+            mimeType,
+            info.size,
+            now,
+            now,
+          ],
         );
       }
-      if (!exists) {
+    } catch (error) {
+      let saved;
+      try {
+        [saved] = await this.db.query(
+          "SELECT id, object_key FROM jr_files WHERE id = ? AND library_id = ?",
+          [id, this.id],
+        );
+      } catch {
+        throw new Error(
+          t(
+            "Не удалось подтвердить запись D1 для {0}. Объект сохранён в R2; проверьте подключение. Ключ: {1}",
+            { 0: name, 1: key },
+          ),
+        );
+      }
+      if (saved?.object_key !== key) {
         await this.s3.send(
           new DeleteObjectCommand({ Bucket: this.config.bucket, Key: key }),
         );
         throw error;
       }
     }
-    return { id, name };
+    let warning;
+    if (previous) {
+      try {
+        await this.s3.send(
+          new DeleteObjectCommand({
+            Bucket: this.config.bucket,
+            Key: previous.object_key,
+          }),
+        );
+      } catch {
+        warning = t(
+          "Файл {0} заменён, но предыдущий объект не удалось удалить из R2.",
+          { 0: name },
+        );
+      }
+    }
+    return { id, name, warning };
   }
-  async uploadPaths(paths, folderId, report = () => {}) {
+  async uploadPaths(paths, folderId, report = () => {}, resolveConflict) {
     if (!Array.isArray(paths) || paths.length > 10000)
-      throw new Error("Некорректный список файлов.");
+      throw new Error(t("Некорректный список файлов."));
     await this.folder(folderId);
     const jobs = [],
-      failures = [];
+      failures = [],
+      warnings = [];
     const ensureFolder = async (name, parent) => {
       const [existing] = await this.db.query(
         "SELECT id FROM jr_folders WHERE library_id = ? AND parent_id IS ? AND name = ?",
@@ -421,45 +472,174 @@ export class Library {
           cleanName(path.basename(source)),
           parent,
         );
-        for (const entry of await readdir(source, { withFileTypes: true })) {
+        for (const entry of await readdir(source, { withFileTypes: true }))
           if (!entry.isSymbolicLink())
             await walk(path.join(source, entry.name), folder);
-        }
       } else if (info.isFile())
-        jobs.push({ source, folder: parent, size: info.size });
+        jobs.push({
+          source,
+          folder: parent || null,
+          size: info.size,
+          name: cleanName(path.basename(source)),
+        });
     };
     for (const source of paths) await walk(String(source), folderId || null);
-    let done = 0,
-      bytes = 0,
-      totalBytes = jobs.reduce((sum, j) => sum + j.size, 0);
+    const reserved = new Map(),
+      seen = new Map();
+    for (const parent of new Set(jobs.map((job) => job.folder))) {
+      const rows = await this.db.query(
+        "SELECT name FROM jr_files WHERE library_id = ? AND folder_id IS ? AND trashed_at IS NULL",
+        [this.id, parent],
+      );
+      reserved.set(parent, new Set(rows.map((row) => row.name)));
+      seen.set(parent, new Set(rows.map((row) => row.name)));
+    }
+    let totalConflicts = 0;
     for (const job of jobs) {
-      const name = path.basename(job.source);
+      job.conflict = seen.get(job.folder).has(job.name);
+      if (job.conflict) totalConflicts++;
+      seen.get(job.folder).add(job.name);
+      reserved.get(job.folder).add(job.name);
+    }
+    const folders = await this.folders(),
+      byId = new Map(folders.map((f) => [f.id, f]));
+    const folderPath = (id) => {
+      const parts = [],
+        visited = new Set();
+      while (id && !visited.has(id)) {
+        visited.add(id);
+        const folder = byId.get(id);
+        if (!folder) break;
+        parts.unshift(folder.name);
+        id = folder.parent_id;
+      }
+      return parts.join(" / ");
+    };
+    const existingFile = async (parent, name) =>
+      await this.db.query(
+        "SELECT id, name, size_bytes, updated_at FROM jr_files WHERE library_id = ? AND folder_id IS ? AND name = ? AND trashed_at IS NULL ORDER BY created_at DESC, id DESC",
+        [this.id, parent, name],
+      );
+    const uniqueName = (name, names) => {
+      const extension = path.extname(name),
+        stem = path.basename(name, extension);
+      let suffix = 1,
+        candidate;
+      do {
+        const tail = ` (${suffix++})${extension}`;
+        candidate = `${stem.slice(0, Math.max(1, 255 - tail.length))}${tail}`;
+      } while (names.has(candidate));
+      return candidate;
+    };
+    let processed = 0,
+      done = 0,
+      skipped = 0,
+      bytes = 0,
+      remaining = totalConflicts,
+      policy = null,
+      canceled = false;
+    const totalBytes = jobs.reduce((sum, job) => sum + job.size, 0);
+    for (const job of jobs) {
+      let name = job.name,
+        replaceId;
       try {
-        await this.uploadFile(job.source, job.folder, (p) =>
-          report({
-            name,
-            done,
-            total: jobs.length,
-            loaded: bytes + p.loaded,
-            totalBytes,
-            failures: failures.length,
-          }),
+        const matches = await existingFile(job.folder, name);
+        if (matches.length) {
+          if (!job.conflict) {
+            remaining++;
+            totalConflicts++;
+          }
+          const names = reserved.get(job.folder);
+          const suggestedName = uniqueName(name, names);
+          let decision = policy ? { action: policy } : null;
+          if (!decision) {
+            if (!resolveConflict)
+              throw new Error(
+                t("Для совпадающих имён требуется решение пользователя."),
+              );
+            const validate = async (answer) => {
+              if (answer.action !== "rename") return;
+              const candidate = cleanName(answer.name || suggestedName);
+              if (
+                names.has(candidate) ||
+                (await existingFile(job.folder, candidate)).length
+              )
+                throw new Error(t("Это имя уже занято. Введите другое имя."));
+            };
+            decision = await resolveConflict(
+              {
+                name,
+                targetPath: folderPath(job.folder),
+                suggestedName,
+                remaining,
+                total: totalConflicts,
+                incomingBytes: job.size,
+                existing: {
+                  name: matches[0].name,
+                  sizeBytes: matches[0].size_bytes,
+                  updatedAt: matches[0].updated_at,
+                },
+                existingCount: matches.length,
+              },
+              validate,
+            );
+            if (
+              !decision ||
+              !["skip", "rename", "replace", "cancel"].includes(decision.action)
+            )
+              throw new Error(
+                t("Некорректное решение для совпадающего файла."),
+              );
+            await validate(decision);
+            if (decision.applyToAll) policy = decision.action;
+          }
+          remaining = Math.max(0, remaining - 1);
+          if (decision.action === "cancel") {
+            canceled = true;
+            break;
+          }
+          if (decision.action === "skip") {
+            skipped++;
+            continue;
+          }
+          if (decision.action === "rename") {
+            name = cleanName(decision.name || suggestedName);
+            names.add(name);
+          }
+          if (decision.action === "replace") replaceId = matches[0].id;
+        } else if (job.conflict) remaining = Math.max(0, remaining - 1);
+        const result = await this.uploadFile(
+          job.source,
+          job.folder,
+          (p) =>
+            report({
+              name,
+              done: processed,
+              total: jobs.length,
+              loaded: bytes + p.loaded,
+              totalBytes,
+              failures: failures.length,
+            }),
+          { name, replaceId },
         );
+        done++;
+        if (result.warning) warnings.push(result.warning);
       } catch (error) {
         failures.push({ name, message: error.message });
+      } finally {
+        processed++;
+        bytes += job.size;
+        report({
+          name,
+          done: processed,
+          total: jobs.length,
+          loaded: bytes,
+          totalBytes,
+          failures: failures.length,
+        });
       }
-      bytes += job.size;
-      done++;
-      report({
-        name,
-        done,
-        total: jobs.length,
-        loaded: bytes,
-        totalBytes,
-        failures: failures.length,
-      });
     }
-    return { done: done - failures.length, failures };
+    return { done, skipped, canceled, failures, warnings };
   }
   async importBucket(report = () => {}) {
     let token,

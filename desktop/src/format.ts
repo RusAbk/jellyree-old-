@@ -1,14 +1,16 @@
+import { t } from "./i18n";
 import type { Adjustments } from "./types";
+import { localeCode } from "./i18n";
 export function bytes(value: number) {
-  if (value === 0) return "0 Б";
+  if (value === 0) return t("0 Б");
   const i = Math.min(
     4,
     Math.floor(Math.log(Math.max(1, value)) / Math.log(1024)),
   );
-  return `${(value / 1024 ** i).toLocaleString("ru-RU", { maximumFractionDigits: i ? 1 : 0 })} ${["Б", "КБ", "МБ", "ГБ", "ТБ"][i]}`;
+  return `${(value / 1024 ** i).toLocaleString(localeCode(), { maximumFractionDigits: i ? 1 : 0 })} ${[t("Б"), t("КБ"), t("МБ"), t("ГБ"), t("ТБ")][i]}`;
 }
 export const date = (value: string) =>
-  new Date(value).toLocaleDateString("ru-RU", {
+  new Date(value).toLocaleDateString(localeCode(), {
     day: "numeric",
     month: "short",
     year: "numeric",

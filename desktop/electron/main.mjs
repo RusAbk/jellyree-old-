@@ -1,3 +1,4 @@
+import { t } from "./locales.mjs";
 import {
   app,
   BrowserWindow,
@@ -11,6 +12,9 @@ import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { ConfigStore } from "./config.mjs";
 import { Library } from "./library.mjs";
+import { UploadConflictBroker } from "./upload-conflicts.mjs";
+const uploadConflicts = new UploadConflictBroker();
+import { setLanguage } from "./locales.mjs";
 
 const directory = path.dirname(fileURLToPath(import.meta.url));
 const devUrl = process.env.JELLYREE_DEV_URL;
@@ -28,7 +32,7 @@ const redact = (message) => {
   let result = String(message);
   for (const key of ["apiToken", "accessKeyId", "secretAccessKey"])
     if (store?.current?.[key])
-      result = result.replaceAll(store.current[key], "[скрыто]");
+      result = result.replaceAll(store.current[key], t("[скрыто]"));
   return result;
 };
 function handle(name, fn, needsLibrary = true) {
@@ -42,7 +46,7 @@ function handle(name, fn, needsLibrary = true) {
       throw new Error("Untrusted IPC sender");
     try {
       if (needsLibrary && (!library || changingConnection))
-        throw new Error("Подключите хранилище в настройках.");
+        throw new Error(t("Подключите хранилище в настройках."));
       if (needsLibrary) activeOperations++;
       try {
         return { ok: true, value: await fn(...args) };
@@ -52,14 +56,14 @@ function handle(name, fn, needsLibrary = true) {
     } catch (error) {
       return {
         ok: false,
-        error: redact(error.message || "Операция не выполнена."),
+        error: redact(error.message || t("Операция не выполнена.")),
       };
     }
   });
 }
 async function connectionOperation(fn) {
   if (activeOperations || changingConnection)
-    throw new Error("Дождитесь завершения текущих операций.");
+    throw new Error(t("Дождитесь завершения текущих операций."));
   changingConnection = true;
   try {
     return await fn();
@@ -69,7 +73,7 @@ async function connectionOperation(fn) {
 }
 async function transferOperation(fn) {
   if (transfer)
-    throw new Error("Дождитесь завершения текущей передачи файлов.");
+    throw new Error(t("Дождитесь завершения текущей передачи файлов."));
   transfer = true;
   try {
     return await fn();
@@ -81,7 +85,71 @@ function progress(value) {
   if (!window?.isDestroyed())
     window.webContents.send("jellyree:progress", value);
 }
+function uploadPaths(paths, folderId) {
+  return library.uploadPaths(
+    paths,
+    folderId,
+    (value) => progress({ kind: "upload", ...value }),
+    (info, validate) =>
+      uploadConflicts.request(info, validate, (value) =>
+        window.webContents.send("jellyree:upload-conflict", value),
+      ),
+  );
+}
+function refreshMenu() {
+  Menu.setApplicationMenu(
+    Menu.buildFromTemplate([
+      ...(process.platform === "darwin"
+        ? [
+            {
+              label: "Jellyree",
+              submenu: [
+                { role: "about", label: t("О программе") },
+                { type: "separator" },
+                { role: "quit", label: t("Выход") },
+              ],
+            },
+          ]
+        : []),
+      {
+        label: t("Правка"),
+        submenu: [
+          { role: "undo", label: t("Отменить действие") },
+          { role: "redo", label: t("Повторить действие") },
+          { type: "separator" },
+          { role: "cut", label: t("Вырезать") },
+          { role: "copy", label: t("Копировать") },
+          { role: "paste", label: t("Вставить") },
+          { role: "selectAll", label: t("Выделить всё") },
+        ],
+      },
+      {
+        label: t("Вид"),
+        submenu: [
+          { role: "resetZoom", label: t("Сбросить масштаб") },
+          { role: "zoomIn", label: t("Увеличить масштаб") },
+          { role: "zoomOut", label: t("Уменьшить масштаб") },
+          { role: "togglefullscreen", label: t("Полный экран") },
+          ...(devUrl
+            ? [{ role: "toggleDevTools", label: t("Инструменты разработчика") }]
+            : []),
+        ],
+      },
+    ]),
+  );
+}
 function registerHandlers() {
+  handle(
+    "app:locale",
+    (value) => {
+      if (!["en", "ru", "es"].includes(value))
+        throw new Error(t("Неподдерживаемый язык."));
+      setLanguage(value);
+      refreshMenu();
+    },
+    false,
+  );
+  handle("uploads:answer", (input) => uploadConflicts.answer(input), false);
   handle("settings:get", () => ({ ...store.summary(), startupError }), false);
   handle(
     "settings:test",
@@ -140,11 +208,13 @@ function registerHandlers() {
   handle("files:download", (ids) =>
     transferOperation(async () => {
       if (!Array.isArray(ids) || !ids.length || ids.length > 1000)
-        throw new Error("Выберите от 1 до 1000 файлов.");
+        throw new Error(t("Выберите от 1 до 1000 файлов."));
       if (ids.length === 1) {
         const file = await library.file(ids[0]);
         const result = await dialog.showSaveDialog(window, {
           defaultPath: path.basename(file.name),
+          title: t("Скачать оригинал"),
+          buttonLabel: t("Сохранить"),
         });
         if (result.canceled) return { done: 0 };
         await library.download(ids[0], result.filePath);
@@ -152,6 +222,8 @@ function registerHandlers() {
       }
       const result = await dialog.showOpenDialog(window, {
         properties: ["openDirectory", "createDirectory"],
+        title: t("Папка для скачивания"),
+        buttonLabel: t("Выбрать папку"),
       });
       if (result.canceled) return { done: 0 };
       const used = new Set();
@@ -187,22 +259,25 @@ function registerHandlers() {
   handle("files:pick-upload", (folderId, folders = false) =>
     transferOperation(async () => {
       const result = await dialog.showOpenDialog(window, {
+        title: folders ? t("Загрузить папку") : t("Загрузить файлы"),
+        buttonLabel: t("Загрузить"),
         properties: folders
           ? ["openDirectory", "multiSelections"]
           : ["openFile", "multiSelections"],
       });
-      if (result.canceled) return { done: 0, failures: [] };
-      return library.uploadPaths(result.filePaths, folderId, (value) =>
-        progress({ kind: "upload", ...value }),
-      );
+      if (result.canceled)
+        return {
+          done: 0,
+          skipped: 0,
+          canceled: true,
+          failures: [],
+          warnings: [],
+        };
+      return uploadPaths(result.filePaths, folderId);
     }),
   );
   handle("files:drop-upload", (paths, folderId) =>
-    transferOperation(() =>
-      library.uploadPaths(paths, folderId, (value) =>
-        progress({ kind: "upload", ...value }),
-      ),
-    ),
+    transferOperation(() => uploadPaths(paths, folderId)),
   );
   handle("files:import", () =>
     transferOperation(() =>
@@ -242,15 +317,17 @@ async function createWindow() {
     (_contents, _permission, callback) => callback(false),
   );
   window.webContents.session.setPermissionCheckHandler(() => false);
+  window.on("closed", () => uploadConflicts.cancel());
   window.on("close", (event) => {
     if (activeOperations || changingConnection) {
       const choice = dialog.showMessageBoxSync(window, {
         type: "question",
-        buttons: ["Продолжить работу", "Закрыть приложение"],
+        buttons: [t("Продолжить работу"), t("Закрыть приложение")],
         defaultId: 0,
         cancelId: 0,
-        message:
+        message: t(
           "Ещё выполняются операции с облаком. Закрытие может прервать передачу. Закрыть приложение?",
+        ),
       });
       if (choice === 0) event.preventDefault();
     }
@@ -281,44 +358,7 @@ else {
       } catch (error) {
         startupError = redact(error.message);
       }
-      Menu.setApplicationMenu(
-        Menu.buildFromTemplate([
-          ...(process.platform === "darwin"
-            ? [
-                {
-                  label: "Jellyree",
-                  submenu: [
-                    { role: "about" },
-                    { type: "separator" },
-                    { role: "quit" },
-                  ],
-                },
-              ]
-            : []),
-          {
-            label: "Правка",
-            submenu: [
-              { role: "undo" },
-              { role: "redo" },
-              { type: "separator" },
-              { role: "cut" },
-              { role: "copy" },
-              { role: "paste" },
-              { role: "selectAll" },
-            ],
-          },
-          {
-            label: "Вид",
-            submenu: [
-              { role: "resetZoom" },
-              { role: "zoomIn" },
-              { role: "zoomOut" },
-              { role: "togglefullscreen" },
-              ...(devUrl ? [{ role: "toggleDevTools" }] : []),
-            ],
-          },
-        ]),
-      );
+      refreshMenu();
       registerHandlers();
       await createWindow();
       app.on("activate", () => {

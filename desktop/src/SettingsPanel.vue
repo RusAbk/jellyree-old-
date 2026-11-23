@@ -1,6 +1,9 @@
 <script setup lang="ts">
+import { t } from "./i18n";
 import { reactive, ref, computed } from "vue";
 import type { Connection, Settings } from "./types";
+import { api } from "./api";
+import LanguageSelect from "./LanguageSelect.vue";
 const props = defineProps<{ settings: Settings }>();
 const emit = defineEmits<{
   close: [];
@@ -22,7 +25,7 @@ const busy = ref(false),
   forget = ref(false);
 const placeholder = computed(() =>
   props.settings.hasSecrets
-    ? "Сохранено · оставьте пустым, чтобы не менять"
+    ? t("Сохранено · оставьте пустым, чтобы не менять")
     : "",
 );
 async function run(save: boolean) {
@@ -32,11 +35,11 @@ async function run(save: boolean) {
   try {
     const input = { ...form };
     if (save) {
-      const result = await window.jellyree.settings.save(input);
+      const result = await api.settings.save(input);
       emit("saved", result);
     } else {
-      await window.jellyree.settings.test(input);
-      message.value = "R2 и D1 доступны. Можно сохранить подключение.";
+      await api.settings.test(input);
+      message.value = t("R2 и D1 доступны. Можно сохранить подключение.");
     }
   } catch (e) {
     error.value = (e as Error).message;
@@ -47,7 +50,7 @@ async function run(save: boolean) {
 async function disconnect() {
   busy.value = true;
   try {
-    await window.jellyree.settings.clear();
+    await api.settings.clear();
     emit("disconnected");
   } catch (e) {
     error.value = (e as Error).message;
@@ -70,72 +73,81 @@ async function disconnect() {
     >
       <header class="dialog-header">
         <div>
-          <span class="eyebrow">ВАШЕ ОБЛАКО</span>
-          <h2 id="settings-title">Подключение Cloudflare</h2>
+          <span class="eyebrow">{{ t("ВАШЕ ОБЛАКО") }}</span>
+          <h2 id="settings-title">{{ t("Подключение Cloudflare") }}</h2>
         </div>
         <button
           class="icon-button"
           :disabled="busy"
-          aria-label="Закрыть"
+          :aria-label="t('Закрыть')"
           @click="emit('close')"
         >
           <i aria-hidden="true" class="ri-close-line"></i>
         </button>
       </header>
+      <LanguageSelect :disabled="busy" />
       <p class="muted">
-        Файлы в R2, каталог в D1. Приложение работает напрямую с вашим
-        аккаунтом.
+        {{
+          t(
+            "Файлы в R2, каталог в D1. Приложение работает напрямую с вашим аккаунтом.",
+          )
+        }}
       </p>
       <form @submit.prevent="run(true)">
         <fieldset :disabled="busy">
           <label
-            >Cloudflare Account ID<input
+            >{{ t("ID аккаунта Cloudflare")
+            }}<input
               v-model="form.accountId"
               required
               autocomplete="off"
-              placeholder="32 символа из панели Cloudflare"
+              :placeholder="t('32 символа из панели Cloudflare')"
           /></label>
           <div class="settings-section">
             <i aria-hidden="true" class="ri-database-2-line"></i
-            ><strong>База данных D1</strong>
+            ><strong>{{ t("База данных D1") }}</strong>
           </div>
           <label
-            >Database ID<input
+            >{{ t("ID базы данных")
+            }}<input
               v-model="form.databaseId"
               required
               autocomplete="off"
-              placeholder="UUID созданной базы D1"
+              :placeholder="t('UUID созданной базы D1')"
           /></label>
           <label
-            >Cloudflare API Token<input
+            >{{ t("API-токен Cloudflare")
+            }}<input
               v-model="form.apiToken"
               type="password"
               :required="!settings.hasSecrets"
               autocomplete="new-password"
               :placeholder="placeholder"
-            /><small
-              >Токен с правом Account → D1 → Edit для этого аккаунта.</small
-            ></label
+            /><small>{{
+              t("Токен с правом Account → D1 → Edit для этого аккаунта.")
+            }}</small></label
           >
           <div class="settings-section">
             <i aria-hidden="true" class="ri-cloud-line"></i
-            ><strong>Хранилище R2</strong>
+            ><strong>{{ t("Хранилище R2") }}</strong>
           </div>
           <div class="form-columns">
             <label
-              >Bucket<input
+              >{{ t("Имя bucket")
+              }}<input
                 v-model="form.bucket"
                 required
                 placeholder="my-drive" /></label
             ><label
-              >Префикс объектов<input
-                v-model="form.prefix"
-                placeholder="jellyree"
-              /><small>Пустое поле — весь bucket.</small></label
+              >{{ t("Префикс объектов")
+              }}<input v-model="form.prefix" placeholder="jellyree" /><small>{{
+                t("Пустое поле — весь bucket.")
+              }}</small></label
             >
           </div>
           <label
-            >R2 Access Key ID<input
+            >{{ t("ID ключа доступа R2")
+            }}<input
               v-model="form.accessKeyId"
               type="password"
               :required="!settings.hasSecrets"
@@ -143,25 +155,27 @@ async function disconnect() {
               :placeholder="placeholder"
           /></label>
           <label
-            >R2 Secret Access Key<input
+            >{{ t("Секретный ключ R2")
+            }}<input
               v-model="form.secretAccessKey"
               type="password"
               :required="!settings.hasSecrets"
               autocomplete="new-password"
               :placeholder="placeholder"
-            /><small
-              >Отдельные S3-реквизиты R2 с правом Object Read & Write для
-              выбранного bucket.</small
-            ></label
+            /><small>{{
+              t(
+                "Отдельные S3-реквизиты R2 с правом Object Read & Write для выбранного bucket.",
+              )
+            }}</small></label
           >
         </fieldset>
         <div class="info-note">
           <i aria-hidden="true" class="ri-lock-2-line"></i
-          ><span
-            >Ключи хранятся локально с шифрованием ОС. Без системного хранилища
-            — только до закрытия приложения. Таблицы <code>jr_*</code> создаются
-            при сохранении.</span
-          >
+          ><span>{{
+            t(
+              "Ключи хранятся локально с шифрованием ОС. Без системного хранилища — только до закрытия приложения. Таблицы jr_* создаются при сохранении.",
+            )
+          }}</span>
         </div>
         <p v-if="error" class="error" role="alert">{{ error }}</p>
         <p v-if="message" class="success" role="status">{{ message }}</p>
@@ -173,25 +187,25 @@ async function disconnect() {
             @click="run(false)"
           >
             {{
-              busy ? "Подключение…" : "Проверить подключение"
+              busy ? t("Подключение…") : t("Проверить подключение")
             }}</button><button class="button primary" :disabled="busy">
-            Сохранить и открыть
+            {{ t("Сохранить и открыть") }}
           </button>
         </footer>
       </form>
       <div v-if="settings.configured" class="disconnect">
         <template v-if="forget"
-          ><span
-            >Удалить реквизиты с этого устройства? Файлы в облаке
-            останутся.</span
+          ><span>{{
+            t("Удалить реквизиты с этого устройства? Файлы в облаке останутся.")
+          }}</span
           ><button
             class="text-button danger"
             :disabled="busy"
             @click="disconnect"
           >
-            Отключить</button
+            {{ t("Отключить") }}</button
           ><button class="text-button" @click="forget = false">
-            Отмена
+            {{ t("Отмена") }}
           </button></template
         ><button
           v-else
@@ -199,7 +213,7 @@ async function disconnect() {
           :disabled="busy"
           @click="forget = true"
         >
-          Забыть подключение на этом устройстве
+          {{ t("Забыть подключение на этом устройстве") }}
         </button>
       </div>
     </section>

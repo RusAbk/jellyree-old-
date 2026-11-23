@@ -1,3 +1,4 @@
+import { t } from "./locales.mjs";
 export class D1 {
   constructor(config, request = fetch) {
     this.url = `https://api.cloudflare.com/client/v4/accounts/${config.accountId}/d1/database/${config.databaseId}/query`;
@@ -27,11 +28,11 @@ export class D1 {
         data?.result?.find((r) => r.error)?.error ||
         `HTTP ${response.status}`;
       throw new Error(
-        `Cloudflare D1: ${String(message).replaceAll(this.token, "[скрыто]")}`,
+        `Cloudflare D1: ${String(message).replaceAll(this.token, t("[скрыто]"))}`,
       );
     }
     if (!Array.isArray(data.result))
-      throw new Error("Cloudflare D1: некорректный ответ API.");
+      throw new Error(t("Cloudflare D1: некорректный ответ API."));
     return data.result;
   }
   async query(sql, params = []) {

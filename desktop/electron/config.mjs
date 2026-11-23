@@ -1,3 +1,4 @@
+import { t } from "./locales.mjs";
 import { createHash } from "node:crypto";
 import { readFile, writeFile, mkdir, rename, rm } from "node:fs/promises";
 import path from "node:path";
@@ -16,24 +17,24 @@ export function normalizeConfig(input) {
   );
   if (!/^[a-f\d]{32}$/i.test(config.accountId))
     throw new Error(
-      "Account ID должен содержать 32 шестнадцатеричных символа.",
+      t("Account ID должен содержать 32 шестнадцатеричных символа."),
     );
   if (
     !/^[a-f\d]{8}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{12}$/i.test(
       config.databaseId,
     )
   )
-    throw new Error("Укажите UUID базы Cloudflare D1.");
+    throw new Error(t("Укажите UUID базы Cloudflare D1."));
   if (!/^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$/.test(config.bucket))
-    throw new Error("Некорректное имя R2 bucket.");
+    throw new Error(t("Некорректное имя R2 bucket."));
   for (const key of ["apiToken", "accessKeyId", "secretAccessKey"])
-    if (!config[key]) throw new Error(`Заполните ${key}.`);
+    if (!config[key]) throw new Error(t("Заполните {0}.", { 0: key }));
   config.prefix = config.prefix.replace(/^\/+|\/+$/g, "");
   if (
     config.prefix.split("/").some((p) => p === ".." || p === ".") ||
     /[\\\x00-\x1f]/.test(config.prefix)
   )
-    throw new Error("Некорректный префикс объектов.");
+    throw new Error(t("Некорректный префикс объектов."));
   config.accountId = config.accountId.toLowerCase();
   config.databaseId = config.databaseId.toLowerCase();
   return config;
@@ -66,7 +67,9 @@ export class ConfigStore {
       );
       if (!(await this.secureAvailable()))
         throw new Error(
-          "Системное хранилище ключей недоступно. Разблокируйте его или введите реквизиты заново.",
+          t(
+            "Системное хранилище ключей недоступно. Разблокируйте его или введите реквизиты заново.",
+          ),
         );
       const decrypted = await this.safe.decryptStringAsync(encrypted);
       this.current = normalizeConfig(JSON.parse(decrypted.result));

@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { t } from "./i18n";
 import {
   computed,
   onBeforeUnmount,
@@ -9,7 +10,12 @@ import {
 } from "vue";
 import FileThumb from "./FileThumb.vue";
 import SettingsPanel from "./SettingsPanel.vue";
+import ContextMenu, { type MenuItem } from "./ContextMenu.vue";
+import UploadConflictDialog from "./UploadConflictDialog.vue";
+import LanguageSelect from "./LanguageSelect.vue";
+import { syncLanguage } from "./i18n";
 import { bytes, date, icon, imageStyle } from "./format";
+import { api } from "./api";
 import type {
   Adjustments,
   DriveFile,
@@ -19,9 +25,9 @@ import type {
   Settings,
   Stats,
   UploadResult,
+  UploadConflict,
 } from "./types";
 
-const api = window.jellyree;
 const settings = ref<Settings>({ configured: false, persisted: false });
 const settingsOpen = ref(false),
   ready = ref(false),
@@ -33,13 +39,37 @@ const files = ref<DriveFile[]>([]),
 const search = ref(""),
   tag = ref(""),
   sort = ref("date"),
-  view = ref(localStorage.getItem("jellyree-desktop-view") || "grid");
+  view = ref(
+    ["grid", "list", "gallery"].includes(
+      localStorage.getItem("jellyree-desktop-view") || "",
+    )
+      ? localStorage.getItem("jellyree-desktop-view")!
+      : "grid",
+  );
+const savedPreviewSize = Number(
+  localStorage.getItem("jellyree-desktop-preview-size") || 220,
+);
+const previewSize = ref(
+  Number.isFinite(savedPreviewSize)
+    ? Math.max(120, Math.min(420, savedPreviewSize))
+    : 220,
+);
+const contextMenu = ref<{
+  serial: number;
+  x: number;
+  y: number;
+  kind: "files" | "folder" | "empty";
+  ids: string[];
+  folder?: Folder;
+} | null>(null);
+let contextSerial = 0;
 const selection = ref<string[]>([]),
   loading = ref(false),
   busy = ref(false),
   total = ref(0),
   hasMore = ref(false),
   page = ref(1);
+const uploadConflict = ref<UploadConflict | null>(null);
 const error = ref(""),
   notice = ref(""),
   progress = ref<Progress | null>(null),
@@ -63,19 +93,21 @@ const modal = ref<{
   ids: string[];
   target: string;
   folder?: Folder;
+  parentId?: string | null;
 } | null>(null);
 let generation = 0,
   timer: ReturnType<typeof setTimeout> | undefined,
   previewGeneration = 0,
   unsubscribe: (() => void) | undefined;
+let unsubscribeConflict: (() => void) | undefined;
 
-const nav = [
-  { id: "drive", label: "Мой диск", icon: "ri-hard-drive-3-line" },
-  { id: "all", label: "Все файлы", icon: "ri-stack-line" },
-  { id: "photos", label: "Фото и видео", icon: "ri-image-2-line" },
-  { id: "favorites", label: "Избранное", icon: "ri-star-line" },
-  { id: "trash", label: "Корзина", icon: "ri-delete-bin-6-line" },
-];
+const nav = computed(() => [
+  { id: "drive", label: t("Мой диск"), icon: "ri-hard-drive-3-line" },
+  { id: "all", label: t("Все файлы"), icon: "ri-stack-line" },
+  { id: "photos", label: t("Фото и видео"), icon: "ri-image-2-line" },
+  { id: "favorites", label: t("Избранное"), icon: "ri-star-line" },
+  { id: "trash", label: t("Корзина"), icon: "ri-delete-bin-6-line" },
+]);
 const currentFolder = computed(() =>
   folders.value.find((f) => f.id === folderId.value),
 );
@@ -84,7 +116,7 @@ const title = computed(() =>
     ? `#${tag.value}`
     : currentFolder.value && section.value === "drive"
       ? currentFolder.value.name
-      : nav.find((n) => n.id === section.value)?.label || "Мой диск",
+      : nav.value.find((n) => n.id === section.value)?.label || t("Мой диск"),
 );
 const childFolders = computed(() =>
   section.value === "drive" && !tag.value
@@ -171,6 +203,206 @@ const scope = computed(
     `${settings.value.accountId}/${settings.value.bucket}/${settings.value.prefix}`,
 );
 
+const contextItems = computed<MenuItem[]>(() => {
+  const menu = contextMenu.value;
+  if (!menu) return [];
+  const item = (
+    id: string,
+    label: string,
+    icon: string,
+    extra: Partial<MenuItem> = {},
+  ): MenuItem => ({ id, label, icon, disabled: busy.value, ...extra });
+  if (menu.kind === "files") {
+    const single = menu.ids.length === 1;
+    const starred = menu.ids.every(
+      (id) => files.value.find((f) => f.id === id)?.favorite,
+    );
+    return [
+      ...(single
+        ? [
+            item("open", t("Открыть"), "ri-eye-line"),
+            item("info", t("Информация"), "ri-information-line"),
+            ...(files.value
+              .find((f) => f.id === menu.ids[0])
+              ?.mime_type.startsWith("image/")
+              ? [item("editPhoto", t("Коррекция фото"), "ri-equalizer-line")]
+              : []),
+          ]
+        : []),
+      item(
+        "download",
+        single ? t("Скачать оригинал") : t("Скачать оригиналы"),
+        "ri-download-2-line",
+      ),
+      ...(single
+        ? [
+            item("share", t("Скопировать ссылку на 1 час"), "ri-link"),
+            item("rename", t("Переименовать"), "ri-edit-line", {
+              separator: true,
+            }),
+          ]
+        : []),
+      ...(section.value === "trash"
+        ? [
+            item("restore", t("Восстановить"), "ri-arrow-go-back-line", {
+              separator: true,
+            }),
+            item("delete", t("Удалить навсегда"), "ri-delete-bin-line", {
+              danger: true,
+            }),
+          ]
+        : [
+            item("move", t("Переместить"), "ri-folder-transfer-line", {
+              separator: !single,
+            }),
+            item("tags", t("Изменить теги"), "ri-price-tag-3-line"),
+            item(
+              "favorite",
+              starred ? t("Убрать из избранного") : t("В избранное"),
+              starred ? "ri-star-fill" : "ri-star-line",
+            ),
+            item("trash", t("В корзину"), "ri-delete-bin-line", {
+              separator: true,
+              danger: true,
+            }),
+          ]),
+    ];
+  }
+  if (menu.kind === "folder")
+    return [
+      item("openFolder", t("Открыть папку"), "ri-folder-open-line"),
+      item("uploadHere", t("Загрузить файлы сюда"), "ri-upload-cloud-2-line", {
+        separator: true,
+      }),
+      item(
+        "uploadFolderHere",
+        t("Загрузить папку сюда"),
+        "ri-folder-upload-line",
+      ),
+      item("createChild", t("Новая вложенная папка"), "ri-folder-add-line"),
+      item("renameFolder", t("Переименовать папку"), "ri-edit-line", {
+        separator: true,
+      }),
+      item("moveFolder", t("Переместить папку"), "ri-folder-transfer-line"),
+      item("deleteFolder", t("Удалить пустую папку"), "ri-delete-bin-line", {
+        separator: true,
+        danger: true,
+      }),
+    ];
+  return [
+    item("upload", t("Загрузить файлы"), "ri-upload-cloud-2-line"),
+    item("uploadFolder", t("Загрузить папку"), "ri-folder-upload-line"),
+    item("createFolder", t("Новая папка"), "ri-folder-add-line"),
+    item("refresh", t("Обновить"), "ri-refresh-line", { separator: true }),
+    item(
+      "selectAll",
+      t("Выбрать загруженные файлы"),
+      "ri-checkbox-multiple-line",
+      { disabled: busy.value || !files.value.length },
+    ),
+    ...(
+      [
+        ["gallery", t("Галерея без обрезки"), "ri-layout-masonry-line"],
+        ["grid", t("Сетка"), "ri-grid-line"],
+        ["list", t("Список"), "ri-list-check"],
+      ] as const
+    ).map(([id, label, icon], index) =>
+      item(`view:${id}`, label, view.value === id ? "ri-check-line" : icon, {
+        separator: index === 0,
+      }),
+    ),
+  ];
+});
+function closeContextMenu() {
+  contextMenu.value = null;
+}
+function showContext(
+  event: MouseEvent,
+  kind: "files" | "folder" | "empty",
+  ids: string[] = [],
+  folder?: Folder,
+) {
+  event.preventDefault();
+  event.stopPropagation();
+  contextMenu.value = {
+    serial: ++contextSerial,
+    x: event.clientX,
+    y: event.clientY,
+    kind,
+    ids: [...ids],
+    folder,
+  };
+}
+function fileContext(event: MouseEvent, file: DriveFile) {
+  if (!selection.value.includes(file.id)) selection.value = [file.id];
+  showContext(event, "files", selection.value);
+}
+function folderContext(event: MouseEvent, folder: Folder) {
+  selection.value = [];
+  showContext(event, "folder", [], folder);
+}
+function emptyContext(event: MouseEvent) {
+  if (
+    !settings.value.configured ||
+    (event.target as HTMLElement).closest(
+      "button, a, input, select, textarea, .toolbar-area, .preview-settings",
+    )
+  )
+    return;
+  selection.value = [];
+  showContext(event, "empty");
+}
+function chooseContext(id: string) {
+  const menu = contextMenu.value;
+  closeContextMenu();
+  if (!menu || busy.value) return;
+  if (id.startsWith("view:")) {
+    view.value = id.slice(5);
+    return;
+  }
+  if (id === "open" || id === "editPhoto") {
+    const file = files.value.find((f) => f.id === menu.ids[0]);
+    if (file)
+      void openPreview(file).then(() => {
+        if (id === "editPhoto" && preview.value?.id === file.id)
+          editing.value = true;
+      });
+  }
+  if (id === "info") inspectorOpen.value = true;
+  if (id === "download") void download(menu.ids);
+  if (id === "share") void share(menu.ids[0]!);
+  if (["rename", "tags", "move", "delete"].includes(id))
+    openModal(id, menu.ids);
+  if (id === "favorite")
+    void patch(menu.ids, {
+      favorite: !menu.ids.every(
+        (id) => files.value.find((f) => f.id === id)?.favorite,
+      ),
+    });
+  if (id === "trash" || id === "restore")
+    void patch(
+      menu.ids,
+      { trashed: id === "trash" },
+      id === "trash"
+        ? t("Файлы перемещены в корзину.")
+        : t("Файлы восстановлены."),
+    );
+  if (menu.folder) {
+    if (id === "openFolder") navigate("drive", menu.folder.id);
+    if (id === "uploadHere") void upload(false, undefined, menu.folder.id);
+    if (id === "uploadFolderHere") void upload(true, undefined, menu.folder.id);
+    if (id === "createChild")
+      openModal("createFolder", [], undefined, menu.folder.id);
+    if (["renameFolder", "moveFolder", "deleteFolder"].includes(id))
+      openModal(id, [], menu.folder);
+  }
+  if (id === "upload") void upload();
+  if (id === "uploadFolder") void upload(true);
+  if (id === "createFolder") openModal("createFolder");
+  if (id === "refresh") void reload();
+  if (id === "selectAll") selection.value = files.value.map((f) => f.id);
+}
+
 function toggleExpanded(id: string) {
   const set = new Set(expanded.value);
   if (set.has(id)) set.delete(id);
@@ -178,6 +410,7 @@ function toggleExpanded(id: string) {
   expanded.value = set;
 }
 function navigate(next: string, id: string | null = null, nextTag = "") {
+  closeContextMenu();
   section.value = next;
   folderId.value = id;
   tag.value = nextTag;
@@ -215,9 +448,12 @@ async function reload(more = false) {
     selection.value = selection.value.filter((s) =>
       files.value.some((f) => f.id === s),
     );
-    if (preview.value)
-      preview.value =
-        files.value.find((f) => f.id === preview.value?.id) || preview.value;
+    if (preview.value) {
+      const updated = files.value.find((f) => f.id === preview.value?.id);
+      if (updated && updated.object_key !== preview.value.object_key)
+        void openPreview(updated);
+      else if (updated) preview.value = updated;
+    }
   } catch (e) {
     if (id === generation) error.value = (e as Error).message;
   } finally {
@@ -269,19 +505,38 @@ function toggleSelect(id: string) {
 function patch(ids: string[], input: FilePatch, message = "") {
   return action(() => api.update(ids, input), message);
 }
-async function upload(folders = false, dropped?: File[]) {
+async function upload(
+  folders = false,
+  dropped?: File[],
+  targetFolderId = uploadFolder.value,
+) {
+  if (typeof window.jellyree?.onUploadConflict !== "function") {
+    error.value = t(
+      "Перезапустите приложение, чтобы обновить обработку загрузки.",
+    );
+    return;
+  }
   if (!settings.value.configured) {
     settingsOpen.value = true;
     return;
   }
   await action(async () => {
     const result: UploadResult = dropped
-      ? await api.dropUpload(dropped, uploadFolder.value)
-      : await api.pickUpload(uploadFolder.value, folders);
+      ? await api.dropUpload(dropped, targetFolderId)
+      : await api.pickUpload(targetFolderId, folders);
     if (result.failures.length) {
-      error.value = `Загружено: ${result.done}. Ошибок: ${result.failures.length}. ${result.failures.map((f) => `${f.name}: ${f.message}`).join("; ")}`;
+      error.value = t("Загружено: {0}. Ошибок: {1}. {2}", {
+        "0": result.done,
+        "1": result.failures.length,
+        "2": result.failures.map((f) => `${f.name}: ${f.message}`).join("; "),
+      });
     }
-    notice.value = `Загружено файлов: ${result.done}`;
+    notice.value = t("Загружено файлов: {0}. Пропущено: {1}.", {
+      "0": result.done,
+      "1": result.skipped || 0,
+    });
+    if (result.canceled) notice.value += t(" Оставшиеся загрузки отменены.");
+    if (result.warnings?.length) error.value = result.warnings.join("; ");
   });
 }
 async function drop(event: DragEvent) {
@@ -290,17 +545,22 @@ async function drop(event: DragEvent) {
   if (!busy.value && event.dataTransfer?.files.length)
     await upload(false, Array.from(event.dataTransfer.files));
 }
-function openModal(kind: string, ids = selection.value, folder?: Folder) {
+function openModal(
+  kind: string,
+  ids = selection.value,
+  folder?: Folder,
+  parentId = uploadFolder.value,
+) {
   const titles: Record<string, string> = {
-    createFolder: "Новая папка",
-    rename: "Переименовать файл",
-    tags: "Теги",
-    move: "Переместить файлы",
-    renameFolder: "Переименовать папку",
-    moveFolder: "Переместить папку",
-    deleteFolder: "Удалить пустую папку?",
-    delete: "Удалить навсегда?",
-    import: "Добавить существующие объекты R2?",
+    createFolder: t("Новая папка"),
+    rename: t("Переименовать файл"),
+    tags: t("Теги"),
+    move: t("Переместить файлы"),
+    renameFolder: t("Переименовать папку"),
+    moveFolder: t("Переместить папку"),
+    deleteFolder: t("Удалить пустую папку?"),
+    delete: t("Удалить навсегда?"),
+    import: t("Добавить существующие объекты R2?"),
   };
   const file = files.value.find((f) => f.id === ids[0]);
   modal.value = {
@@ -317,6 +577,7 @@ function openModal(kind: string, ids = selection.value, folder?: Folder) {
     ids: [...ids],
     target: "",
     folder,
+    parentId,
   };
 }
 async function submitModal() {
@@ -324,7 +585,7 @@ async function submitModal() {
   if (!value) return;
   const success = await action(async () => {
     if (value.kind === "createFolder")
-      await api.createFolder(value.input, uploadFolder.value);
+      await api.createFolder(value.input, value.parentId ?? null);
     if (value.kind === "rename")
       await api.update(value.ids, { name: value.input });
     if (value.kind === "tags")
@@ -344,7 +605,8 @@ async function submitModal() {
       });
     if (value.kind === "deleteFolder" && value.folder) {
       await api.deleteFolder(value.folder.id);
-      folderId.value = value.folder.parent_id || null;
+      if (folderId.value === value.folder.id)
+        folderId.value = value.folder.parent_id || null;
     }
     if (value.kind === "delete") {
       await api.remove(value.ids);
@@ -352,7 +614,7 @@ async function submitModal() {
     }
     if (value.kind === "import") {
       const result = await api.importBucket();
-      notice.value = `Проверено объектов: ${result.scanned}`;
+      notice.value = t("Проверено объектов: {0}", { "0": result.scanned });
     }
   });
   if (success) modal.value = null;
@@ -395,7 +657,7 @@ async function saveEdits() {
     await patch(
       [preview.value.id],
       { adjustments: { ...adjustments } },
-      "Коррекция сохранена. Оригинал сохранён в R2.",
+      t("Коррекция сохранена. Оригинал сохранён в R2."),
     )
   )
     editing.value = false;
@@ -403,13 +665,13 @@ async function saveEdits() {
 async function download(ids = selection.value) {
   await action(async () => {
     const result = await api.download(ids);
-    notice.value = `Скачано файлов: ${result.done}`;
+    notice.value = t("Скачано файлов: {0}", { "0": result.done });
   });
 }
 async function share(id: string) {
   await action(
     () => api.share(id),
-    "Ссылка скопирована. Действует 1 час; доступна всем, у кого она есть.",
+    t("Ссылка скопирована. Действует 1 час; доступна всем, у кого она есть."),
   );
 }
 async function saved(value: Settings) {
@@ -425,8 +687,10 @@ async function saved(value: Settings) {
   tag.value = "";
   search.value = "";
   notice.value = value.persisted
-    ? "Подключение сохранено на этом устройстве."
-    : "Системное хранилище ключей недоступно. Реквизиты будут забыты при закрытии.";
+    ? t("Подключение сохранено на этом устройстве.")
+    : t(
+        "Системное хранилище ключей недоступно. Реквизиты будут забыты при закрытии.",
+      );
   await reload();
 }
 function disconnected() {
@@ -443,9 +707,16 @@ function disconnected() {
   tag.value = "";
   total.value = 0;
   error.value = "";
-  notice.value = "Подключение удалено с устройства.";
+  notice.value = t("Подключение удалено с устройства.");
 }
 function keydown(event: KeyboardEvent) {
+  if (contextMenu.value) {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      closeContextMenu();
+    }
+    return;
+  }
   if (settingsOpen.value) return;
   if (
     event.target instanceof HTMLElement &&
@@ -453,6 +724,29 @@ function keydown(event: KeyboardEvent) {
       event.target.isContentEditable)
   )
     return;
+  if (
+    !modal.value &&
+    !preview.value &&
+    (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10"))
+  ) {
+    event.preventDefault();
+    const target =
+      (event.target as HTMLElement).closest<HTMLElement>(
+        ".file-card, .folder-card, .tree-row",
+      ) || document.querySelector<HTMLElement>(".content");
+    if (target) {
+      const bounds = target.getBoundingClientRect();
+      target.dispatchEvent(
+        new MouseEvent("contextmenu", {
+          bubbles: true,
+          cancelable: true,
+          clientX: bounds.left + 12,
+          clientY: bounds.top + 12,
+        }),
+      );
+    }
+    return;
+  }
   if (event.key === "Escape") {
     if (busy.value) return;
     if (modal.value) modal.value = null;
@@ -475,7 +769,7 @@ function keydown(event: KeyboardEvent) {
       void patch(
         selection.value,
         { trashed: true },
-        "Файлы перемещены в корзину.",
+        t("Файлы перемещены в корзину."),
       );
   }
 }
@@ -490,17 +784,27 @@ watch(sort, () => {
   void reload();
 });
 watch(view, (value) => localStorage.setItem("jellyree-desktop-view", value));
+watch(previewSize, (value) =>
+  localStorage.setItem("jellyree-desktop-preview-size", String(value)),
+);
 onMounted(async () => {
   document.addEventListener("keydown", keydown);
-  if (!api) {
-    error.value =
-      "Откройте приложение через Electron: npm run dev или npm start.";
+  if (!window.jellyree) {
+    error.value = t(
+      "Откройте приложение через Electron: npm run dev или npm start.",
+    );
     ready.value = true;
     return;
   }
+  await syncLanguage();
   unsubscribe = api.onProgress((p) => {
     progress.value = p;
   });
+  if (typeof window.jellyree.onUploadConflict === "function")
+    unsubscribeConflict = api.onUploadConflict((conflict) => {
+      uploadConflict.value = conflict;
+      closeContextMenu();
+    });
   try {
     settings.value = await api.settings.get();
     if (settings.value.startupError) error.value = settings.value.startupError;
@@ -514,6 +818,7 @@ onMounted(async () => {
 });
 onBeforeUnmount(() => {
   unsubscribe?.();
+  unsubscribeConflict?.();
   clearTimeout(timer);
   document.removeEventListener("keydown", keydown);
 });
@@ -530,16 +835,18 @@ onBeforeUnmount(() => {
       <a class="brand" href="#" @click.prevent="navigate('drive')"
         ><span class="brand-mark"
           ><i aria-hidden="true" class="ri-bubble-chart-fill"></i></span
-        ><span>jellyree<small>ВАШ ЛИЧНЫЙ ДИСК</small></span></a
+        ><span
+          >jellyree<small>{{ t("ВАШ ЛИЧНЫЙ ДИСК") }}</small></span
+        ></a
       >
       <button
         class="button primary upload-button"
         :disabled="busy || !ready"
         @click="upload()"
       >
-        <i aria-hidden="true" class="ri-add-line"></i> Загрузить файлы
+        <i aria-hidden="true" class="ri-add-line"></i>{{ t("Загрузить файлы") }}
       </button>
-      <nav class="main-nav" aria-label="Библиотека">
+      <nav class="main-nav" :aria-label="t('Библиотека')">
         <button
           v-for="item in nav"
           :key="item.id"
@@ -555,11 +862,10 @@ onBeforeUnmount(() => {
         </button>
       </nav>
       <div class="sidebar-label">
-        <span>ПАПКИ</span
-        ><button
+        <span>{{ t("ПАПКИ") }}</span><button
           class="icon-button small"
-          title="Новая папка"
-          aria-label="Новая папка"
+          :title="t('Новая папка')"
+          :aria-label="t('Новая папка')"
           :disabled="busy || !settings.configured"
           @click="openModal('createFolder')"
         >
@@ -568,7 +874,7 @@ onBeforeUnmount(() => {
       </div>
       <div class="folder-tree">
         <p v-if="!folders.length" class="sidebar-hint">
-          Ваши папки появятся здесь
+          {{ t("Ваши папки появятся здесь") }}
         </p>
         <div
           v-for="node in folderTree"
@@ -578,11 +884,12 @@ onBeforeUnmount(() => {
             active: folderId === node.folder.id && section === 'drive',
           }"
           :style="{ paddingLeft: `${8 + node.depth * 14}px` }"
+          @contextmenu="folderContext($event, node.folder)"
         >
           <button
             class="tree-chevron"
             :aria-label="
-              expanded.has(node.folder.id) ? 'Свернуть' : 'Развернуть'
+              expanded.has(node.folder.id) ? t('Свернуть') : t('Развернуть')
             "
             @click="toggleExpanded(node.folder.id)"
           >
@@ -606,7 +913,7 @@ onBeforeUnmount(() => {
         </div>
       </div>
       <template v-if="stats.tags.length"
-        ><div class="sidebar-label">ТЕГИ</div>
+        ><div class="sidebar-label">{{ t("ТЕГИ") }}</div>
         <div class="sidebar-tags">
           <button
             v-for="name in stats.tags"
@@ -622,7 +929,7 @@ onBeforeUnmount(() => {
         <div class="cloud-status-top">
           <i aria-hidden="true" class="ri-cloud-line"></i
           ><span>{{
-            settings.configured ? "Cloudflare R2" : "Облако не подключено"
+            settings.configured ? "Cloudflare R2" : t("Облако не подключено")
           }}</span
           ><span
             class="status-dot"
@@ -631,12 +938,12 @@ onBeforeUnmount(() => {
         </div>
         <strong
           >{{ bytes(stats.bytes) }}
-          <span>· {{ stats.files }} файлов</span></strong
-        ><small>{{ settings.bucket || "Подключите своё хранилище" }}</small
+          <span>· {{ t("{0} файлов", { "0": stats.files }) }}</span></strong
+        ><small>{{ settings.bucket || t("Подключите своё хранилище") }}</small
         ><small
           v-if="settings.configured && !settings.persisted"
           class="session-only"
-          >Ключи только на эту сессию</small
+          >{{ t("Ключи только на эту сессию") }}</small
         >
       </div>
       <button
@@ -644,8 +951,9 @@ onBeforeUnmount(() => {
         :disabled="busy"
         @click="settingsOpen = true"
       >
-        <i aria-hidden="true" class="ri-settings-3-line"></i>Настройки
-        подключения<i aria-hidden="true" class="ri-arrow-right-s-line"></i>
+        <i aria-hidden="true" class="ri-settings-3-line"></i
+        >{{ t("Настройки подключения")
+        }}<i aria-hidden="true" class="ri-arrow-right-s-line"></i>
       </button>
     </aside>
 
@@ -655,17 +963,18 @@ onBeforeUnmount(() => {
           <i aria-hidden="true" class="ri-search-line"></i
           ><input
             v-model="search"
-            aria-label="Поиск файлов и тегов"
-            placeholder="Поиск файлов и тегов"
+            :aria-label="t('Поиск файлов и тегов')"
+            :placeholder="t('Поиск файлов и тегов')"
           /><button
             v-if="search"
             class="icon-button small"
-            aria-label="Очистить поиск"
+            :aria-label="t('Очистить поиск')"
             @click="search = ''"
           >
             <i aria-hidden="true" class="ri-close-line"></i></button
           ><kbd>Ctrl A</kbd>
         </div>
+        <LanguageSelect :disabled="busy" />
         <span class="direct-badge"
           ><span
             class="status-dot"
@@ -674,8 +983,8 @@ onBeforeUnmount(() => {
           >R2 + D1</span
         ><button
           class="icon-button"
-          title="Обновить"
-          aria-label="Обновить"
+          :title="t('Обновить')"
+          :aria-label="t('Обновить')"
           :disabled="loading || busy"
           @click="reload()"
         >
@@ -686,8 +995,8 @@ onBeforeUnmount(() => {
           ></i></button
         ><button
           class="avatar"
-          title="Настройки подключения"
-          aria-label="Настройки подключения"
+          :title="t('Настройки подключения')"
+          :aria-label="t('Настройки подключения')"
           :disabled="busy"
           @click="settingsOpen = true"
         >
@@ -699,7 +1008,7 @@ onBeforeUnmount(() => {
         ><span>{{ error }}</span
         ><button
           class="icon-button small"
-          aria-label="Закрыть сообщение"
+          :aria-label="t('Закрыть сообщение')"
           @click="error = ''"
         >
           <i aria-hidden="true" class="ri-close-line"></i>
@@ -710,7 +1019,7 @@ onBeforeUnmount(() => {
         ><span>{{ notice }}</span
         ><button
           class="icon-button small"
-          aria-label="Закрыть сообщение"
+          :aria-label="t('Закрыть сообщение')"
           @click="notice = ''"
         >
           <i aria-hidden="true" class="ri-close-line"></i>
@@ -723,11 +1032,11 @@ onBeforeUnmount(() => {
             >{{
               progress
                 ? {
-                    upload: "Загрузка",
-                    download: "Скачивание",
-                    import: "Индексация R2",
+                    upload: t("Загрузка"),
+                    download: t("Скачивание"),
+                    import: t("Индексация R2"),
                   }[progress.kind]
-                : "Выполняется операция…"
+                : t("Выполняется операция…")
             }}<template v-if="progress">
               · {{ progress.name }} · {{ progress.done
               }}<template v-if="progress.total">
@@ -738,10 +1047,12 @@ onBeforeUnmount(() => {
         </div>
         <progress v-if="progress" :value="progressPercent" max="100"></progress>
       </div>
-      <section class="content">
+      <section class="content" @contextmenu="emptyContext">
         <div v-if="section === 'drive' && folderId" class="breadcrumbs">
-          <button @click="navigate('drive')">Мой диск</button
-          ><template v-for="crumb in breadcrumbs" :key="crumb.id"
+          <button @click="navigate('drive')">
+            {{ t("Мой диск") }}</button><template
+            v-for="crumb in breadcrumbs"
+            :key="crumb.id"
             ><i aria-hidden="true" class="ri-arrow-right-s-line"></i
             ><button @click="navigate('drive', crumb.id)">
               {{ crumb.name }}
@@ -751,14 +1062,21 @@ onBeforeUnmount(() => {
         <header class="page-header">
           <div>
             <span class="eyebrow">{{
-              section === "trash" ? "МОЖНО ВОССТАНОВИТЬ" : "ВСЁ НА СВОИХ МЕСТАХ"
+              section === "trash"
+                ? t("МОЖНО ВОССТАНОВИТЬ")
+                : t("ВСЁ НА СВОИХ МЕСТАХ")
             }}</span>
             <h1>{{ title }}</h1>
             <p>
               {{
                 settings.configured
-                  ? `${total} файлов${childFolders.length ? ` · ${childFolders.length} папок` : ""}`
-                  : "Пространство для ваших файлов, фотографий и идей"
+                  ? t("{0} файлов{1}", {
+                      "0": total,
+                      "1": childFolders.length
+                        ? t(" · {0} папок", { "0": childFolders.length })
+                        : "",
+                    })
+                  : t("Пространство для ваших файлов, фотографий и идей")
               }}
             </p>
           </div>
@@ -766,16 +1084,16 @@ onBeforeUnmount(() => {
             <template v-if="currentFolder && section === 'drive'"
               ><button
                 class="icon-button"
-                title="Переименовать папку"
-                aria-label="Переименовать папку"
+                :title="t('Переименовать папку')"
+                :aria-label="t('Переименовать папку')"
                 :disabled="busy"
                 @click="openModal('renameFolder', [], currentFolder)"
               >
                 <i aria-hidden="true" class="ri-edit-line"></i></button
               ><button
                 class="icon-button"
-                title="Переместить папку"
-                aria-label="Переместить папку"
+                :title="t('Переместить папку')"
+                :aria-label="t('Переместить папку')"
                 :disabled="busy"
                 @click="openModal('moveFolder', [], currentFolder)"
               >
@@ -785,8 +1103,8 @@ onBeforeUnmount(() => {
                 ></i></button
               ><button
                 class="icon-button"
-                title="Удалить пустую папку"
-                aria-label="Удалить пустую папку"
+                :title="t('Удалить пустую папку')"
+                :aria-label="t('Удалить пустую папку')"
                 :disabled="busy"
                 @click="openModal('deleteFolder', [], currentFolder)"
               >
@@ -799,14 +1117,15 @@ onBeforeUnmount(() => {
               :disabled="busy || !settings.configured"
               @click="openModal('createFolder')"
             >
-              <i aria-hidden="true" class="ri-folder-add-line"></i>Новая папка</button
+              <i aria-hidden="true" class="ri-folder-add-line"></i
+              >{{ t("Новая папка") }}</button
             ><button
               class="button"
               :disabled="busy || !settings.configured"
               @click="upload(true)"
             >
-              <i aria-hidden="true" class="ri-folder-upload-line"></i>Загрузить
-              папку
+              <i aria-hidden="true" class="ri-folder-upload-line"></i
+              >{{ t("Загрузить папку") }}
             </button>
           </div>
         </header>
@@ -816,13 +1135,16 @@ onBeforeUnmount(() => {
             <i aria-hidden="true" class="ri-cloud-line"></i
             ><span><i aria-hidden="true" class="ri-folder-3-fill"></i></span>
           </div>
-          <h2>Ваши файлы. Ваше облако.</h2>
+          <h2>{{ t("Ваши файлы. Ваше облако.") }}</h2>
           <p>
-            Подключите R2 и D1, чтобы собрать всё в одном месте.<br />Без
-            собственного сервера и промежуточных сервисов.
+            {{ t("Подключите R2 и D1, чтобы собрать всё в одном месте.")
+            }}<br />{{
+              t("Без собственного сервера и промежуточных сервисов.")
+            }}
           </p>
           <button class="button primary" @click="settingsOpen = true">
-            <i aria-hidden="true" class="ri-plug-line"></i>Подключить Cloudflare
+            <i aria-hidden="true" class="ri-plug-line"></i
+            >{{ t("Подключить Cloudflare") }}
           </button>
         </div>
         <template v-else>
@@ -833,17 +1155,18 @@ onBeforeUnmount(() => {
               class="folder-card"
               :title="folder.name"
               @click="navigate('drive', folder.id)"
+              @contextmenu="folderContext($event, folder)"
             >
               <span class="folder-card-icon"
                 ><i aria-hidden="true" class="ri-folder-3-fill"></i></span
               ><span
                 >{{ folder.name
-                }}<small
-                  >{{
-                    folders.filter((f) => f.parent_id === folder.id).length
-                  }}
-                  вложенных папок</small
-                ></span
+                }}<small>{{
+                  t("{0} вложенных папок", {
+                    "0": folders.filter((f) => f.parent_id === folder.id)
+                      .length,
+                  })
+                }}</small></span
               ><i aria-hidden="true" class="ri-arrow-right-s-line"></i>
             </button>
           </div>
@@ -854,13 +1177,13 @@ onBeforeUnmount(() => {
                   class="icon-button small"
                   :title="
                     allSelected
-                      ? 'Снять выделение'
-                      : 'Выбрать загруженные файлы'
+                      ? t('Снять выделение')
+                      : t('Выбрать загруженные файлы')
                   "
                   :aria-label="
                     allSelected
-                      ? 'Снять выделение'
-                      : 'Выбрать загруженные файлы'
+                      ? t('Снять выделение')
+                      : t('Выбрать загруженные файлы')
                   "
                   @click="selection = allSelected ? [] : files.map((f) => f.id)"
                 >
@@ -873,114 +1196,161 @@ onBeforeUnmount(() => {
                     "
                   ></i></button
                 ><span>{{
-                  selection.length ? `Выбрано: ${selection.length}` : "Файлы"
+                  selection.length
+                    ? t("Выбрано: {0}", { "0": selection.length })
+                    : t("Файлы")
                 }}</span>
               </div>
               <div>
-                <select v-model="sort" aria-label="Сортировка">
-                  <option value="date">Сначала новые</option>
-                  <option value="name">По имени</option>
-                  <option value="size">По размеру</option>
+                <select v-model="sort" :aria-label="t('Сортировка')">
+                  <option value="date">{{ t("Сначала новые") }}</option>
+                  <option value="name">{{ t("По имени") }}</option>
+                  <option value="size">{{ t("По размеру") }}</option>
                 </select>
-                <div class="view-switch">
-                  <button
-                    :class="{ active: view === 'grid' }"
-                    aria-label="Сетка"
-                    @click="view = 'grid'"
-                  >
-                    <i aria-hidden="true" class="ri-grid-line"></i></button
-                  ><button
-                    :class="{ active: view === 'list' }"
-                    aria-label="Список"
-                    @click="view = 'list'"
-                  >
-                    <i aria-hidden="true" class="ri-list-check"></i>
-                  </button>
-                </div>
               </div>
             </div>
             <div v-if="selection.length" class="selection-toolbar">
-              <span>{{ selection.length }} выбрано</span
-              ><button
+              <span>{{
+                t("Выбрано: {0}", { "0": selection.length })
+              }}</span><button
                 v-if="selection.length === 1"
                 class="icon-button small"
                 :disabled="busy"
-                title="Переименовать"
-                aria-label="Переименовать"
+                :title="t('Переименовать')"
+                :aria-label="t('Переименовать')"
                 @click="openModal('rename')"
               >
                 <i aria-hidden="true" class="ri-edit-line"></i></button
               ><button
                 v-if="selection.length === 1"
                 class="icon-button small"
-                title="Информация"
-                aria-label="Информация"
+                :title="t('Информация')"
+                :aria-label="t('Информация')"
                 @click="inspectorOpen = !inspectorOpen"
               >
                 <i aria-hidden="true" class="ri-information-line"></i></button
               ><button :disabled="busy" @click="download()">
                 <i aria-hidden="true" class="ri-download-2-line"></i
-                >Скачать</button
+                >{{ t("Скачать") }}</button
               ><template v-if="section !== 'trash'"
                 ><button :disabled="busy" @click="openModal('move')">
                   <i aria-hidden="true" class="ri-folder-transfer-line"></i
-                  >Переместить</button
+                  >{{ t("Переместить") }}</button
                 ><button :disabled="busy" @click="openModal('tags')">
                   <i aria-hidden="true" class="ri-price-tag-3-line"></i
-                  >Теги</button
+                  >{{ t("Теги") }}</button
                 ><button
                   :disabled="busy"
                   @click="
                     patch(
                       selection,
                       { favorite: true },
-                      'Добавлено в избранное.',
+                      t('Добавлено в избранное.'),
                     )
                   "
                 >
-                  <i aria-hidden="true" class="ri-star-line"></i>В избранное</button
+                  <i aria-hidden="true" class="ri-star-line"></i
+                  >{{ t("В избранное") }}</button
                 ><button
                   :disabled="busy"
                   @click="
                     patch(
                       selection,
                       { trashed: true },
-                      'Файлы перемещены в корзину.',
+                      t('Файлы перемещены в корзину.'),
                     )
                   "
                 >
-                  <i aria-hidden="true" class="ri-delete-bin-line"></i>В корзину
+                  <i aria-hidden="true" class="ri-delete-bin-line"></i
+                  >{{ t("В корзину") }}
                 </button></template
               ><template v-else
                 ><button
                   :disabled="busy"
                   @click="
-                    patch(selection, { trashed: false }, 'Файлы восстановлены.')
+                    patch(
+                      selection,
+                      { trashed: false },
+                      t('Файлы восстановлены.'),
+                    )
                   "
                 >
                   <i aria-hidden="true" class="ri-arrow-go-back-line"></i
-                  >Восстановить</button
+                  >{{ t("Восстановить") }}</button
                 ><button
                   class="danger"
                   :disabled="busy"
                   @click="openModal('delete')"
                 >
-                  Удалить навсегда
+                  {{ t("Удалить навсегда") }}
                 </button></template
               ><button
                 class="icon-button small"
-                aria-label="Снять выделение"
+                :aria-label="t('Снять выделение')"
                 @click="selection = []"
               >
                 <i aria-hidden="true" class="ri-close-line"></i>
               </button>
             </div>
           </div>
+          <div class="preview-settings">
+            <div class="view-switch">
+              <button
+                :class="{ active: view === 'gallery' }"
+                :aria-pressed="view === 'gallery'"
+                :title="t('Галерея без обрезки')"
+                :aria-label="t('Галерея')"
+                @click="view = 'gallery'"
+              >
+                <i aria-hidden="true" class="ri-layout-masonry-line"></i>
+              </button>
+              <button
+                :class="{ active: view === 'grid' }"
+                :aria-pressed="view === 'grid'"
+                :aria-label="t('Сетка')"
+                @click="view = 'grid'"
+              >
+                <i aria-hidden="true" class="ri-grid-line"></i></button
+              ><button
+                :class="{ active: view === 'list' }"
+                :aria-pressed="view === 'list'"
+                :aria-label="t('Список')"
+                @click="view = 'list'"
+              >
+                <i aria-hidden="true" class="ri-list-check"></i>
+              </button>
+            </div>
+            <span v-if="view === 'gallery'"
+              ><i aria-hidden="true" class="ri-aspect-ratio-line"></i
+              >{{ t("Исходные пропорции · без обрезки") }}</span
+            >
+            <span v-else>{{
+              view === "list" ? t("Файлы списком") : t("Превью файлов")
+            }}</span>
+            <label v-if="view !== 'list'"
+              >{{ t("Размер превью")
+              }}<input
+                v-model.number="previewSize"
+                type="range"
+                min="120"
+                max="420"
+                step="20"
+                :aria-label="t('Размер превью')"
+              /><output>{{ previewSize }} px</output></label
+            >
+          </div>
           <div v-if="view === 'list' && files.length" class="list-heading">
-            <span>Название</span><span>Размер</span><span>Дата добавления</span
+            <span>{{ t("Название") }}</span><span>{{ t("Размер") }}</span
+            ><span>{{ t("Дата добавления") }}</span
             ><span></span>
           </div>
-          <div :key="scope" class="files" :class="view" :aria-busy="loading">
+          <div
+            :key="scope"
+            class="files"
+            :class="view"
+            :style="{ '--preview-size': `${previewSize}px` }"
+            :aria-busy="loading"
+          >
             <article
               v-for="file in files"
               :key="file.id"
@@ -989,14 +1359,19 @@ onBeforeUnmount(() => {
               tabindex="0"
               @click="select(file, $event)"
               @dblclick="openPreview(file)"
+              @contextmenu="fileContext($event, file)"
               @keydown.enter="openPreview(file)"
               @keydown.space.prevent="toggleSelect(file.id)"
             >
               <div class="thumb-wrap">
-                <FileThumb :file="file" :compact="view === 'list'" /><button
+                <FileThumb
+                  :file="file"
+                  :compact="view === 'list'"
+                  :natural="view === 'gallery'"
+                /><button
                   class="file-checkbox"
                   :class="{ checked: selection.includes(file.id) }"
-                  :aria-label="`Выбрать ${file.name}`"
+                  :aria-label="t('Выбрать {0}', { '0': file.name })"
                   @click.stop="toggleSelect(file.id)"
                 >
                   <i
@@ -1012,7 +1387,7 @@ onBeforeUnmount(() => {
                   :class="{ starred: file.favorite }"
                   :disabled="busy"
                   :aria-label="
-                    file.favorite ? 'Убрать из избранного' : 'В избранное'
+                    file.favorite ? t('Убрать из избранного') : t('В избранное')
                   "
                   @click.stop="patch([file.id], { favorite: !file.favorite })"
                 >
@@ -1027,12 +1402,12 @@ onBeforeUnmount(() => {
                   <i aria-hidden="true" :class="icon(file.mime_type)"></i
                   ><span>{{ file.name }}</span>
                 </div>
-                <small v-if="view === 'grid'"
+                <small v-if="view !== 'list'"
                   >{{ bytes(file.size_bytes) }}<span>·</span
                   >{{ date(file.created_at) }}</small
                 >
                 <div
-                  v-if="file.tags.length && view === 'grid'"
+                  v-if="file.tags.length && view !== 'list'"
                   class="tag-chips"
                 >
                   <span v-for="name in file.tags.slice(0, 3)" :key="name">{{
@@ -1047,8 +1422,8 @@ onBeforeUnmount(() => {
               }}</span
               ><button
                 class="file-open icon-button small"
-                title="Открыть"
-                aria-label="Открыть файл"
+                :title="t('Открыть')"
+                :aria-label="t('Открыть файл')"
                 @click.stop="openPreview(file)"
               >
                 <i aria-hidden="true" class="ri-arrow-right-up-line"></i>
@@ -1074,23 +1449,25 @@ onBeforeUnmount(() => {
             <h2>
               {{
                 search || tag
-                  ? "Ничего не найдено"
+                  ? t("Ничего не найдено")
                   : section === "trash"
-                    ? "Корзина пуста"
+                    ? t("Корзина пуста")
                     : section === "favorites"
-                      ? "Здесь будет избранное"
-                      : "Здесь пока свободно"
+                      ? t("Здесь будет избранное")
+                      : t("Здесь пока свободно")
               }}
             </h2>
             <p>
               {{
                 search || tag
-                  ? "Попробуйте другое имя или тег."
+                  ? t("Попробуйте другое имя или тег.")
                   : section === "trash"
-                    ? "Удалённые файлы остаются здесь до окончательного удаления."
+                    ? t(
+                        "Удалённые файлы остаются здесь до окончательного удаления.",
+                      )
                     : section === "favorites"
-                      ? "Нажмите на звёздочку рядом с нужным файлом."
-                      : "Перетащите файлы сюда или загрузите целую папку."
+                      ? t("Нажмите на звёздочку рядом с нужным файлом.")
+                      : t("Перетащите файлы сюда или загрузите целую папку.")
               }}
             </p>
             <button
@@ -1101,20 +1478,20 @@ onBeforeUnmount(() => {
               :disabled="busy"
               @click="upload()"
             >
-              <i aria-hidden="true" class="ri-upload-cloud-2-line"></i>Загрузить
-              файлы</button
+              <i aria-hidden="true" class="ri-upload-cloud-2-line"></i
+              >{{ t("Загрузить файлы") }}</button
             ><button
               v-if="section === 'drive' && !folderId && !search"
               class="text-button"
               :disabled="busy"
               @click="openModal('import')"
             >
-              В R2 уже есть файлы? Добавить в каталог
+              {{ t("В R2 уже есть файлы? Добавить в каталог") }}
             </button>
           </div>
           <div v-if="loading" class="loading-state">
-            <i aria-hidden="true" class="ri-loader-4-line spinning"></i>Загрузка
-            каталога…
+            <i aria-hidden="true" class="ri-loader-4-line spinning"></i
+            >{{ t("Загрузка каталога…") }}
           </div>
           <button
             v-if="hasMore"
@@ -1122,31 +1499,32 @@ onBeforeUnmount(() => {
             :disabled="loading"
             @click="reload(true)"
           >
-            Показать ещё · {{ files.length }} из {{ total }}
+            {{
+              t("Показать ещё · {0} из {1}", { "0": files.length, "1": total })
+            }}
           </button>
         </template>
       </section>
       <footer class="workspace-footer">
         <span
-          ><i aria-hidden="true" class="ri-shield-check-line"></i>Прямое
-          подключение к вашему Cloudflare</span
+          ><i aria-hidden="true" class="ri-shield-check-line"></i
+          >{{ t("Прямое подключение к вашему Cloudflare") }}</span
         ><button
           v-if="settings.configured"
           class="text-button"
           :disabled="busy"
           @click="openModal('import')"
         >
-          Индексировать R2</button
+          {{ t("Индексировать R2") }}</button
         ><span>Jellyree Desktop</span>
       </footer>
     </main>
 
     <aside v-if="selectedFile && inspectorOpen" class="inspector">
       <header>
-        <strong>Информация</strong
-        ><button
+        <strong>{{ t("Информация") }}</strong><button
           class="icon-button small"
-          aria-label="Закрыть информацию"
+          :aria-label="t('Закрыть информацию')"
           @click="inspectorOpen = false"
         >
           <i aria-hidden="true" class="ri-close-line"></i>
@@ -1155,29 +1533,29 @@ onBeforeUnmount(() => {
       <FileThumb :key="scope + selectedFile.id" :file="selectedFile" />
       <h3>{{ selectedFile.name }}</h3>
       <button class="button" @click="openPreview(selectedFile)">
-        <i aria-hidden="true" class="ri-eye-line"></i>Открыть просмотр
+        <i aria-hidden="true" class="ri-eye-line"></i
+        >{{ t("Открыть просмотр") }}
       </button>
       <dl>
-        <dt>Тип</dt>
+        <dt>{{ t("Тип") }}</dt>
         <dd>{{ selectedFile.mime_type }}</dd>
-        <dt>Размер</dt>
+        <dt>{{ t("Размер") }}</dt>
         <dd>{{ bytes(selectedFile.size_bytes) }}</dd>
-        <dt>Добавлен</dt>
+        <dt>{{ t("Добавлен") }}</dt>
         <dd>{{ date(selectedFile.created_at) }}</dd>
-        <dt>Расположение</dt>
+        <dt>{{ t("Расположение") }}</dt>
         <dd>
           {{
             folders.find((f) => f.id === selectedFile?.folder_id)?.name ||
-            "Мой диск"
+            t("Мой диск")
           }}
         </dd>
       </dl>
       <div class="inspector-tags">
-        <strong>Теги</strong
-        ><button
+        <strong>{{ t("Теги") }}</strong><button
           class="icon-button small"
           :disabled="busy"
-          aria-label="Изменить теги"
+          :aria-label="t('Изменить теги')"
           @click="openModal('tags')"
         >
           <i aria-hidden="true" class="ri-edit-line"></i>
@@ -1186,31 +1564,60 @@ onBeforeUnmount(() => {
       <div class="tag-chips">
         <span v-for="name in selectedFile.tags" :key="name">{{
           name
-        }}</span><small v-if="!selectedFile.tags.length" class="muted"
-          >Теги ещё не добавлены</small
-        >
+        }}</span><small v-if="!selectedFile.tags.length" class="muted">{{
+          t("Теги ещё не добавлены")
+        }}</small>
       </div>
       <div class="inspector-actions">
         <button class="button" :disabled="busy" @click="openModal('rename')">
-          <i aria-hidden="true" class="ri-edit-line"></i>Переименовать</button
+          <i aria-hidden="true" class="ri-edit-line"></i
+          >{{ t("Переименовать") }}</button
         ><button
           class="button"
           :disabled="busy"
           @click="share(selectedFile.id)"
         >
-          <i aria-hidden="true" class="ri-link"></i>Ссылка на 1 час</button
+          <i aria-hidden="true" class="ri-link"></i
+          >{{ t("Ссылка на 1 час") }}</button
         ><button class="button" :disabled="busy" @click="download()">
-          <i aria-hidden="true" class="ri-download-2-line"></i>Скачать оригинал
+          <i aria-hidden="true" class="ri-download-2-line"></i
+          >{{ t("Скачать оригинал") }}
         </button>
       </div>
     </aside>
     <div v-if="dragging" class="drop-overlay">
       <i aria-hidden="true" class="ri-upload-cloud-2-line"></i>
-      <h2>Отпустите, чтобы загрузить</h2>
-      <p>{{ uploadFolder ? currentFolder?.name : "Мой диск" }}</p>
+      <h2>{{ t("Отпустите, чтобы загрузить") }}</h2>
+      <p>{{ uploadFolder ? currentFolder?.name : t("Мой диск") }}</p>
     </div>
   </div>
 
+  <UploadConflictDialog
+    v-if="uploadConflict"
+    :key="uploadConflict.id"
+    :conflict="uploadConflict"
+    @resolved="
+      (id) => {
+        if (uploadConflict?.id === id) uploadConflict = null;
+      }
+    "
+  />
+  <ContextMenu
+    v-if="contextMenu"
+    :key="contextMenu.serial"
+    :x="contextMenu.x"
+    :y="contextMenu.y"
+    :label="
+      contextMenu.kind === 'files'
+        ? t('Действия с файлами')
+        : contextMenu.kind === 'folder'
+          ? t('Действия с папкой')
+          : t('Действия в папке')
+    "
+    :items="contextItems"
+    @choose="chooseContext"
+    @close="closeContextMenu"
+  />
   <SettingsPanel
     v-if="settingsOpen"
     :settings="settings"
@@ -1232,7 +1639,7 @@ onBeforeUnmount(() => {
           type="button"
           class="icon-button"
           :disabled="busy"
-          aria-label="Закрыть"
+          :aria-label="t('Закрыть')"
           @click="modal = null"
         >
           <i aria-hidden="true" class="ri-close-line"></i>
@@ -1246,8 +1653,8 @@ onBeforeUnmount(() => {
         "
         >{{
           modal.kind === "tags"
-            ? "Теги через запятую (заменят текущие)"
-            : "Название"
+            ? t("Теги через запятую (заменят текущие)")
+            : t("Название")
         }}<input
           v-model="modal.input"
           autofocus
@@ -1255,8 +1662,9 @@ onBeforeUnmount(() => {
           :maxlength="modal.kind === 'tags' ? 3000 : 255"
           :disabled="busy" /></label
       ><label v-if="['move', 'moveFolder'].includes(modal.kind)"
-        >Папка назначения<select v-model="modal.target" :disabled="busy">
-          <option value="">Мой диск</option>
+        >{{ t("Папка назначения")
+        }}<select v-model="modal.target" :disabled="busy">
+          <option value="">{{ t("Мой диск") }}</option>
           <option
             v-for="option in folderOptions.filter(
               (f) => f.id !== modal?.folder?.id,
@@ -1269,19 +1677,28 @@ onBeforeUnmount(() => {
         </select></label
       >
       <p v-if="modal.kind === 'delete'" class="muted">
-        Будут удалены выбранные файлы ({{ modal.ids.length }}) из R2 и каталога
-        D1. Восстановить их будет нельзя.
+        {{
+          t(
+            "Будут удалены выбранные файлы ({0}) из R2 и каталога D1. Восстановить их будет нельзя.",
+            { "0": modal.ids.length },
+          )
+        }}
       </p>
       <p v-if="modal.kind === 'deleteFolder'" class="muted">
-        Папку «{{ modal.folder?.name }}» можно удалить, если в ней нет вложенных
-        папок и файлов, в том числе в корзине.
+        {{
+          t(
+            "Папку «{0}» можно удалить, если в ней нет вложенных папок и файлов, в том числе в корзине.",
+            { "0": modal.folder?.name },
+          )
+        }}
       </p>
       <p v-if="modal.kind === 'import'" class="muted">
-        Все объекты из bucket «{{ settings.bucket }}» под префиксом «{{
-          settings.prefix || "/"
-        }}» будут добавлены в корень каталога. Существующие записи не изменятся.
-        При пустом префиксе будут учтены все объекты bucket, включая технические
-        файлы.
+        {{
+          t(
+            "Объекты bucket «{0}» под префиксом «{1}» будут добавлены в корень каталога. Существующие записи не изменятся. При пустом префиксе будут учтены все объекты, включая технические файлы.",
+            { "0": settings.bucket, "1": settings.prefix || "/" },
+          )
+        }}
       </p>
       <p v-if="error" class="error" role="alert">{{ error }}</p>
       <footer class="dialog-footer">
@@ -1291,8 +1708,7 @@ onBeforeUnmount(() => {
           :disabled="busy"
           @click="modal = null"
         >
-          Отмена</button
-        ><button
+          {{ t("Отмена") }}</button><button
           class="button"
           :class="
             ['delete', 'deleteFolder'].includes(modal.kind)
@@ -1303,12 +1719,12 @@ onBeforeUnmount(() => {
         >
           {{
             busy
-              ? "Выполняется…"
+              ? t("Выполняется…")
               : ["delete", "deleteFolder"].includes(modal.kind)
-                ? "Удалить"
+                ? t("Удалить")
                 : modal.kind === "import"
-                  ? "Добавить объекты"
-                  : "Сохранить"
+                  ? t("Добавить объекты")
+                  : t("Сохранить")
           }}
         </button>
       </footer>
@@ -1320,7 +1736,7 @@ onBeforeUnmount(() => {
     class="preview-overlay"
     role="dialog"
     aria-modal="true"
-    aria-label="Просмотр файла"
+    :aria-label="t('Просмотр файла')"
   >
     <header class="preview-header">
       <div>
@@ -1337,7 +1753,7 @@ onBeforeUnmount(() => {
         <button
           class="icon-button"
           :disabled="busy"
-          aria-label="Избранное"
+          :aria-label="t('Избранное')"
           @click="patch([preview.id], { favorite: !preview.favorite })"
         >
           <i
@@ -1349,24 +1765,25 @@ onBeforeUnmount(() => {
           class="button"
           @click="editing = !editing"
         >
-          <i aria-hidden="true" class="ri-equalizer-line"></i>Коррекция</button
+          <i aria-hidden="true" class="ri-equalizer-line"></i
+          >{{ t("Коррекция") }}</button
         ><button
           class="icon-button"
           :disabled="busy"
-          aria-label="Скопировать ссылку"
+          :aria-label="t('Скопировать ссылку')"
           @click="share(preview.id)"
         >
           <i aria-hidden="true" class="ri-link"></i></button
         ><button
           class="icon-button"
           :disabled="busy"
-          aria-label="Скачать оригинал"
+          :aria-label="t('Скачать оригинал')"
           @click="download([preview.id])"
         >
           <i aria-hidden="true" class="ri-download-2-line"></i></button
         ><button
           class="icon-button"
-          aria-label="Закрыть просмотр"
+          :aria-label="t('Закрыть просмотр')"
           @click="closePreview"
         >
           <i aria-hidden="true" class="ri-close-line"></i>
@@ -1376,21 +1793,21 @@ onBeforeUnmount(() => {
     <div class="preview-body">
       <button
         class="preview-arrow previous"
-        aria-label="Предыдущий файл"
+        :aria-label="t('Предыдущий файл')"
         @click="nextPreview(-1)"
       >
         <i aria-hidden="true" class="ri-arrow-left-s-line"></i>
       </button>
       <div class="preview-stage">
         <div v-if="previewLoading" class="loading-state">
-          <i aria-hidden="true" class="ri-loader-4-line spinning"></i>Получение
-          файла…
+          <i aria-hidden="true" class="ri-loader-4-line spinning"></i
+          >{{ t("Получение файла…") }}
         </div>
         <div v-else-if="previewError" class="preview-fallback">
           <i aria-hidden="true" class="ri-error-warning-line"></i>
           <p>{{ previewError }}</p>
           <button class="button" @click="openPreview(preview)">
-            Повторить
+            {{ t("Повторить") }}
           </button>
         </div>
         <template v-else-if="previewUrl"
@@ -1400,8 +1817,9 @@ onBeforeUnmount(() => {
             :alt="preview.name"
             :style="imageStyle(editing ? adjustments : preview.adjustments)"
             @error="
-              previewError =
-                'Формат не поддерживается встроенным просмотром. Скачайте оригинал.'
+              previewError = t(
+                'Формат не поддерживается встроенным просмотром. Скачайте оригинал.',
+              )
             "
           /><video
             v-else-if="preview.mime_type.startsWith('video/')"
@@ -1409,7 +1827,9 @@ onBeforeUnmount(() => {
             controls
             autoplay
             @error="
-              previewError = 'Видеокодек не поддерживается. Скачайте оригинал.'
+              previewError = t(
+                'Видеокодек не поддерживается. Скачайте оригинал.',
+              )
             "
           ></video
           ><audio
@@ -1417,40 +1837,46 @@ onBeforeUnmount(() => {
             :src="previewUrl"
             controls
             @error="
-              previewError = 'Аудиокодек не поддерживается. Скачайте оригинал.'
+              previewError = t(
+                'Аудиокодек не поддерживается. Скачайте оригинал.',
+              )
             "
           ></audio>
           <div v-else class="preview-fallback">
             <i aria-hidden="true" :class="icon(preview.mime_type)"></i>
             <h2>{{ preview.name }}</h2>
-            <p>Для этого формата доступно скачивание.</p>
+            <p>{{ t("Для этого формата доступно скачивание.") }}</p>
             <button
               class="button primary"
               :disabled="busy"
               @click="download([preview.id])"
             >
-              <i aria-hidden="true" class="ri-download-2-line"></i>Скачать
-              оригинал
+              <i aria-hidden="true" class="ri-download-2-line"></i
+              >{{ t("Скачать оригинал") }}
             </button>
           </div></template
         >
       </div>
       <button
         class="preview-arrow next"
-        aria-label="Следующий файл"
+        :aria-label="t('Следующий файл')"
         @click="nextPreview(1)"
       >
         <i aria-hidden="true" class="ri-arrow-right-s-line"></i>
       </button>
       <aside v-if="editing" class="editor-panel">
-        <h3>Коррекция фото</h3>
-        <p>Настройки хранятся в D1. При скачивании вы получите оригинал.</p>
+        <h3>{{ t("Коррекция фото") }}</h3>
+        <p>
+          {{
+            t("Настройки хранятся в D1. При скачивании вы получите оригинал.")
+          }}
+        </p>
         <label
           v-for="control in [
-            { key: 'brightness', label: 'Яркость', min: 0, max: 200 },
-            { key: 'contrast', label: 'Контраст', min: 0, max: 200 },
-            { key: 'saturation', label: 'Насыщенность', min: 0, max: 200 },
-            { key: 'rotate', label: 'Поворот', min: -180, max: 180 },
+            { key: 'brightness', label: t('Яркость'), min: 0, max: 200 },
+            { key: 'contrast', label: t('Контраст'), min: 0, max: 200 },
+            { key: 'saturation', label: t('Насыщенность'), min: 0, max: 200 },
+            { key: 'rotate', label: t('Поворот'), min: -180, max: 180 },
           ]"
           :key="control.key"
           >{{ control.label
@@ -1463,7 +1889,7 @@ onBeforeUnmount(() => {
             :min="control.min"
             :max="control.max" /></label
         ><button class="button primary" :disabled="busy" @click="saveEdits">
-          Сохранить коррекцию</button
+          {{ t("Сохранить коррекцию") }}</button
         ><button
           class="button"
           :disabled="busy"
@@ -1476,7 +1902,7 @@ onBeforeUnmount(() => {
             })
           "
         >
-          Сбросить
+          {{ t("Сбросить") }}
         </button>
         <p v-if="error" class="error">{{ error }}</p>
       </aside>
@@ -1484,10 +1910,10 @@ onBeforeUnmount(() => {
     <footer class="preview-footer">
       <span
         >{{ files.findIndex((f) => f.id === preview?.id) + 1 }} /
-        {{ files.length }} загруженных файлов</span
+        {{ t("{0} загруженных файлов", { "0": files.length }) }}</span
       ><span v-if="notice">{{ notice }}</span
       ><span v-if="error" class="error">{{ error }}</span
-      ><span>← → для переключения · Esc для выхода</span>
+      ><span>{{ t("← → для переключения · Esc для выхода") }}</span>
     </footer>
   </div>
 </template>

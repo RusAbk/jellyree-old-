@@ -4,6 +4,8 @@ import { DatabaseSync } from "node:sqlite";
 import { mkdtemp, writeFile, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { setLanguage } from "../electron/locales.mjs";
+setLanguage("ru");
 import { Library } from "../electron/library.mjs";
 import { D1 } from "../electron/d1.mjs";
 import {
@@ -361,4 +363,316 @@ test("configuration validates endpoints indirectly and namespaces each bucket/pr
   );
   assert.notEqual(libraryId(config), libraryId({ ...config, bucket: "other" }));
   assert.notEqual(libraryId(config), libraryId({ ...config, prefix: "other" }));
+});
+
+test("upload collisions: skip all applies only to this batch and counts every duplicate", async (t) => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "jr-skip-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const { mkdir } = await import("node:fs/promises");
+  for (const sub of ["a", "b"]) {
+    await mkdir(path.join(dir, sub));
+    await writeFile(path.join(dir, sub, "one.jpg"), "new");
+  }
+  let uploads = 0,
+    prompts = 0;
+  const { library, insert } = fixture(t, {
+    createUpload: () => {
+      uploads++;
+      throw new Error("must skip");
+    },
+  });
+  await library.initialize();
+  insert("one");
+  const result = await library.uploadPaths(
+    ["a", "b"].map((sub) => path.join(dir, sub, "one.jpg")),
+    null,
+    () => {},
+    async (info) => {
+      prompts++;
+      assert.equal(info.remaining, 2);
+      assert.equal(info.total, 2);
+      return { action: "skip", applyToAll: true };
+    },
+  );
+  assert.equal(prompts, 1);
+  assert.equal(uploads, 0);
+  assert.equal(result.skipped, 2);
+  assert.equal(result.done, 0);
+  assert.equal(result.failures.length, 0);
+  await library.uploadPaths(
+    [path.join(dir, "a", "one.jpg")],
+    null,
+    () => {},
+    async () => {
+      prompts++;
+      return { action: "skip" };
+    },
+  );
+  assert.equal(prompts, 2);
+});
+
+test("upload collisions: rename reserves names from existing files and the entire incoming batch", async (t) => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "jr-rename-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const { mkdir } = await import("node:fs/promises");
+  for (const sub of ["a", "b"]) {
+    await mkdir(path.join(dir, sub));
+    await writeFile(path.join(dir, sub, "one.jpg"), "new");
+  }
+  await writeFile(path.join(dir, "one (2).jpg"), "new");
+  const { library, insert } = fixture(t, {
+    createUpload: (options) => ({
+      on() {},
+      async done() {
+        options.params.Body.destroy();
+      },
+    }),
+  });
+  await library.initialize();
+  insert("one");
+  insert("numbered", { name: "one (1).jpg" });
+  let prompts = 0;
+  const result = await library.uploadPaths(
+    [
+      path.join(dir, "a", "one.jpg"),
+      path.join(dir, "b", "one.jpg"),
+      path.join(dir, "one (2).jpg"),
+    ],
+    null,
+    () => {},
+    async (info) => {
+      prompts++;
+      assert.equal(info.suggestedName, "one (3).jpg");
+      return { action: "rename", applyToAll: true };
+    },
+  );
+  assert.equal(result.done, 3);
+  assert.equal(prompts, 1);
+  assert.equal(result.failures.length, 0);
+  const names = (await library.list()).items.map((f) => f.name).sort();
+  assert.deepEqual(names, [
+    "one (1).jpg",
+    "one (2).jpg",
+    "one (3).jpg",
+    "one (4).jpg",
+    "one.jpg",
+  ]);
+});
+
+test("upload replacement preserves metadata and deletes old bytes only after D1 points to the new object", async (t) => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "jr-replace-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const source = path.join(dir, "one.jpg");
+  await writeFile(source, "replacement");
+  const { library, insert, sqlite, deleted } = fixture(t, {
+    createUpload: (options) => ({
+      on() {},
+      async done() {
+        options.params.Body.destroy();
+      },
+    }),
+  });
+  await library.initialize();
+  insert("one", { favorite: 1, tags: ["keep"] });
+  sqlite
+    .prepare("UPDATE jr_files SET adjustments = ? WHERE id = ?")
+    .run(JSON.stringify({ rotate: 90 }), "one");
+  const result = await library.uploadPaths(
+    [source],
+    null,
+    () => {},
+    async () => ({ action: "replace" }),
+  );
+  const current = await library.file("one");
+  assert.equal(result.done, 1);
+  assert.equal((await library.list()).total, 1);
+  assert.equal(current.favorite, true);
+  assert.deepEqual(current.tags, ["keep"]);
+  assert.deepEqual(current.adjustments, {});
+  assert.equal(current.created_at, "2026-01-01");
+  assert.equal(current.size_bytes, 11);
+  assert.notEqual(current.object_key, "objects/one");
+  assert.deepEqual(deleted, ["objects/one"]);
+});
+
+test("failed replacement keeps the original file and rolls back only the new R2 object", async (t) => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "jr-replace-fail-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const source = path.join(dir, "one.jpg");
+  await writeFile(source, "replacement");
+  const { library, insert, db, deleted } = fixture(t, {
+    createUpload: (options) => ({
+      on() {},
+      async done() {
+        options.params.Body.destroy();
+      },
+    }),
+  });
+  await library.initialize();
+  insert("one");
+  const query = db.query.bind(db);
+  db.query = async (sql, params) => {
+    if (sql.startsWith("UPDATE jr_files SET object_key"))
+      throw new Error("D1 write failed");
+    return query(sql, params);
+  };
+  await assert.rejects(
+    library.uploadFile(source, null, () => {}, { replaceId: "one" }),
+    /D1 write failed/,
+  );
+  assert.equal((await library.file("one")).object_key, "objects/one");
+  assert.equal(deleted.length, 1);
+  assert.notEqual(deleted[0], "objects/one");
+});
+
+test("a lost replacement response is verified before cleaning up the previous object", async (t) => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "jr-replace-commit-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const source = path.join(dir, "one.jpg");
+  await writeFile(source, "replacement");
+  const { library, insert, db, deleted } = fixture(t, {
+    createUpload: (options) => ({
+      on() {},
+      async done() {
+        options.params.Body.destroy();
+      },
+    }),
+  });
+  await library.initialize();
+  insert("one");
+  const query = db.query.bind(db);
+  db.query = async (sql, params) => {
+    const rows = await query(sql, params);
+    if (sql.startsWith("UPDATE jr_files SET object_key"))
+      throw new Error("response lost");
+    return rows;
+  };
+  await library.uploadFile(source, null, () => {}, { replaceId: "one" });
+  assert.notEqual((await library.file("one")).object_key, "objects/one");
+  assert.deepEqual(deleted, ["objects/one"]);
+});
+
+test("names in different folders do not conflict, while duplicate incoming basenames do", async (t) => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "jr-folders-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const { mkdir } = await import("node:fs/promises");
+  for (const sub of ["a", "b"]) {
+    await mkdir(path.join(dir, sub));
+    await writeFile(path.join(dir, sub, "same.txt"), sub);
+  }
+  const { library } = fixture(t, {
+    createUpload: (options) => ({
+      on() {},
+      async done() {
+        options.params.Body.destroy();
+      },
+    }),
+  });
+  await library.initialize();
+  let prompts = 0;
+  const result = await library.uploadPaths(
+    [path.join(dir, "a"), path.join(dir, "b")],
+    null,
+    () => {},
+    async () => {
+      throw new Error("different folders");
+    },
+  );
+  assert.equal(result.done, 2);
+  assert.equal(result.failures.length, 0);
+  const flat = await library.uploadPaths(
+    [path.join(dir, "a", "same.txt"), path.join(dir, "b", "same.txt")],
+    null,
+    () => {},
+    async (info) => {
+      prompts++;
+      assert.equal(info.remaining, 1);
+      return { action: "rename" };
+    },
+  );
+  assert.equal(flat.done, 2);
+  assert.equal(prompts, 1);
+});
+
+test("canceling a duplicate decision stops the remaining batch without changing originals", async (t) => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "jr-cancel-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const first = path.join(dir, "one.jpg"),
+    second = path.join(dir, "two.jpg");
+  await writeFile(first, "new");
+  await writeFile(second, "new");
+  const { library, insert } = fixture(t, {
+    createUpload: () => {
+      throw new Error("must not upload");
+    },
+  });
+  await library.initialize();
+  insert("one");
+  const result = await library.uploadPaths(
+    [first, second],
+    null,
+    () => {},
+    async () => ({ action: "cancel" }),
+  );
+  assert.equal(result.canceled, true);
+  assert.equal(result.done, 0);
+  assert.equal(result.failures.length, 0);
+  assert.equal((await library.list()).total, 1);
+});
+
+test("uncertain replacement retains both R2 objects until the D1 outcome can be confirmed", async (t) => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "jr-uncertain-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const source = path.join(dir, "one.jpg");
+  await writeFile(source, "new");
+  const { library, insert, db, deleted } = fixture(t, {
+    createUpload: (options) => ({
+      on() {},
+      async done() {
+        options.params.Body.destroy();
+      },
+    }),
+  });
+  await library.initialize();
+  insert("one");
+  const query = db.query.bind(db);
+  let uncertain = false;
+  db.query = async (sql, params) => {
+    if (sql.startsWith("UPDATE jr_files SET object_key")) uncertain = true;
+    if (uncertain) throw new Error("timeout");
+    return query(sql, params);
+  };
+  await assert.rejects(
+    library.uploadFile(source, null, () => {}, { replaceId: "one" }),
+    /Объект сохранён в R2/,
+  );
+  assert.deepEqual(deleted, []);
+});
+
+test("a custom duplicate name may omit the extension without losing the source media type", async (t) => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "jr-custom-name-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const source = path.join(dir, "one.jpg");
+  await writeFile(source, "new");
+  const { library, insert } = fixture(t, {
+    createUpload: (options) => ({
+      on() {},
+      async done() {
+        options.params.Body.destroy();
+      },
+    }),
+  });
+  await library.initialize();
+  insert("one");
+  const result = await library.uploadPaths(
+    [source],
+    null,
+    () => {},
+    async () => ({ action: "rename", name: " Copy " }),
+  );
+  assert.equal(result.done, 1);
+  const copy = (await library.list()).items.find(
+    (file) => file.name === "Copy",
+  );
+  assert.equal(copy.mime_type, "image/jpeg");
 });
