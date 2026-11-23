@@ -1,0 +1,71 @@
+{
+  "name": "jellyree-desktop",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Personal Cloudflare R2 + D1 drive without an application server",
+  "author": "Jellyree",
+  "type": "module",
+  "main": "electron/main.mjs",
+  "scripts": {
+    "dev": "node scripts/dev.mjs",
+    "start": "electron .",
+    "build": "vue-tsc --noEmit && vite build",
+    "test": "node --test --test-isolation=none test/*.test.mjs",
+    "pack": "npm run build && electron-builder --dir",
+    "dist": "npm run build && electron-builder",
+    "test:smoke": "node test/smoke.mjs",
+    "format": "prettier --write src electron scripts test vite.config.ts"
+  },
+  "dependencies": {
+    "@aws-sdk/client-s3": "^3.998.0",
+    "@aws-sdk/lib-storage": "^3.998.0",
+    "@aws-sdk/s3-request-presigner": "^3.998.0",
+    "mime": "^4.1.0",
+    "remixicon": "^4.9.1",
+    "vue": "^3.5.25"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.65.1",
+    "@types/node": "^24.10.1",
+    "@vitejs/plugin-vue": "^6.0.2",
+    "electron": "^45.4.1",
+    "electron-builder": "^26.0.12",
+    "prettier": "^3.10.1",
+    "typescript": "~5.9.3",
+    "vite": "^7.3.1",
+    "vue-tsc": "^3.1.5"
+  },
+  "build": {
+    "appId": "app.jellyree.desktop",
+    "productName": "Jellyree",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "electron/**/*",
+      "package.json"
+    ],
+    "linux": {
+      "target": [
+        "AppImage"
+      ],
+      "category": "Utility"
+    },
+    "win": {
+      "target": [
+        "nsis"
+      ]
+    },
+    "mac": {
+      "target": [
+        "dmg"
+      ],
+      "category": "public.app-category.productivity"
+    }
+  },
+  "license": "UNLICENSED",
+  "engines": {
+    "node": ">=22.12.0"
+  }
+}
