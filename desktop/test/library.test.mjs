@@ -4,6 +4,12 @@ import { DatabaseSync } from "node:sqlite";
 import { mkdtemp, writeFile, rm, readFile, stat } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import {
+  TextReader,
+  Uint8ArrayReader,
+  Uint8ArrayWriter,
+  ZipWriter,
+} from "@zip.js/zip.js/index-native.js";
 import { setLanguage } from "../electron/locales.mjs";
 setLanguage("ru");
 import { Library } from "../electron/library.mjs";
@@ -92,6 +98,64 @@ function fixture(t, overrides = {}) {
   };
   return { library, sqlite, requests, deleted, insert, db };
 }
+
+test("PXZ preview reads only ZIP ranges for embedded thumbnails and validates the source revision", async (t) => {
+  const zip = new ZipWriter(new Uint8ArrayWriter(), { useWebWorkers: false });
+  const thumbnail = Uint8Array.of(82, 73, 70, 70, 4, 0, 0, 0, 87, 69, 66, 80);
+  await zip.add(
+    "manifest.json",
+    new TextReader('{"width":1200,"height":800,"stack":[]}'),
+  );
+  await zip.add("thumbnail.webp", new Uint8ArrayReader(thumbnail), {
+    level: 0,
+  });
+  await zip.add("layer.png", new Uint8ArrayReader(new Uint8Array(400000)), {
+    level: 0,
+  });
+  const data = await zip.close();
+  const { library, insert } = fixture(t);
+  await library.initialize();
+  insert("project", {
+    name: "Poster.PXZ",
+    mime: "application/octet-stream",
+    size: data.length,
+  });
+  let downloaded = 0;
+  const calls = [];
+  library.s3.send = async ({ input }) => {
+    assert.equal(input.Key, "objects/project");
+    calls.push(input.Range);
+    if (!input.Range) return { ContentLength: data.length, Body: [data] };
+    const [, first, last] = /^bytes=(\d+)-(\d+)$/.exec(input.Range);
+    const segment = data.slice(+first, +last + 1);
+    downloaded += segment.length;
+    return {
+      ContentRange: `bytes ${first}-${last}/${data.length}`,
+      Body: [segment],
+    };
+  };
+  await assert.rejects(
+    library.imageSource("project", {
+      expectedObjectKey: "old",
+      thumbnail: true,
+    }),
+  );
+  assert.equal(calls.length, 0);
+  const small = await library.imageSource("project", {
+    expectedObjectKey: "objects/project",
+    thumbnail: true,
+  });
+  assert.deepEqual(small, { data: thumbnail, mimeType: "image/webp" });
+  assert.ok(
+    calls.length > 1 && calls.every(Boolean) && downloaded < data.length / 2,
+  );
+  const full = await library.imageSource("project", {
+    expectedObjectKey: "objects/project",
+  });
+  assert.deepEqual(full, { data, mimeType: "application/pxz" });
+  const photos = await library.list({ section: "photos", page: 1 });
+  assert.ok(photos.items.some(({ id }) => id === "project"));
+});
 
 test("document source validates type, library scope, version and declared size before reading R2", async (t) => {
   const { library, insert } = fixture(t);

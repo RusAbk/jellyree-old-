@@ -1,7 +1,11 @@
 import { computed, onBeforeUnmount, shallowRef, watch, type Ref } from "vue";
 import { documentKind } from "../electron/document-preview.mjs";
 import { needsImageProcessing } from "../electron/image-adjustments.mjs";
-import { isHeicFile, isImageFile } from "../electron/image-formats.mjs";
+import {
+  isHeicFile,
+  isImageFile,
+  isPxzFile,
+} from "../electron/image-formats.mjs";
 import { api } from "./api";
 import { imageStyle } from "./format";
 import { t } from "./i18n";
@@ -10,7 +14,11 @@ import { thumbnailRevision } from "./thumbnail";
 import type { DriveFile } from "./types";
 
 export function isPhotoPreview(file: DriveFile) {
-  return isHeicFile(file) || (isImageFile(file) && !documentKind(file));
+  return (
+    isPxzFile(file) ||
+    isHeicFile(file) ||
+    (isImageFile(file) && !documentKind(file))
+  );
 }
 
 const cacheLimit = 192 * 1024 * 1024;
@@ -90,6 +98,15 @@ export function usePhotoPreview(
     signal: AbortSignal,
     priority: boolean,
   ) {
+    if (isPxzFile(file)) {
+      const { renderPxzPreview } = await import("./pxz-preview");
+      const { canvas } = await renderPxzPreview(file, 0, signal);
+      canvas.className = "processed-image";
+      canvas.dataset.imageId = file.id;
+      canvas.setAttribute("role", "img");
+      canvas.draggable = false;
+      return { element: canvas, bytes: canvas.width * canvas.height * 4 };
+    }
     if (isHeicFile(file) || needsImageProcessing(file.adjustments)) {
       const owner = crypto.randomUUID();
       const cancel = () => cancelImageWork(owner);

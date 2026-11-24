@@ -1,7 +1,7 @@
 import { t } from "./i18n";
 import type { Adjustments } from "./types";
 import { localeCode } from "./i18n";
-import { isHeicFile } from "../electron/image-formats.mjs";
+import { isHeicFile, isPxzFile } from "../electron/image-formats.mjs";
 export function bytes(value: number) {
   if (value === 0) return t("0 Б");
   const i = Math.min(
@@ -17,6 +17,7 @@ export const date = (value: string) =>
     year: "numeric",
   });
 export function icon(mime: string, name = "") {
+  if (isPxzFile({ name, mime_type: mime })) return "ri-image-2-line";
   if (mime.startsWith("image/") || isHeicFile({ name, mime_type: mime }))
     return "ri-image-line";
   if (mime.startsWith("video/")) return "ri-film-line";

@@ -27,7 +27,8 @@ import { libraryId } from "./config.mjs";
 import { normalizeImageAdjustments } from "./image-adjustments.mjs";
 import { validateVideoFrame, videoFrameName } from "./video-frames.mjs";
 import { documentKind, documentLimits } from "./document-preview.mjs";
-import { isImageFile, imageMimeType } from "./image-formats.mjs";
+import { isImageFile, isPxzFile, imageMimeType } from "./image-formats.mjs";
+import { PXZ_LIMIT, PxzRangeReader, readPxz } from "./pxz-archive.mjs";
 
 const schema = await readFile(new URL("./schema.sql", import.meta.url), "utf8");
 export function cleanName(value) {
@@ -180,7 +181,7 @@ export class Library {
     if (section === "favorites") where.push("favorite = 1");
     if (section === "photos")
       where.push(
-        "(mime_type LIKE 'image/%' OR mime_type LIKE 'video/%' OR LOWER(name) LIKE '%.heic' OR LOWER(name) LIKE '%.heif')",
+        "(mime_type LIKE 'image/%' OR mime_type LIKE 'video/%' OR LOWER(name) LIKE '%.heic' OR LOWER(name) LIKE '%.heif' OR LOWER(name) LIKE '%.pxz' OR LOWER(mime_type) = 'application/pxz')",
       );
     if (input.search) {
       where.push(
@@ -387,12 +388,78 @@ export class Library {
       await rm(directory, { recursive: true, force: true });
     }
   }
-  async imageSource(id, { signal } = {}) {
-    const file = await this.file(id, { signal }),
-      limit = 64 * 1024 * 1024;
-    if (!isImageFile(file)) throw new Error(t("Выберите изображение."));
-    if (file.size_bytes > limit)
-      throw new Error(t("Для редактирования доступны изображения до 64 МБ."));
+  async pxzThumbnail(file, signal) {
+    const reader = new PxzRangeReader(
+      file.size_bytes,
+      async (start, length) => {
+        const end = start + length - 1;
+        const response = await this.s3.send(
+          new GetObjectCommand({
+            Bucket: this.config.bucket,
+            Key: file.object_key,
+            Range: `bytes=${start}-${end}`,
+          }),
+          { abortSignal: signal },
+        );
+        try {
+          if (
+            response.ContentRange !== `bytes ${start}-${end}/${file.size_bytes}`
+          )
+            throw new Error("Unexpected PXZ range");
+          const data = new Uint8Array(length);
+          let written = 0;
+          for await (const chunk of response.Body) {
+            signal?.throwIfAborted();
+            if (chunk.length > length - written)
+              throw new Error("Invalid PXZ range");
+            data.set(chunk, written);
+            written += chunk.length;
+          }
+          if (written !== length) throw new Error("Incomplete PXZ range");
+          return data;
+        } finally {
+          response.Body?.destroy?.();
+        }
+      },
+    );
+    return readPxz(
+      reader,
+      (read) => read("thumbnail.webp", 2 * 1024 * 1024),
+      signal,
+    );
+  }
+  async imageSource(id, { signal, expectedObjectKey, thumbnail } = {}) {
+    const file = await this.file(id, { signal });
+    const pxz = isPxzFile(file);
+    if (!pxz && !isImageFile(file)) throw new Error(t("Выберите изображение."));
+    if (
+      expectedObjectKey !== undefined &&
+      file.object_key !== expectedObjectKey
+    )
+      throw new Error(
+        t(
+          "Изображение изменилось. Откройте его заново перед сохранением правок.",
+        ),
+      );
+    if (pxz && thumbnail) {
+      try {
+        const data = await this.pxzThumbnail(file, signal);
+        if (data) return { data, mimeType: "image/webp" };
+      } catch {
+        signal?.throwIfAborted();
+        // A missing or unreadable embedded image can be rendered from the layers.
+      }
+    }
+    const limit = pxz ? PXZ_LIMIT : 64 * 1024 * 1024;
+    const tooLarge = () =>
+      new Error(
+        t(
+          pxz
+            ? "Для просмотра PXZ доступны проекты до 128 МБ и 48 мегапикселей."
+            : "Для редактирования доступны изображения до 64 МБ.",
+        ),
+      );
+    if (file.size_bytes > limit) throw tooLarge();
     const result = await this.s3.send(
       new GetObjectCommand({
         Bucket: this.config.bucket,
@@ -403,15 +470,11 @@ export class Library {
     const chunks = [];
     let length = 0;
     try {
-      if (result.ContentLength > limit)
-        throw new Error(t("Для редактирования доступны изображения до 64 МБ."));
+      if (result.ContentLength > limit) throw tooLarge();
       for await (const chunk of result.Body) {
         signal?.throwIfAborted();
         length += chunk.length;
-        if (length > limit)
-          throw new Error(
-            t("Для редактирования доступны изображения до 64 МБ."),
-          );
+        if (length > limit) throw tooLarge();
         chunks.push(chunk);
       }
       return {

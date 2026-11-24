@@ -8,21 +8,30 @@ import { runThumbnailPreview, videoDuration } from "./video-preview";
 import ProcessedImage from "./ProcessedImage.vue";
 import { needsImageProcessing } from "../electron/image-adjustments.mjs";
 import { thumbnailRevision, thumbnailBytes } from "./thumbnail";
-import { isImageFile, isHeicFile } from "../electron/image-formats.mjs";
+import {
+  isImageFile,
+  isHeicFile,
+  isPxzFile,
+} from "../electron/image-formats.mjs";
 const props = defineProps<{
   file: DriveFile;
   compact?: boolean;
   natural?: boolean;
 }>();
+const isPxz = computed(() => isPxzFile(props.file));
 const isVideo = computed(
-  () => !isHeicFile(props.file) && props.file.mime_type.startsWith("video/"),
+  () =>
+    !isPxz.value &&
+    !isHeicFile(props.file) &&
+    props.file.mime_type.startsWith("video/"),
 );
-const isImage = computed(() => isImageFile(props.file));
+const isImage = computed(() => isPxz.value || isImageFile(props.file));
 const extension = computed(() => fileExtensionBadge(props.file.name));
 const processed = computed(
   () =>
-    isImage.value &&
-    (isHeicFile(props.file) || needsImageProcessing(props.file.adjustments)),
+    isPxz.value ||
+    (isImage.value &&
+      (isHeicFile(props.file) || needsImageProcessing(props.file.adjustments))),
 );
 const dimensions = ref({ width: 0, height: 0 });
 const revision = computed(() => thumbnailRevision(props.file));
@@ -331,6 +340,20 @@ async function fetchPreview(useCache = true) {
         let acquired = "";
         try {
           if (!current() || !visible || signal.aborted) return;
+          if (isPxz.value) {
+            const { renderPxzPreview } = await import("./pxz-preview");
+            const { canvas, width, height } = await renderPxzPreview(
+              props.file,
+              640,
+              signal,
+            );
+            if (!current()) return;
+            dimensions.value = { width, height };
+            await saveThumbnail(canvas);
+            if (current() && !cachedEntry.value)
+              throw new Error("PXZ thumbnail could not be saved");
+            return;
+          }
           const value = processed.value
             ? { url: "processed", readable: true }
             : await sourceUrl(revision.value, signal);
@@ -404,7 +427,6 @@ watch(
   },
 );
 onMounted(() => {
-  if (!isImage.value && !isVideo.value) return;
   observer = new IntersectionObserver(
     (entries) => {
       visible = entries.some((entry) => entry.isIntersecting);
@@ -417,6 +439,7 @@ onMounted(() => {
           );
           url.value = blobUrl;
         } else if (
+          (isImage.value || isVideo.value) &&
           !ready.value &&
           !pending.value &&
           (!failed.value || retries < 2)
@@ -454,12 +477,12 @@ onBeforeUnmount(() => {
         'natural-loaded': !!geometry && !failed,
         'video-ready': videoReady,
       },
-      file.mime_type.split('/')[0],
+      isImage ? 'image' : file.mime_type.split('/')[0],
     ]"
     :style="frameStyle"
   >
     <ProcessedImage
-      v-if="processed && url && !failed && !cachedEntry"
+      v-if="processed && !isPxz && url && !failed && !cachedEntry"
       :file="file"
       :max-size="640"
       :style="thumbnailStyle"

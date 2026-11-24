@@ -32,7 +32,7 @@ export function createApi(bridge: Jellyree): Jellyree {
     update: (ids, patch) => bridge.update(toIpcData(ids), toIpcData(patch)),
     remove: (ids) => bridge.remove(toIpcData(ids)),
     url: (id) => bridge.url(id),
-    imageSource: (id, requestId) => bridge.imageSource(id, requestId),
+    imageSource: (id, requestId, pxz) => bridge.imageSource(id, requestId, pxz),
     cancelPreview: (requestId) => bridge.cancelPreview(requestId),
     releaseMedia: (url) => bridge.releaseMedia(url),
     documentSource: (id, expectedObjectKey) =>

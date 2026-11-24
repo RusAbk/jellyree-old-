@@ -274,10 +274,14 @@ function registerHandlers() {
   handle("files:update", (ids, patch) => library.updateFiles(ids, patch));
   handle("files:delete", (ids) => library.deletePermanently(ids));
   handle("files:url", (id) => library.url(id));
-  handle("files:image-source", (id, requestId) => {
+  handle("files:image-source", (id, requestId, pxz) => {
     const sourceLibrary = library;
     return previewRequest(requestId, (signal) =>
-      sourceLibrary.imageSource(id, { signal }),
+      sourceLibrary.imageSource(id, {
+        signal,
+        expectedObjectKey: pxz?.objectKey,
+        thumbnail: pxz?.thumbnail === true,
+      }),
     );
   });
   handle(

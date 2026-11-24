@@ -1,5 +1,7 @@
 type ImageFile = { name: string; mime_type: string };
 export function isHeicFile(file: ImageFile | null | undefined): boolean;
+export const PXZ_MIME: "application/pxz";
+export function isPxzFile(file: ImageFile | null | undefined): boolean;
 export function isImageFile(file: ImageFile | null | undefined): boolean;
 export function imageMimeType(file: ImageFile): string;
 export const HEIC_MAX_PIXELS: number;

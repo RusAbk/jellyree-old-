@@ -16,7 +16,8 @@ contextBridge.exposeInMainWorld("jellyree", {
   update: (ids, patch) => invoke("files:update", ids, patch),
   remove: (ids) => invoke("files:delete", ids),
   url: (id) => invoke("files:url", id),
-  imageSource: (id, requestId) => invoke("files:image-source", id, requestId),
+  imageSource: (id, requestId, pxz) =>
+    invoke("files:image-source", id, requestId, pxz),
   cancelPreview: (requestId) => invoke("previews:cancel", requestId),
   releaseMedia: (url) => invoke("media:release", url),
   documentSource: (id, expectedObjectKey) =>

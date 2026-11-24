@@ -1,4 +1,12 @@
 export const editorMessages = {
+  "Для просмотра PXZ доступны проекты до 128 МБ и 48 мегапикселей.": {
+    en: "PXZ preview supports projects up to 128 MB and 48 megapixels.",
+    es: "La vista previa de PXZ admite proyectos de hasta 128 MB y 48 megapíxeles.",
+  },
+  "Не удалось открыть проект PXZ. Проверьте файл или скачайте оригинал.": {
+    en: "Unable to open the PXZ project. Check the file or download the original.",
+    es: "No se pudo abrir el proyecto PXZ. Comprueba el archivo o descarga el original.",
+  },
   "Для просмотра HEIC доступны изображения до 50 мегапикселей.": {
     en: "HEIC preview supports images up to 50 megapixels.",
     es: "La vista previa HEIC admite imágenes de hasta 50 megapíxeles.",

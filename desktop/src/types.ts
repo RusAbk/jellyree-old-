@@ -150,6 +150,7 @@ export interface Jellyree {
   imageSource(
     id: string,
     requestId?: string,
+    pxz?: { objectKey: string; thumbnail: boolean },
   ): Promise<{ data: Uint8Array; mimeType: string }>;
   cancelPreview(requestId: string): Promise<void>;
   releaseMedia(url: string): Promise<boolean>;

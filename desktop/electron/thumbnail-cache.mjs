@@ -11,7 +11,7 @@ import {
 } from "node:fs/promises";
 import path from "node:path";
 import { normalizeImageAdjustments } from "./image-adjustments.mjs";
-import { isHeicFile } from "./image-formats.mjs";
+import { isHeicFile, PXZ_MIME } from "./image-formats.mjs";
 export const THUMBNAIL_LIMIT = 256 * 1024 * 1024;
 const ENTRY_LIMIT = 2 * 1024 * 1024;
 const filenamePattern = /^[a-f0-9]{64}\.thumb$/;
@@ -26,7 +26,8 @@ export function thumbnailKey(namespace, revision) {
     revision.objectKey.length > 4096 ||
     !Number.isFinite(revision.sizeBytes) ||
     revision.sizeBytes < 0 ||
-    !/^(image|video)\//.test(revision.mimeType)
+    (revision.mimeType !== PXZ_MIME &&
+      !/^(image|video)\//.test(revision.mimeType))
   )
     throw new TypeError("Invalid thumbnail revision");
   return createHash("sha256")

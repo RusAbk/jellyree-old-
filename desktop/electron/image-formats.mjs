@@ -7,6 +7,15 @@ export function isHeicFile(file) {
     /\.(heic|heif)$/i.test(file.name)
   );
 }
+export const PXZ_MIME = "application/pxz";
+/** @param {{name: string, mime_type: string} | null | undefined} file */
+export function isPxzFile(file) {
+  return (
+    !!file &&
+    (/\.pxz$/i.test(file.name) ||
+      /^(application|image)\/pxz(?:\s*;|$)/i.test(file.mime_type.trim()))
+  );
+}
 // A camera's "48 MP" HEIC can be 8064×6048 (48,771,072 pixels).
 export const HEIC_MAX_PIXELS = 50_000_000;
 export function validateHeicDimensions(width, height) {
@@ -24,11 +33,13 @@ export function validateHeicDimensions(width, height) {
 export function isImageFile(file) {
   return (
     !!file &&
+    !isPxzFile(file) &&
     (file.mime_type.toLowerCase().startsWith("image/") || isHeicFile(file))
   );
 }
 /** @param {{name: string, mime_type: string}} file */
 export function imageMimeType(file) {
+  if (isPxzFile(file)) return PXZ_MIME;
   return isHeicFile(file)
     ? "image/heic"
     : file.mime_type.split(";")[0].trim().toLowerCase();
