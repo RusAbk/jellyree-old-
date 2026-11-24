@@ -20,6 +20,7 @@ import { isImageFile } from "../electron/image-formats.mjs";
 import { isPhotoPreview, usePhotoPreview } from "./use-photo-preview";
 import { usePhotoZoom } from "./use-photo-zoom";
 import SettingsPanel from "./SettingsPanel.vue";
+import ConnectionSwitcher from "./ConnectionSwitcher.vue";
 import MediaFeed from "./MediaFeed.vue";
 import TimelineScale from "./TimelineScale.vue";
 import ContextMenu, { type MenuItem } from "./ContextMenu.vue";
@@ -55,6 +56,8 @@ import type {
 const settings = ref<Settings>({ configured: false, persisted: false });
 const mobile = document.documentElement.classList.contains("mobile-app");
 const mobileMenuOpen = ref(false);
+const connectionMenuOpen = ref(false);
+const newConnection = ref(false);
 const documentViewer = ref<InstanceType<typeof DocumentViewer>>(),
   documentVersion = ref(0);
 let previewNavigation = 0;
@@ -1268,7 +1271,7 @@ async function upload(
     return;
   }
   if (!settings.value.configured) {
-    settingsOpen.value = true;
+    openSettings();
     return;
   }
   const destination =
@@ -1686,6 +1689,7 @@ async function applyConnection(value: Settings, message: string) {
   await closePreview();
   clearPhotos();
   closeContextMenu();
+  connectionMenuOpen.value = false;
   finishDrag();
   settings.value = value;
   settingsOpen.value = false;
@@ -1734,9 +1738,13 @@ async function removedConnection(value: Settings) {
     await applyConnection(value, message);
   }
 }
-async function switchConnection(event: Event) {
-  const select = event.currentTarget as HTMLSelectElement;
-  const id = select.value;
+function openSettings(create = false) {
+  connectionMenuOpen.value = false;
+  mobileMenuOpen.value = false;
+  newConnection.value = create;
+  settingsOpen.value = true;
+}
+async function switchConnection(id: string) {
   if (
     id !== settings.value.activeProfileId &&
     !switchingProfile.value &&
@@ -1752,10 +1760,13 @@ async function switchConnection(event: Event) {
       switchingProfile.value = false;
     }
   }
-  select.value = settings.value.activeProfileId ?? "";
 }
 function keydown(event: KeyboardEvent) {
   if (switchingProfile.value) return;
+  if (connectionMenuOpen.value) {
+    if (event.key === "Escape") connectionMenuOpen.value = false;
+    return;
+  }
   if (event.key === "Escape" && cancelSelectionBox()) {
     event.preventDefault();
     return;
@@ -1949,6 +1960,7 @@ function mobileBack() {
   else if (previewTagsOpen.value) closePreviewTags();
   else if (preview.value) void closePreview();
   else if (settingsOpen.value) settingsOpen.value = false;
+  else if (connectionMenuOpen.value) connectionMenuOpen.value = false;
   else if (mobileMenuOpen.value) mobileMenuOpen.value = false;
   else if (uploadsOpen.value) uploadsOpen.value = false;
   else if (inspectorOpen.value) inspectorOpen.value = false;
@@ -1983,7 +1995,7 @@ onMounted(async () => {
     settings.value = await api.settings.get();
     if (settings.value.startupError) error.value = settings.value.startupError;
     if (settings.value.configured) await refreshCatalog();
-    else settingsOpen.value = true;
+    else openSettings();
   } catch (e) {
     error.value = (e as Error).message;
   } finally {
@@ -2169,7 +2181,7 @@ onBeforeUnmount(() => {
       <button
         class="settings-link"
         :disabled="busy || switchingProfile"
-        @click="settingsOpen = true"
+        @click="openSettings()"
       >
         <i aria-hidden="true" class="ri-settings-3-line"></i
         >{{ t("Настройки подключения")
@@ -2233,41 +2245,8 @@ onBeforeUnmount(() => {
             >{{ uploadPercent(runningUpload.progress) }}%</small
           >
         </button>
-        <div
-          v-if="(settings.profiles?.length ?? 0) > 1"
-          class="quick-connection"
-          :aria-busy="switchingProfile"
-        >
-          <i
-            aria-hidden="true"
-            :class="
-              switchingProfile ? 'ri-loader-4-line spinning' : 'ri-cloud-line'
-            "
-          ></i>
-          <select
-            :value="settings.activeProfileId"
-            :title="settings.name"
-            :aria-label="t('Активное подключение')"
-            :disabled="busy || switchingProfile || pendingUploads > 0"
-            @change="switchConnection"
-          >
-            <option
-              v-for="profile in settings.profiles"
-              :key="profile.id"
-              :value="profile.id"
-            >
-              {{ profile.name }}
-            </option>
-          </select>
-        </div>
-        <span v-else class="direct-badge"
-          ><span
-            class="status-dot"
-            :class="{ connected: settings.configured }"
-          ></span
-          >R2 + D1</span
-        ><button
-          class="icon-button"
+        <button
+          class="icon-button topbar-refresh"
           :title="t('Обновить')"
           :aria-label="t('Обновить')"
           :disabled="loading || busy"
@@ -2277,16 +2256,18 @@ onBeforeUnmount(() => {
             aria-hidden="true"
             class="ri-refresh-line"
             :class="{ spinning: loading }"
-          ></i></button
-        ><button
-          class="avatar"
-          :title="t('Настройки подключения')"
-          :aria-label="t('Настройки подключения')"
-          :disabled="busy || switchingProfile"
-          @click="settingsOpen = true"
-        >
-          J
+          ></i>
         </button>
+        <ConnectionSwitcher
+          v-model:open="connectionMenuOpen"
+          :settings="settings"
+          :disabled="busy"
+          :switching="switchingProfile"
+          :locked="pendingUploads > 0"
+          @select="switchConnection"
+          @add="openSettings(true)"
+          @settings="openSettings()"
+        />
       </header>
       <div v-if="error || catalogError" class="banner error" role="alert">
         <i aria-hidden="true" class="ri-error-warning-line"></i
@@ -2621,7 +2602,7 @@ onBeforeUnmount(() => {
                 t("Без собственного сервера и промежуточных сервисов.")
               }}
             </p>
-            <button class="button primary" @click="settingsOpen = true">
+            <button class="button primary" @click="openSettings()">
               <i aria-hidden="true" class="ri-plug-line"></i
               >{{ t("Подключить Cloudflare") }}
             </button>
@@ -3092,6 +3073,7 @@ onBeforeUnmount(() => {
   <SettingsPanel
     v-if="settingsOpen"
     :settings="settings"
+    :start-new="newConnection"
     :locked="pendingUploads > 0"
     @close="settingsOpen = false"
     @saved="saved"

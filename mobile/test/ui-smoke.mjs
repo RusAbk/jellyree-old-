@@ -39,6 +39,29 @@ const files = [
   favorite: false,
 }));
 const preferences = {};
+const profiles = [
+  {
+    id: "personal",
+    name: "Personal",
+    bucket: "fixture",
+    prefix: "photos",
+    persisted: true,
+  },
+  {
+    id: "work",
+    name: "Work Library",
+    bucket: "work-bucket",
+    prefix: "shared",
+    persisted: true,
+  },
+];
+let activeProfile = profiles[0];
+const settings = () => ({
+  ...activeProfile,
+  activeProfileId: activeProfile.id,
+  configured: true,
+  profiles,
+});
 const json = (response, value) => {
   response.setHeader("Content-Type", "application/json");
   response.end(JSON.stringify({ ok: true, value }));
@@ -104,17 +127,18 @@ const server = createServer(async (request, response) => {
         Object.assign(preferences, args[0]);
         return json(response, null);
       case "settings.get":
-        return json(response, {
-          configured: true,
-          persisted: true,
-          bucket: "fixture",
-          profiles: [],
-        });
+        return json(response, settings());
+      case "settings.select":
+        activeProfile = profiles.find((profile) => profile.id === args[0]);
+        return json(response, settings());
       case "list":
         return json(response, {
-          items: files.filter(
-            (row) => args[0].section !== "favorites" || row.favorite,
-          ),
+          items:
+            activeProfile.id === "work"
+              ? [{ ...files[0], name: "Work-only.png" }]
+              : files.filter(
+                  (row) => args[0].section !== "favorites" || row.favorite,
+                ),
           hasMore: false,
           page: 1,
         });
@@ -193,6 +217,39 @@ try {
     .getByRole("button", { name: "Close menu" })
     .tap({ position: { x: 367, y: 340 } });
   await page.locator(".sidebar").waitFor({ state: "hidden" });
+
+  const connection = page.getByRole("button", {
+    name: "Switch connection",
+    exact: true,
+  });
+  const picker = page.getByRole("dialog", { name: "Connections", exact: true });
+  await connection.tap();
+  await picker
+    .locator('[aria-current="true"]')
+    .getByText("Personal", { exact: true })
+    .waitFor();
+  const popup = await picker.boundingBox();
+  assert.ok(popup.x >= 0 && popup.x + popup.width <= 390);
+  await page.evaluate(() => window.jellyreeMobileBack());
+  await picker.waitFor({ state: "hidden" });
+  await connection.tap();
+  await picker
+    .getByRole("button", {
+      name: "Open connection “Work Library”",
+      exact: true,
+    })
+    .tap();
+  await page.getByText("Work-only.png", { exact: true }).waitFor();
+  assert.equal(await page.getByText("Forest.png", { exact: true }).count(), 0);
+  await connection.tap();
+  await picker
+    .locator('[aria-current="true"]')
+    .getByText("Work Library", { exact: true })
+    .waitFor();
+  await picker
+    .getByRole("button", { name: "Open connection “Personal”", exact: true })
+    .tap();
+  await page.getByText("Forest.png", { exact: true }).waitFor();
 
   const firstCard = page.locator('.file-card[data-file-id="first"]');
   await firstCard.dispatchEvent("pointerdown", {

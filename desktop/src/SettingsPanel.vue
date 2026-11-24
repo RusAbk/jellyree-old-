@@ -10,7 +10,11 @@ import type {
 import { bytes } from "./format";
 import { api } from "./api";
 import LanguageSelect from "./LanguageSelect.vue";
-const props = defineProps<{ settings: Settings; locked?: boolean }>();
+const props = defineProps<{
+  settings: Settings;
+  locked?: boolean;
+  startNew?: boolean;
+}>();
 const cache = ref<ThumbnailStats>(),
   cacheBusy = ref(false),
   cacheMessage = ref("");
@@ -36,8 +40,8 @@ const emit = defineEmits<{
   selected: [settings: Settings];
   removed: [settings: Settings];
 }>();
-const creating = ref(!props.settings.configured);
-const profileId = ref(props.settings.activeProfileId);
+const creating = ref(false);
+const profileId = ref<string>();
 const profiles = computed(() => props.settings.profiles ?? []);
 const form = reactive<ConnectionInput>({
   name: "",
@@ -87,9 +91,9 @@ function editConnection(id: string) {
 watch(
   () => props.settings,
   (settings) => {
-    creating.value = !settings.configured;
-    profileId.value = settings.activeProfileId;
-    fillForm(settings.configured ? settings : undefined);
+    creating.value = props.startNew || !settings.configured;
+    profileId.value = creating.value ? undefined : settings.activeProfileId;
+    fillForm(creating.value ? undefined : settings);
     error.value = settings.startupError ?? "";
   },
   { immediate: true },

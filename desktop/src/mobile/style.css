@@ -59,8 +59,7 @@
   gap: 5px;
   padding-inline: 8px;
 }
-.mobile-app .topbar .language-select,
-.mobile-app .topbar .direct-badge {
+.mobile-app .topbar .language-select {
   display: none;
 }
 .mobile-app .topbar .icon-button {
@@ -72,18 +71,23 @@
   height: 35px;
   padding-inline: 8px;
 }
-.mobile-app .topbar .quick-connection {
-  min-width: 0;
-  flex: 0 1 18vw;
+.mobile-app .connection-trigger {
+  min-height: 42px;
 }
-.mobile-app .topbar .quick-connection i {
-  display: none;
+.mobile-app .connection-picker-actions > button,
+.mobile-app .connection-option {
+  min-height: 44px;
 }
-.mobile-app .topbar .quick-connection select {
-  font-size: 12px;
-}
-.mobile-app .topbar .avatar {
-  flex-shrink: 0;
+@media (max-width: 600px) {
+  .mobile-app .connection-trigger {
+    justify-content: center;
+    width: 42px;
+    padding: 4px;
+  }
+  .mobile-app .connection-trigger-name,
+  .mobile-app .connection-chevron {
+    display: none;
+  }
 }
 .mobile-app .uploads-toggle {
   padding: 7px;

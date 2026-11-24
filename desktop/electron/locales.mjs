@@ -309,6 +309,15 @@ export const messages = {
     es: "Se abrió la conexión «{0}».",
   },
   Подключения: { en: "Connections", es: "Conexiones" },
+  "Переключить подключение": {
+    en: "Switch connection",
+    es: "Cambiar de conexión",
+  },
+  "Добавить подключение": { en: "Add connection", es: "Añadir conexión" },
+  "Открыть подключение «{0}»": {
+    en: "Open connection “{0}”",
+    es: "Abrir conexión «{0}»",
+  },
   Активное: { en: "Active", es: "Activa" },
   "Активное подключение": { en: "Active connection", es: "Conexión activa" },
   "Новое подключение": { en: "New connection", es: "Nueva conexión" },

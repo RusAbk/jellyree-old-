@@ -152,7 +152,21 @@ try {
     name: "Подключение Cloudflare",
     exact: true,
   });
-  const openProfileSettings = () => window.locator(".avatar").click();
+  const connectionTrigger = (target) =>
+    target.getByRole("button", {
+      name: "Переключить подключение",
+      exact: true,
+    });
+  const connectionPicker = window.getByRole("dialog", {
+    name: "Подключения",
+    exact: true,
+  });
+  const openProfileSettings = async () => {
+    await connectionTrigger(window).click();
+    await connectionPicker
+      .getByRole("button", { name: "Настройки подключения", exact: true })
+      .click();
+  };
   const fillProfile = async (name, databaseId) => {
     await profileDialog
       .getByLabel("Название подключения", { exact: true })
@@ -183,9 +197,9 @@ try {
   await openProfileSettings();
   await fillProfile("Первый", "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb");
   await window.getByText("profile-first.txt", { exact: true }).waitFor();
-  await openProfileSettings();
-  await profileDialog
-    .getByRole("button", { name: "Новое подключение", exact: true })
+  await connectionTrigger(window).click();
+  await connectionPicker
+    .getByRole("button", { name: "Добавить подключение", exact: true })
     .click();
   assert.equal(
     await profileDialog
@@ -201,10 +215,22 @@ try {
   );
   await fillProfile("Второй", "cccccccc-cccc-cccc-cccc-cccccccccccc");
   await window.getByText("profile-second.txt", { exact: true }).waitFor();
-  const switcher = window.getByRole("combobox", {
-    name: "Активное подключение",
-    exact: true,
-  });
+  await connectionTrigger(window).click();
+  const current = connectionPicker.locator('[aria-current="true"]');
+  await current.getByText("Второй", { exact: true }).waitFor();
+  await current.getByText("shared-vault/jellyree", { exact: true }).waitFor();
+  await connectionPicker.press("Escape");
+  await connectionPicker.waitFor({ state: "hidden" });
+  assert.equal(
+    await connectionTrigger(window).getAttribute("aria-expanded"),
+    "false",
+  );
+  assert.equal(
+    await connectionTrigger(window).evaluate(
+      (button) => button === document.activeElement,
+    ),
+    true,
+  );
   const profileState = await window.evaluate(() =>
     window.jellyree.settings.get(),
   );
@@ -226,7 +252,19 @@ try {
     globalThis.__jellyreeProfilesFixture.holdNextList = true;
   });
   await window.getByRole("button", { name: "Обновить", exact: true }).click();
-  await switcher.selectOption({ label: "Первый" });
+  await connectionTrigger(window).click();
+  await connectionPicker.press("ArrowDown");
+  const firstConnection = connectionPicker.getByRole("button", {
+    name: "Открыть подключение «Первый»",
+    exact: true,
+  });
+  assert.equal(
+    await firstConnection.evaluate(
+      (button) => button === document.activeElement,
+    ),
+    true,
+  );
+  await firstConnection.press("Enter");
   await window.waitForFunction(
     () => document.querySelector(".app-shell").inert,
   );
@@ -816,7 +854,15 @@ try {
     await uploads.locator('.upload-job[data-state="uploading"]').count(),
     1,
   );
-  await window.locator(".avatar").click();
+  await connectionTrigger(window).click();
+  assert.ok(
+    await connectionPicker
+      .getByRole("button", { name: "Добавить подключение", exact: true })
+      .isDisabled(),
+  );
+  await connectionPicker
+    .getByRole("button", { name: "Настройки подключения", exact: true })
+    .click();
   const connection = window.getByRole("dialog");
   assert.equal(
     await connection
@@ -1422,7 +1468,13 @@ try {
     .getByRole("combobox", { name: "Idioma", exact: true })
     .selectOption("en");
   await page.getByRole("heading", { name: "My drive", exact: true }).waitFor();
-  await page.locator(".avatar").click();
+  await page
+    .getByRole("button", { name: "Switch connection", exact: true })
+    .click();
+  await page
+    .getByRole("dialog", { name: "Connections", exact: true })
+    .getByRole("button", { name: "Connection settings", exact: true })
+    .click();
   const englishSettings = page.getByRole("dialog");
   await englishSettings
     .getByRole("heading", { name: "Cloudflare connection", exact: true })

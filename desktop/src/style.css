@@ -424,49 +424,151 @@ button {
 .search-box input::placeholder {
   color: #a4aabb;
 }
-.direct-badge {
+.topbar-refresh {
+  margin-inline-start: auto;
+}
+.connection-switcher {
+  position: relative;
+  flex: none;
+}
+.connection-trigger {
   display: flex;
   align-items: center;
-  gap: 9px;
-  margin-left: auto;
-  color: #9199ac;
-  font-size: 10px;
-  white-space: nowrap;
-}
-.quick-connection {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  flex: 0 1 170px;
-  min-width: 84px;
-  margin-left: auto;
-  color: #7969b8;
-  background: #f7f5fc;
-  border: 1px solid #e8e2f4;
-  border-radius: 8px;
-  padding: 0 7px;
-}
-.quick-connection select {
-  min-width: 0;
-  width: 100%;
-  height: 32px;
-  color: #665991;
-  border: 0;
+  gap: 7px;
+  min-height: 36px;
+  padding: 3px 6px 3px 3px;
+  border: 1px solid transparent;
+  border-radius: 20px;
   background: transparent;
-  font-size: 11px;
-  text-overflow: ellipsis;
-  cursor: pointer;
+  color: #554970;
 }
-.avatar {
-  background: #ece8fd;
-  border: 3px solid white;
-  box-shadow: 0 0 0 1px #eeeafa;
-  color: #7b6dd1;
+.connection-trigger:hover:not(:disabled),
+.connection-trigger[aria-expanded="true"] {
+  background: #f7f4fc;
+  border-color: #ece5f5;
+}
+.connection-trigger-name {
+  max-width: 130px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  font-weight: 600;
+}
+.connection-chevron {
+  color: #817692;
+  font-size: 14px;
+}
+.connection-avatar {
+  display: inline-grid;
+  place-items: center;
+  flex: none;
+  width: 31px;
+  height: 31px;
   border-radius: 50%;
-  width: 34px;
-  height: 34px;
+  color: hsl(var(--profile-hue, 266) 49% 31%);
+  background: hsl(var(--profile-hue, 266) 61% 91%);
   font-size: 13px;
   font-weight: 700;
+}
+.connection-picker {
+  position: absolute;
+  z-index: 58;
+  inset-block-start: calc(100% + 8px);
+  inset-inline-end: 0;
+  display: flex;
+  flex-direction: column;
+  width: min(324px, calc(100vw - 24px));
+  max-height: calc(100dvh - 72px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 7px;
+  border: 1px solid #e7e0ef;
+  border-radius: 15px;
+  background: #fff;
+  box-shadow: 0 14px 38px #33264d2b;
+  text-align: start;
+  outline: none;
+}
+.connection-current,
+.connection-option {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  padding: 9px;
+  border-radius: 9px;
+  text-align: start;
+}
+.connection-current {
+  background: #f6f2fc;
+  color: #4d3a73;
+}
+.connection-current .connection-avatar {
+  width: 38px;
+  height: 38px;
+  font-size: 15px;
+}
+.connection-identity {
+  flex: 1;
+  min-width: 0;
+}
+.connection-identity > :is(strong, small) {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.connection-identity strong {
+  font-size: 13px;
+}
+.connection-identity small {
+  color: #696176;
+  font-size: 11px;
+  line-height: 1.45;
+}
+.connection-current-check {
+  color: #6b4ac3;
+  font-size: 19px;
+}
+.connection-list {
+  margin: 4px 0;
+}
+.connection-option,
+.connection-picker-actions > button {
+  width: 100%;
+  border: 0;
+  color: #4d4261;
+  background: transparent;
+}
+.connection-option:hover:not(:disabled),
+.connection-picker-actions > button:hover:not(:disabled) {
+  background: #f6f3fb;
+}
+.connection-option > i,
+.connection-picker-actions i {
+  color: #75648a;
+  font-size: 16px;
+}
+.connection-picker-status {
+  margin: 6px 9px 2px;
+  color: #74644b;
+  font-size: 11px;
+}
+.connection-picker-actions {
+  margin-top: 4px;
+  padding-top: 4px;
+  border-top: 1px solid #eeeaf3;
+}
+.connection-picker-actions > button {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border-radius: 8px;
+  min-height: 38px;
+  padding: 5px 9px;
+  font-size: 12px;
+  text-align: start;
 }
 .content {
   --catalog-gutter: 38px;

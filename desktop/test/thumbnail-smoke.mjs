@@ -220,7 +220,13 @@ try {
     (await electron.evaluate(() => globalThis.__thumbnailFixture.sourceCalls)) >
       warm.sources,
   );
-  await page.locator(".avatar").click();
+  await page
+    .getByRole("button", { name: "Переключить подключение", exact: true })
+    .click();
+  await page
+    .getByRole("dialog", { name: "Подключения", exact: true })
+    .getByRole("button", { name: "Настройки подключения", exact: true })
+    .click();
   const settings = page.getByRole("dialog");
   await settings
     .getByRole("heading", { name: "Кэш миниатюр", exact: true })
