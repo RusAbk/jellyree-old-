@@ -18,7 +18,28 @@ const sorts = {
     key: "size_bytes",
   },
 };
-const sections = ["drive", "all", "favorites", "photos", "trash"];
+const sections = ["drive", "all", "favorites", "photos", "timeline", "trash"];
+const visualMedia = [
+  "mime_type LIKE 'image/%'",
+  "mime_type LIKE 'video/%'",
+  "LOWER(name) LIKE '%.heic'",
+  "LOWER(name) LIKE '%.heif'",
+  "LOWER(name) LIKE '%.pxz'",
+  "LOWER(mime_type) = 'application/pxz'",
+];
+export const timelineMedia = `(${[...visualMedia, "mime_type LIKE 'audio/%'"].join(" OR ")})`;
+const ascendingDate = {
+  column: "created_at",
+  direction: "ASC",
+  operator: ">",
+  key: "created_at",
+};
+const isoDate = (value) =>
+  typeof value === "string" &&
+  /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(value) &&
+  Number.isFinite(Date.parse(value))
+    ? new Date(value).toISOString()
+    : null;
 const pageSize = 80;
 const pageNumber = (value, fallback) =>
   Number.isSafeInteger(value) &&
@@ -32,8 +53,14 @@ export function catalogListing(input, libraryId) {
   const folderId = section === "drive" ? input.folderId || null : null;
   const search = String(input.search || "");
   const tag = String(input.tag || "");
-  const sortName = Object.hasOwn(sorts, input.sort) ? input.sort : "date";
-  const sort = sorts[sortName];
+  const before = section === "timeline" ? isoDate(input.timelineBefore) : null;
+  const since =
+    section === "timeline" && !before ? isoDate(input.timelineSince) : null;
+  const sortName =
+    section !== "timeline" && Object.hasOwn(sorts, input.sort)
+      ? input.sort
+      : "date";
+  const sort = since ? ascendingDate : sorts[sortName];
   const where = [
     "library_id = ?",
     section === "trash" ? "trashed_at IS NOT NULL" : "trashed_at IS NULL",
@@ -44,10 +71,14 @@ export function catalogListing(input, libraryId) {
     params.push(folderId);
   }
   if (section === "favorites") where.push("favorite = 1");
-  if (section === "photos")
-    where.push(
-      "(mime_type LIKE 'image/%' OR mime_type LIKE 'video/%' OR LOWER(name) LIKE '%.heic' OR LOWER(name) LIKE '%.heif' OR LOWER(name) LIKE '%.pxz' OR LOWER(mime_type) = 'application/pxz')",
-    );
+  if (section === "photos") where.push(`(${visualMedia.join(" OR ")})`);
+  if (section === "timeline") {
+    where.push(timelineMedia);
+    if (before || since) {
+      where.push(before ? "created_at < ?" : "created_at >= ?");
+      params.push(before ?? since);
+    }
+  }
   if (search) {
     where.push(
       "(name LIKE ? ESCAPE '\\' OR EXISTS (SELECT 1 FROM json_each(jr_files.tags) WHERE value LIKE ? ESCAPE '\\'))",
@@ -79,7 +110,14 @@ export function catalogListing(input, libraryId) {
   const clause = where.join(" AND ");
   const sortTuple = `(${sort.column}, id)`;
   const order = `ORDER BY ${sort.column} ${sort.direction}, id ${sort.direction}`;
-  const key = JSON.stringify([section, folderId, search, tag, sortName]);
+  const key = JSON.stringify([
+    section,
+    folderId,
+    search,
+    tag,
+    sortName,
+    ...(before || since ? [before, since] : []),
+  ]);
   const conditions = (after, through) => {
     const filters = [clause];
     const values = [...params];
@@ -98,7 +136,7 @@ export function catalogListing(input, libraryId) {
     key,
     scope: catalogScope(section, folderId),
     baseKey: JSON.stringify([
-      section === "drive" || section === "trash" ? section : "all",
+      ["drive", "trash", "timeline"].includes(section) ? section : "all",
       folderId,
       "",
       "",

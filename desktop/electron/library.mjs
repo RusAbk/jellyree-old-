@@ -24,7 +24,7 @@ import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import mime from "mime";
 import { D1 } from "./d1.mjs";
 import { CatalogCache } from "./catalog-cache.mjs";
-import { catalogListing } from "./catalog-query.mjs";
+import { catalogListing, timelineMedia } from "./catalog-query.mjs";
 import { libraryId } from "./config.mjs";
 import { normalizeImageAdjustments } from "./image-adjustments.mjs";
 import { validateVideoFrame, videoFrameName } from "./video-frames.mjs";
@@ -34,6 +34,7 @@ import { PXZ_LIMIT, PxzRangeReader, readPxz } from "./pxz-archive.mjs";
 
 const schema = await readFile(new URL("./schema.sql", import.meta.url), "utf8");
 const catalogIndexes = {
+  timeline: `CREATE INDEX IF NOT EXISTS jr_media_date ON jr_files(library_id, created_at DESC, id DESC) WHERE trashed_at IS NULL AND ${timelineMedia}`,
   folderDate:
     "CREATE INDEX IF NOT EXISTS jr_active_folder_date ON jr_files(library_id, folder_id, created_at DESC, id DESC) WHERE trashed_at IS NULL",
   date: "CREATE INDEX IF NOT EXISTS jr_active_date ON jr_files(library_id, created_at DESC, id DESC) WHERE trashed_at IS NULL",
@@ -199,11 +200,25 @@ export class Library {
   cachedStats() {
     return this.catalog?.stats(() => this.stats()) ?? this.stats();
   }
+  timelineBounds() {
+    const fetch = async () => {
+      await this.#ensureIndex("timeline");
+      const match = `FROM jr_files WHERE library_id = ? AND trashed_at IS NULL AND ${timelineMedia}`;
+      const [bounds] = await this.db.query(
+        `SELECT (SELECT created_at ${match} ORDER BY created_at ASC LIMIT 1) AS oldest,
+                (SELECT created_at ${match} ORDER BY created_at DESC LIMIT 1) AS newest`,
+        [this.id, this.id],
+      );
+      return bounds;
+    };
+    return this.catalog?.timelineBounds(fetch) ?? fetch();
+  }
   async list(input = {}) {
     const query = catalogListing(input, this.id);
     if (input.refresh) this.catalog?.invalidate();
     const fetchRows = async (sql, params) => {
-      if (query.sortName === "date" && query.section !== "trash")
+      if (query.section === "timeline") await this.#ensureIndex("timeline");
+      else if (query.sortName === "date" && query.section !== "trash")
         await this.#ensureIndex(
           query.section === "drive" ? "folderDate" : "date",
         );

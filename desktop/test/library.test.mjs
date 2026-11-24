@@ -569,6 +569,54 @@ test("D1 listing refreshes five pages with a single count and skips counts on co
   assert.equal(requests.length, 1);
 });
 
+test("media timeline seeks both ways by date and indexes only active media", async (t) => {
+  const { library, insert, sqlite, requests } = fixture(t);
+  await library.initialize();
+  for (const [id, mime, added, options] of [
+    ["audio", "audio/mpeg", "2016-02-03", {}],
+    ["heic", "application/octet-stream", "2019-03-08", { name: "import.HEIC" }],
+    ["video", "video/mp4", "2021-04-08", {}],
+    ["photo", "image/png", "2026-02-01", {}],
+    ["document", "text/plain", "2001-01-01", {}],
+    ["trashed", "image/jpeg", "2027-02-20", { trash: "2027-03-02" }],
+  ]) {
+    insert(id, { mime, ...options });
+    sqlite
+      .prepare("UPDATE jr_files SET created_at = ? WHERE id = ?")
+      .run(`${added}T12:00:00.000Z`, id);
+  }
+  assert.deepEqual(await library.timelineBounds(), {
+    oldest: "2016-02-03T12:00:00.000Z",
+    newest: "2026-02-01T12:00:00.000Z",
+  });
+  const boundary = "2020-01-01T00:00:00.000Z";
+  const older = await library.list({
+    section: "timeline",
+    timelineBefore: boundary,
+    includeTotal: false,
+  });
+  const newer = await library.list({
+    section: "timeline",
+    timelineSince: boundary,
+    includeTotal: false,
+  });
+  assert.deepEqual(
+    older.items.map(({ id }) => id),
+    ["heic", "audio"],
+  );
+  assert.deepEqual(
+    newer.items.map(({ id }) => id),
+    ["video", "photo"],
+  );
+  const lookup = requests.at(-1);
+  assert.doesNotMatch(lookup.sql, /COUNT|OFFSET/i);
+  const plan = sqlite
+    .prepare(`EXPLAIN QUERY PLAN ${lookup.sql}`)
+    .all(...lookup.params);
+  assert.ok(plan.some(({ detail }) => detail.includes("jr_media_date")));
+  assert.ok(plan.every(({ detail }) => !detail.includes("TEMP B-TREE")));
+});
+
 test("catalog cache persists pages and reconciles updates, moves and deletions by revision", async (t) => {
   const dir = await mkdtemp(path.join(os.tmpdir(), "jr-catalog-"));
   t.after(() => rm(dir, { recursive: true, force: true }));

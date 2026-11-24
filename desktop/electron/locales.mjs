@@ -13,6 +13,42 @@ export const messages = {
     en: "Photos and videos",
     es: "Fotos y vídeos",
   },
+  Медиалента: { en: "Media timeline", es: "Cronología multimedia" },
+  "Временная шкала": { en: "Timeline", es: "Línea de tiempo" },
+  "Дата на временной шкале": {
+    en: "Date on timeline",
+    es: "Fecha en la línea de tiempo",
+  },
+  "Уменьшить масштаб шкалы": {
+    en: "Zoom out timeline",
+    es: "Alejar línea de tiempo",
+  },
+  "Увеличить масштаб шкалы": {
+    en: "Zoom in timeline",
+    es: "Acercar línea de tiempo",
+  },
+  "Перейти к {0}": { en: "Go to {0}", es: "Ir a {0}" },
+  "Более новые медиафайлы": {
+    en: "Newer media",
+    es: "Multimedia más reciente",
+  },
+  "Нет медиафайлов на эту дату": {
+    en: "No media on this date",
+    es: "No hay contenido multimedia en esta fecha",
+  },
+  "Здесь будут ваши медиафайлы": {
+    en: "Your media will appear here",
+    es: "Tu contenido multimedia aparecerá aquí",
+  },
+  "Загрузите фото, видео или аудио.": {
+    en: "Upload photos, videos, or audio.",
+    es: "Sube fotos, vídeos o audio.",
+  },
+  "Выберите другой месяц на временной шкале.": {
+    en: "Choose another month on the timeline.",
+    es: "Elige otro mes en la línea de tiempo.",
+  },
+  "Без даты": { en: "No date", es: "Sin fecha" },
   Избранное: {
     en: "Favorites",
     es: "Favoritos",

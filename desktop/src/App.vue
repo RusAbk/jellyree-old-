@@ -2,6 +2,7 @@
 import { t } from "./i18n";
 import {
   computed,
+  nextTick,
   onBeforeUnmount,
   onMounted,
   ref,
@@ -17,6 +18,8 @@ import PhotoEditor from "./PhotoEditor.vue";
 import { isImageFile } from "../electron/image-formats.mjs";
 import { isPhotoPreview, usePhotoPreview } from "./use-photo-preview";
 import SettingsPanel from "./SettingsPanel.vue";
+import MediaFeed from "./MediaFeed.vue";
+import TimelineScale from "./TimelineScale.vue";
 import ContextMenu, { type MenuItem } from "./ContextMenu.vue";
 import UploadConflictDialog from "./UploadConflictDialog.vue";
 import UploadPanel from "./UploadPanel.vue";
@@ -26,6 +29,7 @@ import LanguageSelect from "./LanguageSelect.vue";
 import { syncLanguage } from "./i18n";
 import { bytes, date, icon } from "./format";
 import { api } from "./api";
+import { monthIndex, monthStart } from "./timeline-dates";
 import {
   INTERNAL_DRAG_TYPE,
   canMoveFolder,
@@ -40,6 +44,8 @@ import type {
   Progress,
   Settings,
   Stats,
+  TimelineBounds,
+  ListInput,
 } from "./types";
 
 const settings = ref<Settings>({ configured: false, persisted: false });
@@ -86,12 +92,39 @@ const selection = ref<string[]>([]),
   busy = ref(false),
   hasMore = ref(false),
   page = ref(1);
+const isTimeline = computed(() => section.value === "timeline");
+const mediaFeed = ref<InstanceType<typeof MediaFeed>>();
+const timelineBefore = ref<string>();
+const timelineBounds = shallowRef<TimelineBounds>();
+const timelineDay = ref<number>();
+const timelineNewer = shallowRef<DriveFile[]>([]);
+const newerPage = ref(0);
+const hasNewer = ref(false);
+const loadingNewer = ref(false);
+const newerFailed = ref(false);
+let newerRequest = 0;
+let boundsRequest = 0;
+const knownTimelineBounds = computed(() => {
+  const newest = timelineBounds.value?.newest ?? files.value[0]?.created_at;
+  const oldest = timelineBounds.value?.oldest ?? files.value.at(-1)?.created_at;
+  if (
+    !newest ||
+    !oldest ||
+    !Number.isFinite(Date.parse(newest)) ||
+    !Number.isFinite(Date.parse(oldest))
+  )
+    return null;
+  return { newest, oldest };
+});
 const listing = computed(() => ({
   section: section.value,
   folderId: folderId.value,
   search: search.value,
   tag: tag.value,
-  sort: sort.value,
+  sort: isTimeline.value ? "date" : sort.value,
+  ...(isTimeline.value && timelineBefore.value
+    ? { timelineBefore: timelineBefore.value }
+    : {}),
 }));
 const loadedListing = shallowRef<typeof listing.value>();
 const currentListing = computed(() => loadedListing.value === listing.value);
@@ -99,7 +132,12 @@ const filesScroll = ref<HTMLElement>(),
   loadMoreButton = ref<HTMLButtonElement>(),
   pageFailed = ref(false);
 const canLoadMore = computed(
-  () => currentListing.value && hasMore.value && !loading.value && !busy.value,
+  () =>
+    currentListing.value &&
+    hasMore.value &&
+    !loading.value &&
+    !loadingNewer.value &&
+    !busy.value,
 );
 const {
   jobs: uploadJobs,
@@ -173,6 +211,7 @@ const nav = computed(() => [
   { id: "drive", label: t("Мой диск"), icon: "ri-hard-drive-3-line" },
   { id: "all", label: t("Все файлы"), icon: "ri-stack-line" },
   { id: "photos", label: t("Фото и видео"), icon: "ri-image-2-line" },
+  { id: "timeline", label: t("Медиалента"), icon: "ri-timeline-view" },
   { id: "favorites", label: t("Избранное"), icon: "ri-star-line" },
   { id: "trash", label: t("Корзина"), icon: "ri-delete-bin-6-line" },
 ]);
@@ -518,6 +557,13 @@ function toggleExpanded(id: string) {
 }
 function navigate(next: string, id: string | null = null, nextTag = "") {
   closeContextMenu();
+  if (
+    (isTimeline.value && next !== "timeline") ||
+    (!isTimeline.value && next === "timeline")
+  )
+    files.value = [];
+  timelineBefore.value = undefined;
+  timelineDay.value = undefined;
   section.value = next;
   folderId.value = id;
   tag.value = nextTag;
@@ -525,6 +571,115 @@ function navigate(next: string, id: string | null = null, nextTag = "") {
   search.value = "";
   for (const f of breadcrumbs.value) expanded.value.add(f.id);
   void reload();
+  if (next === "timeline") void refreshTimelineBounds();
+}
+async function refreshTimelineBounds() {
+  if (
+    !settings.value.configured ||
+    typeof window.jellyree?.timelineBounds !== "function"
+  )
+    return;
+  const id = ++boundsRequest;
+  try {
+    const result = await api.timelineBounds();
+    if (id === boundsRequest && isTimeline.value) timelineBounds.value = result;
+  } catch {
+    // The feed can still use the dates of media already loaded.
+  }
+}
+function jumpTimeline(month: number) {
+  if (!isTimeline.value || !settings.value.configured || busy.value) return;
+  const newest = knownTimelineBounds.value?.newest;
+  const before =
+    newest && month >= monthIndex(new Date(newest))
+      ? undefined
+      : monthStart(month + 1).toISOString();
+  if (
+    currentListing.value &&
+    before &&
+    mediaFeed.value?.scrollToMonth(month, before === timelineBefore.value)
+  )
+    return;
+  if (before === timelineBefore.value && currentListing.value) {
+    filesScroll.value?.scrollTo(0, 0);
+    return;
+  }
+  closeContextMenu();
+  selection.value = [];
+  timelineDay.value = monthStart(month).getTime();
+  timelineBefore.value = before;
+  void reload();
+}
+function fetchNewer(input: ListInput, firstPage: number, throughPage: number) {
+  return api.list({
+    ...input,
+    timelineSince: input.timelineBefore,
+    timelineBefore: undefined,
+    page: firstPage,
+    throughPage,
+    includeTotal: false,
+  });
+}
+async function loadNewerTimeline() {
+  const requested = listing.value;
+  if (
+    !requested.timelineBefore ||
+    !currentListing.value ||
+    !hasNewer.value ||
+    loadingNewer.value ||
+    loading.value ||
+    busy.value
+  )
+    return;
+  const request = ++newerRequest;
+  const root = filesScroll.value;
+  const anchor = root?.querySelector(".media-card");
+  const top = anchor?.getBoundingClientRect().top;
+  const nextPage = newerPage.value + 1;
+  loadingNewer.value = true;
+  if (newerFailed.value) error.value = "";
+  newerFailed.value = false;
+  try {
+    const result = await fetchNewer(requested, nextPage, nextPage);
+    if (request !== newerRequest || requested !== listing.value) return;
+    const added = result.items.slice().reverse();
+    timelineNewer.value = [
+      ...new Map(
+        [...added, ...timelineNewer.value].map((file) => [file.id, file]),
+      ).values(),
+    ];
+    files.value = [
+      ...new Map(
+        [...added, ...files.value].map((file) => [file.id, file]),
+      ).values(),
+    ];
+    newerPage.value = nextPage;
+    hasNewer.value = result.hasMore;
+    await nextTick();
+    if (
+      root &&
+      anchor?.isConnected &&
+      top !== undefined &&
+      requested === listing.value
+    )
+      root.scrollTop += anchor.getBoundingClientRect().top - top;
+  } catch (e) {
+    if (request === newerRequest) {
+      newerFailed.value = true;
+      error.value = (e as Error).message;
+    }
+  } finally {
+    if (request === newerRequest) loadingNewer.value = false;
+  }
+}
+function scrollTimelineNewer(event: WheelEvent) {
+  if (
+    isTimeline.value &&
+    event.deltaY < 0 &&
+    (filesScroll.value?.scrollTop ?? 0) < 16 &&
+    !newerFailed.value
+  )
+    void loadNewerTimeline();
 }
 async function refreshFolders() {
   const id = ++foldersGeneration;
@@ -566,6 +721,8 @@ function resetCatalog() {
   clearTimeout(usageTimer);
   usageTimer = undefined;
   usageRequestedAt = 0;
+  ++boundsRequest;
+  timelineBounds.value = undefined;
   uploadRefreshPending = uploadFoldersPending = false;
   catalogError.value = "";
   stats.value = { files: 0, bytes: 0, trashed: 0, tags: [] };
@@ -575,6 +732,7 @@ async function refreshCatalog() {
   if (!settings.value.configured) return;
   catalogError.value = "";
   const refresh = Promise.all([reload(false, false, true), refreshFolders()]);
+  if (isTimeline.value) void refreshTimelineBounds();
   refreshUsage(true);
   await refresh;
 }
@@ -584,12 +742,14 @@ async function pollCatalog() {
     document.visibilityState !== "visible" ||
     !currentListing.value ||
     busy.value ||
-    loading.value
+    loading.value ||
+    loadingNewer.value
   )
     return;
   checkingCatalog.value = true;
   try {
     await reload(false, true);
+    if (isTimeline.value) void refreshTimelineBounds();
   } finally {
     checkingCatalog.value = false;
   }
@@ -607,6 +767,7 @@ function flushUploadRefresh() {
     !uploadRefreshPending ||
     busy.value ||
     loading.value ||
+    loadingNewer.value ||
     !currentListing.value ||
     !settings.value.configured
   )
@@ -650,7 +811,7 @@ async function reload(more = false, background = false, refresh = false) {
       { length: Math.ceil((nextPage - firstPage + 1) / refreshPages) },
       (_, index) => firstPage + index * refreshPages,
     );
-    const results = await Promise.all(
+    const older = Promise.all(
       pages.map((requestedPage) =>
         api.list({
           ...requestedListing,
@@ -661,12 +822,38 @@ async function reload(more = false, background = false, refresh = false) {
         }),
       ),
     );
+    const loadedNewerPages = newerPage.value;
+    const newer =
+      !more && requestedListing.timelineBefore && loadedNewerPages
+        ? Promise.all(
+            Array.from(
+              { length: Math.ceil(loadedNewerPages / refreshPages) },
+              (_, index) =>
+                fetchNewer(
+                  requestedListing,
+                  index * refreshPages + 1,
+                  Math.min((index + 1) * refreshPages, loadedNewerPages),
+                ),
+            ),
+          ).catch(() => undefined)
+        : Promise.resolve(undefined);
+    const [results, newerResults] = await Promise.all([older, newer]);
     if (id !== generation || requestedListing !== listing.value) return;
     const result = {
       ...results[results.length - 1]!,
       items: results.flatMap((result) => result.items),
     };
-    const items = more ? [...files.value, ...result.items] : result.items;
+    if (newerResults?.length && loadedNewerPages === newerPage.value) {
+      timelineNewer.value = newerResults
+        .flatMap((item) => item.items)
+        .reverse();
+      hasNewer.value = newerResults.at(-1)!.hasMore;
+    }
+    const items = more
+      ? [...files.value, ...result.items]
+      : requestedListing.timelineBefore
+        ? [...timelineNewer.value, ...result.items]
+        : result.items;
     const byId = new Map(items.map((file) => [file.id, file]));
     files.value = [...byId.values()];
     hasMore.value = result.hasMore;
@@ -1296,8 +1483,20 @@ watch(
   { flush: "sync" },
 );
 watch(sort, () => {
-  void reload();
+  if (!isTimeline.value) void reload();
 });
+watch(
+  listing,
+  (entry) => {
+    ++newerRequest;
+    timelineNewer.value = [];
+    newerPage.value = 0;
+    hasNewer.value = !!entry.timelineBefore;
+    loadingNewer.value = false;
+    newerFailed.value = false;
+  },
+  { flush: "sync" },
+);
 watch(
   listing,
   () => {
@@ -1659,7 +1858,11 @@ onBeforeUnmount(() => {
         </div>
         <progress v-if="progress" :value="progressPercent" max="100"></progress>
       </div>
-      <section class="content" @contextmenu="emptyContext">
+      <section
+        class="content"
+        :class="{ 'timeline-content': isTimeline }"
+        @contextmenu="emptyContext"
+      >
         <div class="catalog-header">
           <div v-if="section === 'drive' && folderId" class="breadcrumbs">
             <button
@@ -1686,7 +1889,7 @@ onBeforeUnmount(() => {
           </div>
           <header class="page-header">
             <div>
-              <span class="eyebrow">{{
+              <span v-if="!isTimeline" class="eyebrow">{{
                 section === "trash"
                   ? t("МОЖНО ВОССТАНОВИТЬ")
                   : t("ВСЁ НА СВОИХ МЕСТАХ")
@@ -1700,7 +1903,7 @@ onBeforeUnmount(() => {
                 }}
               </p>
             </div>
-            <div class="page-actions">
+            <div v-if="!isTimeline" class="page-actions">
               <template v-if="currentFolder && section === 'drive'"
                 ><button
                   class="icon-button"
@@ -1750,7 +1953,10 @@ onBeforeUnmount(() => {
             </div>
           </header>
         </div>
-        <div v-if="settings.configured" class="file-controls">
+        <div
+          v-if="settings.configured && (!isTimeline || selection.length)"
+          class="file-controls"
+        >
           <div class="toolbar-area">
             <div v-show="!selection.length" class="file-toolbar">
               <div>
@@ -1874,7 +2080,7 @@ onBeforeUnmount(() => {
               </button>
             </div>
           </div>
-          <div class="preview-settings">
+          <div v-if="!isTimeline" class="preview-settings">
             <div class="view-switch">
               <button
                 :class="{ active: view === 'gallery' }"
@@ -1924,7 +2130,13 @@ onBeforeUnmount(() => {
         <div
           ref="filesScroll"
           class="files-scroll"
-          :class="{ 'selecting-files': !!selectionBox }"
+          :class="{
+            'selecting-files': !!selectionBox,
+            'timeline-scroll': isTimeline,
+          }"
+          :tabindex="isTimeline ? 0 : undefined"
+          :aria-label="isTimeline ? t('Медиалента') : undefined"
+          @wheel.passive="scrollTimelineNewer"
           @pointerdown="startSelectionBox"
           @pointermove="moveSelectionBox"
           @pointerup="endSelectionBox"
@@ -1993,11 +2205,51 @@ onBeforeUnmount(() => {
                 ><i aria-hidden="true" class="ri-arrow-right-s-line"></i>
               </button>
             </div>
-            <div v-if="view === 'list' && files.length" class="list-heading">
-              <span>{{ t("Название") }}</span><span>{{ t("Размер") }}</span>
-              ><span>{{ t("Дата добавления") }}</span> ><span></span>
-            </div>
             <div
+              v-if="!isTimeline && view === 'list' && files.length"
+              class="list-heading"
+            >
+              <span>{{ t("Название") }}</span><span>{{ t("Размер") }}</span
+              ><span>{{ t("Дата добавления") }}</span
+              ><span></span>
+            </div>
+            <template v-if="isTimeline">
+              <button
+                v-if="currentListing && hasNewer"
+                class="button timeline-newer"
+                :disabled="loadingNewer || loading || busy"
+                @click="loadNewerTimeline"
+              >
+                <i
+                  aria-hidden="true"
+                  :class="
+                    loadingNewer
+                      ? 'ri-loader-4-line spinning'
+                      : 'ri-arrow-up-line'
+                  "
+                ></i>
+                {{ newerFailed ? t("Повторить") : t("Более новые медиафайлы") }}
+              </button>
+              <MediaFeed
+                :files="currentListing ? files : []"
+                :scroll-root="filesScroll"
+                :selected="highlightedIds"
+                :selection="selectedIds"
+                :dragged-ids="
+                  draggedItems?.kind === 'files' ? draggedItems.ids : []
+                "
+                :preview-size="previewSize"
+                :busy="busy"
+                @day="timelineDay = $event"
+                @select="select"
+                @open="openPreview"
+                @context="fileContext"
+                @drag="fileDragStart"
+                ref="mediaFeed"
+              />
+            </template>
+            <div
+              v-else
               :key="scope"
               class="files"
               :class="view"
@@ -2119,9 +2371,13 @@ onBeforeUnmount(() => {
                     ? t("Ничего не найдено")
                     : section === "trash"
                       ? t("Корзина пуста")
-                      : section === "favorites"
-                        ? t("Здесь будет избранное")
-                        : t("Здесь пока свободно")
+                      : isTimeline
+                        ? knownTimelineBounds
+                          ? t("Нет медиафайлов на эту дату")
+                          : t("Здесь будут ваши медиафайлы")
+                        : section === "favorites"
+                          ? t("Здесь будет избранное")
+                          : t("Здесь пока свободно")
                 }}
               </h2>
               <p>
@@ -2132,16 +2388,22 @@ onBeforeUnmount(() => {
                       ? t(
                           "Удалённые файлы остаются здесь до окончательного удаления.",
                         )
-                      : section === "favorites"
-                        ? t("Нажмите на звёздочку рядом с нужным файлом.")
-                        : t("Перетащите файлы сюда или загрузите целую папку.")
+                      : isTimeline
+                        ? knownTimelineBounds
+                          ? t("Выберите другой месяц на временной шкале.")
+                          : t("Загрузите фото, видео или аудио.")
+                        : section === "favorites"
+                          ? t("Нажмите на звёздочку рядом с нужным файлом.")
+                          : t(
+                              "Перетащите файлы сюда или загрузите целую папку.",
+                            )
                 }}
               </p>
               <button
                 v-if="
                   !search &&
                   !tag &&
-                  ['drive', 'all', 'photos'].includes(section)
+                  ['drive', 'all', 'photos', 'timeline'].includes(section)
                 "
                 class="button primary"
                 :disabled="busy"
@@ -2189,6 +2451,12 @@ onBeforeUnmount(() => {
             </button>
           </template>
         </div>
+        <TimelineScale
+          v-if="isTimeline && knownTimelineBounds"
+          :bounds="knownTimelineBounds"
+          :active-day="timelineDay"
+          @jump="jumpTimeline"
+        />
       </section>
       <footer class="workspace-footer">
         <span
@@ -2287,6 +2555,11 @@ onBeforeUnmount(() => {
 
   <UploadPanel
     v-if="uploadsOpen"
+    :class="{
+      'upload-panel-next-to-timeline': isTimeline && knownTimelineBounds,
+      'upload-panel-next-to-inspector':
+        isTimeline && selectedFile && inspectorOpen,
+    }"
     :jobs="uploadJobs"
     :pending="pendingUploads"
     :has-finished="hasFinishedUploads"

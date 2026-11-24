@@ -385,6 +385,21 @@ export class CatalogCache {
       }
     });
   }
+  timelineBounds(fetchBounds) {
+    return this.#queue.run(async () => {
+      const snapshot = this.#state("timeline-bounds");
+      try {
+        const head = await this.#head("active");
+        if (snapshot && unchanged(head, snapshot.head)) return snapshot.bounds;
+        const bounds = await fetchBounds();
+        this.#setState("timeline-bounds", { head, bounds });
+        return bounds;
+      } catch (error) {
+        if (snapshot) return snapshot.bounds;
+        throw error;
+      }
+    });
+  }
   close(clear = false) {
     this.local.close();
     if (clear) rmSync(this.filename, { force: true });

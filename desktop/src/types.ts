@@ -48,7 +48,10 @@ export type ListInput = {
   throughPage?: number;
   includeTotal?: boolean;
   refresh?: boolean;
+  timelineBefore?: string;
+  timelineSince?: string;
 };
+export type TimelineBounds = { oldest: string | null; newest: string | null };
 export type FilePatch = {
   name?: string;
   favorite?: boolean;
@@ -155,6 +158,7 @@ export interface Jellyree {
     hasMore: boolean;
     page: number;
   }>;
+  timelineBounds(): Promise<TimelineBounds>;
   update(ids: string[], patch: FilePatch): Promise<void>;
   remove(ids: string[]): Promise<{ done: number }>;
   url(id: string): Promise<string>;

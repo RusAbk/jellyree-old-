@@ -1929,6 +1929,163 @@ try {
     "PASS: only the file pane scrolls (wheel and selection), header and breadcrumbs stay fixed, pagination and folder reset work",
   );
 
+  await page.evaluate(() => {
+    const list = window.jellyree.list;
+    const rows = [
+      ...Array.from({ length: 56 }, (_, index) => ({
+        id: `timeline-recent-${String(index).padStart(2, "0")}`,
+        created_at: `2026-11-${25 - Math.floor(index / 17)}T12:00:00.000Z`,
+        mime_type: "image/jpeg",
+      })),
+      {
+        id: "timeline-clip",
+        created_at: "2023-02-02T12:00:00.000Z",
+        mime_type: "video/mp4",
+      },
+      {
+        id: "timeline-archive",
+        created_at: "2019-04-14T12:00:00.000Z",
+        mime_type: "image/jpeg",
+      },
+      {
+        id: "timeline-oldest",
+        created_at: "2015-03-07T12:00:00.000Z",
+        mime_type: "image/jpeg",
+      },
+      {
+        id: "timeline-document",
+        created_at: "2019-04-14T12:00:00.000Z",
+        mime_type: "application/pdf",
+      },
+    ].map((file) => ({
+      ...file,
+      name: file.id + (file.mime_type === "video/mp4" ? ".mp4" : ".jpg"),
+      object_key: file.id,
+      folder_id: null,
+      updated_at: file.created_at,
+      size_bytes: 500,
+      tags: [],
+      adjustments: {},
+    }));
+    const queries = [];
+    window.__timelineFixture = queries;
+    window.jellyree.timelineBounds = async () => ({
+      oldest: "2015-03-07T12:00:00.000Z",
+      newest: "2026-11-25T12:00:00.000Z",
+    });
+    window.jellyree.list = async (input) => {
+      if (input.section !== "timeline") return list(input);
+      queries.push(input);
+      let matches = rows.filter((row) => row.mime_type !== "application/pdf");
+      if (input.timelineBefore)
+        matches = matches.filter(
+          (row) => row.created_at < input.timelineBefore,
+        );
+      if (input.timelineSince)
+        matches = matches
+          .filter((row) => row.created_at >= input.timelineSince)
+          .reverse();
+      const end = (input.throughPage || input.page) * 16;
+      return {
+        items: matches.slice((input.page - 1) * 16, end),
+        page: input.page,
+        hasMore: matches.length > end,
+      };
+    };
+  });
+  await page.getByRole("button", { name: "Медиалента", exact: true }).click();
+  await page
+    .getByRole("heading", { name: "Медиалента", exact: true })
+    .waitFor();
+  const rail = page.getByRole("complementary", { name: "Временная шкала" });
+  await rail.waitFor();
+  const media = page.locator(".media-feed");
+  await media.locator('[data-file-id="timeline-recent-00"]').waitFor();
+  const yearCount = await rail.locator(".year-mark").count();
+  for (let count = 0; count < 3; count++)
+    await rail.getByRole("button", { name: "Увеличить масштаб шкалы" }).click();
+  assert.ok((await rail.locator(".year-mark").count()) < yearCount);
+  assert.ok((await rail.locator(".timeline-mark:not(.year-mark)").count()) > 0);
+  for (let count = 0; count < 3; count++)
+    await rail.getByRole("button", { name: "Уменьшить масштаб шкалы" }).click();
+  await page.locator(".load-more").scrollIntoViewIfNeeded();
+  await media.locator('[data-file-id="timeline-recent-16"]').waitFor();
+  assert.equal(
+    await media.locator(".media-day").first().locator(".media-card").count(),
+    17,
+  );
+  assert.equal(
+    await page
+      .locator(".timeline-scroll")
+      .evaluate((root) => getComputedStyle(root).scrollbarWidth),
+    "none",
+  );
+  await page.screenshot({
+    path: path.join(os.tmpdir(), "jellyree-media-timeline.png"),
+  });
+
+  await rail
+    .getByRole("button", { name: "Перейти к 2019", exact: true })
+    .click();
+  const historical = media.locator('[data-file-id="timeline-archive"]');
+  await historical.waitFor();
+  assert.equal(
+    await media.locator('[data-file-id="timeline-document"]').count(),
+    0,
+  );
+  assert.equal(
+    await media.locator('[data-file-id="timeline-recent-00"]').count(),
+    0,
+  );
+  const historicalQuery = await page.evaluate(() =>
+    window.__timelineFixture.find((input) => input.timelineBefore),
+  );
+  assert.equal(historicalQuery.page, 1);
+  assert.equal(historicalQuery.includeTotal, false);
+  await historical.dblclick();
+  await viewer
+    .locator(".preview-header")
+    .filter({ hasText: "timeline-archive.jpg" })
+    .waitFor();
+  await viewer
+    .getByRole("button", { name: "Закрыть просмотр", exact: true })
+    .click();
+  await page
+    .getByRole("button", { name: "Более новые медиафайлы", exact: true })
+    .click();
+  await media.locator('[data-file-id="timeline-clip"]').waitFor();
+  assert.equal(
+    await page.evaluate(
+      () =>
+        window.__timelineFixture.find((input) => input.timelineSince)
+          .timelineSince,
+    ),
+    historicalQuery.timelineBefore,
+  );
+  await rail.getByRole("slider").press("Home");
+  await media.locator('[data-file-id="timeline-recent-00"]').waitFor();
+  const track = await rail.getByRole("slider").boundingBox();
+  const beforeDrag = await page.evaluate(
+    () =>
+      window.__timelineFixture.filter((input) => input.timelineBefore).length,
+  );
+  await page.mouse.move(track.x + track.width / 2, track.y + 6);
+  await page.mouse.down();
+  await page.mouse.move(track.x + track.width / 2, track.y + track.height - 3, {
+    steps: 12,
+  });
+  assert.equal(
+    await page.evaluate(
+      () =>
+        window.__timelineFixture.filter((input) => input.timelineBefore).length,
+    ),
+    beforeDrag,
+  );
+  await page.mouse.up();
+  await media.locator('[data-file-id="timeline-oldest"]').waitFor();
+  console.log(
+    "PASS: media timeline groups days across pages, seeks historical dates, zooms and loads in both directions",
+  );
   assert.deepEqual(rendererErrors, []);
   console.log(
     "PASS: connected UI, rename, trash, restore, create folder, list, search, preview, edit",
