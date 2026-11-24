@@ -23,6 +23,8 @@ import { Upload } from "@aws-sdk/lib-storage";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import mime from "mime";
 import { D1 } from "./d1.mjs";
+import { CatalogCache } from "./catalog-cache.mjs";
+import { catalogListing } from "./catalog-query.mjs";
 import { libraryId } from "./config.mjs";
 import { normalizeImageAdjustments } from "./image-adjustments.mjs";
 import { validateVideoFrame, videoFrameName } from "./video-frames.mjs";
@@ -31,6 +33,13 @@ import { isImageFile, isPxzFile, imageMimeType } from "./image-formats.mjs";
 import { PXZ_LIMIT, PxzRangeReader, readPxz } from "./pxz-archive.mjs";
 
 const schema = await readFile(new URL("./schema.sql", import.meta.url), "utf8");
+const catalogIndexes = {
+  folderDate:
+    "CREATE INDEX IF NOT EXISTS jr_active_folder_date ON jr_files(library_id, folder_id, created_at DESC, id DESC) WHERE trashed_at IS NULL",
+  date: "CREATE INDEX IF NOT EXISTS jr_active_date ON jr_files(library_id, created_at DESC, id DESC) WHERE trashed_at IS NULL",
+  folderName:
+    "CREATE INDEX IF NOT EXISTS jr_active_folder_name ON jr_files(library_id, folder_id, name, created_at DESC, id DESC) WHERE trashed_at IS NULL",
+};
 export function cleanName(value) {
   const name = String(value ?? "").trim();
   if (
@@ -63,6 +72,9 @@ export function fileRow(row) {
   };
 }
 export class Library {
+  #failedUploads = new Map();
+  #indexAttempts = new Map();
+
   constructor(config, { db, s3, createUpload } = {}) {
     this.createUpload = createUpload ?? ((options) => new Upload(options));
     this.config = config;
@@ -91,6 +103,21 @@ export class Library {
   async initialize() {
     await this.db.query(schema);
     return { ok: true };
+  }
+  #ensureIndex(key) {
+    const previous = this.#indexAttempts.get(key);
+    if (previous && Date.now() < previous.retryAt) return previous.ready;
+    const attempt = { retryAt: Infinity };
+    attempt.ready = this.db.query(catalogIndexes[key]).then(
+      () => true,
+      () => {
+        // Keep the queries usable while D1 limits delay an index build.
+        attempt.retryAt = Date.now() + 60 * 60 * 1000;
+        return false;
+      },
+    );
+    this.#indexAttempts.set(key, attempt);
+    return attempt.ready;
   }
   async folders() {
     return this.db.query(
@@ -163,61 +190,51 @@ export class Library {
       [id, this.id],
     );
   }
+  enableCatalogCache(filename) {
+    this.catalog = new CatalogCache(filename, this.db, this.id, schema);
+  }
+  cachedFolders() {
+    return this.catalog?.folders(() => this.folders()) ?? this.folders();
+  }
+  cachedStats() {
+    return this.catalog?.stats(() => this.stats()) ?? this.stats();
+  }
   async list(input = {}) {
-    const section = ["drive", "all", "favorites", "photos", "trash"].includes(
-      input.section,
-    )
-      ? input.section
-      : "drive";
-    const where = [
-        "library_id = ?",
-        section === "trash" ? "trashed_at IS NOT NULL" : "trashed_at IS NULL",
-      ],
-      params = [this.id];
-    if (section === "drive") {
-      where.push("folder_id IS ?");
-      params.push(input.folderId || null);
-    }
-    if (section === "favorites") where.push("favorite = 1");
-    if (section === "photos")
-      where.push(
-        "(mime_type LIKE 'image/%' OR mime_type LIKE 'video/%' OR LOWER(name) LIKE '%.heic' OR LOWER(name) LIKE '%.heif' OR LOWER(name) LIKE '%.pxz' OR LOWER(mime_type) = 'application/pxz')",
+    const query = catalogListing(input, this.id);
+    if (input.refresh) this.catalog?.invalidate();
+    const fetchRows = async (sql, params) => {
+      if (query.sortName === "date" && query.section !== "trash")
+        await this.#ensureIndex(
+          query.section === "drive" ? "folderDate" : "date",
+        );
+      return this.db.query(sql, params);
+    };
+    let rows, hasMore;
+    if (this.catalog) {
+      ({ rows, hasMore } = await this.catalog.list(query, fetchRows));
+    } else {
+      rows = await fetchRows(
+        ...query.select({
+          after: query.after,
+          limit: query.limit + 1,
+          offset: query.offset,
+        }),
       );
-    if (input.search) {
-      where.push(
-        "(name LIKE ? ESCAPE '\\' OR EXISTS (SELECT 1 FROM json_each(jr_files.tags) WHERE value LIKE ? ESCAPE '\\'))",
-      );
-      const term = `%${String(input.search).replace(/[\\%_]/g, "\\$&")}%`;
-      params.push(term, term);
+      hasMore = rows.length > query.limit;
     }
-    if (input.tag) {
-      where.push(
-        "EXISTS (SELECT 1 FROM json_each(jr_files.tags) WHERE value = ?)",
-      );
-      params.push(String(input.tag));
+    let total;
+    if (query.includeTotal) {
+      if (query.page === 1 && !query.after && !hasMore) total = rows.length;
+      else {
+        const [count] = await this.db.query(...query.count);
+        total = count.total;
+      }
     }
-    const clause = where.join(" AND ");
-    const [count] = await this.db.query(
-      `SELECT COUNT(*) AS total FROM jr_files WHERE ${clause}`,
-      params,
-    );
-    const page = Math.max(1, Math.floor(Number(input.page) || 1)),
-      limit = 80;
-    const sort =
-      {
-        name: "name COLLATE NOCASE ASC",
-        date: "created_at DESC",
-        size: "size_bytes DESC",
-      }[input.sort] || "created_at DESC";
-    const rows = await this.db.query(
-      `SELECT * FROM jr_files WHERE ${clause} ORDER BY ${sort}, id LIMIT ? OFFSET ?`,
-      [...params, limit, (page - 1) * limit],
-    );
     return {
-      items: rows.map(fileRow),
-      total: count.total,
-      page,
-      hasMore: page * limit < count.total,
+      items: rows.slice(0, query.limit).map(fileRow),
+      ...(total === undefined ? {} : { total }),
+      page: query.throughPage,
+      hasMore,
     };
   }
   async stats() {
@@ -544,14 +561,10 @@ export class Library {
       expectedObjectKey !== video.object_key
     )
       throw new Error(t("Видео изменилось. Откройте его заново."));
-    const rows = await this.db.query(
-      "SELECT name FROM jr_files WHERE library_id = ? AND folder_id IS ? AND trashed_at IS NULL",
-      [this.id, video.folder_id],
-    );
-    const names = new Set(rows.map((row) => row.name));
+    await this.#ensureIndex("folderName");
     let suffix = 0,
       name = videoFrameName(video.name, timestamp);
-    while (names.has(name))
+    while ((await this.#filesNamed(video.folder_id, name)).length)
       name = videoFrameName(video.name, timestamp, ++suffix);
     const directory = await mkdtemp(path.join(os.tmpdir(), "jellyree-frame-"));
     try {
@@ -686,9 +699,7 @@ export class Library {
     if (!Array.isArray(paths) || paths.length > 10000)
       throw new Error(t("Некорректный список файлов."));
     await this.folder(folderId);
-    const jobs = [],
-      failures = [],
-      warnings = [];
+    const jobs = [];
     const ensureFolder = async (name, parent) => {
       const [existing] = await this.db.query(
         "SELECT id FROM jr_folders WHERE library_id = ? AND parent_id IS ? AND name = ?",
@@ -715,15 +726,60 @@ export class Library {
         });
     };
     for (const source of paths) await walk(String(source), folderId || null);
+    return this.#uploadJobs(jobs, report, resolveConflict);
+  }
+  async retryUploads(ids, report = () => {}, resolveConflict) {
+    if (
+      !Array.isArray(ids) ||
+      !ids.length ||
+      ids.some((id) => !this.#failedUploads.has(id))
+    )
+      throw new Error(t("Эти загрузки больше недоступны для повтора."));
+    const jobs = [];
+    for (const retryId of new Set(ids)) {
+      const job = this.#failedUploads.get(retryId);
+      const info = await stat(job.source).catch(() => null);
+      jobs.push({
+        ...job,
+        retryId,
+        size: info?.isFile() ? info.size : job.size,
+      });
+    }
+    return this.#uploadJobs(jobs, report, resolveConflict);
+  }
+  async #uploadJobs(jobs, report, resolveConflict) {
+    const failures = [],
+      warnings = [],
+      resolvedRetryIds = [];
+    const indexed = jobs.length && (await this.#ensureIndex("folderName"));
     const reserved = new Map(),
       seen = new Map();
-    for (const parent of new Set(jobs.map((job) => job.folder))) {
-      const rows = await this.db.query(
-        "SELECT name FROM jr_files WHERE library_id = ? AND folder_id IS ? AND trashed_at IS NULL",
-        [this.id, parent],
-      );
-      reserved.set(parent, new Set(rows.map((row) => row.name)));
-      seen.set(parent, new Set(rows.map((row) => row.name)));
+    for (const job of jobs) {
+      if (!reserved.has(job.folder)) reserved.set(job.folder, new Set());
+      reserved.get(job.folder).add(job.name);
+    }
+    for (const [parent, incoming] of reserved) {
+      const found = new Set();
+      seen.set(parent, found);
+      const names = [...incoming];
+      const select =
+        "SELECT DISTINCT name FROM jr_files WHERE library_id = ? AND folder_id IS ? AND trashed_at IS NULL";
+      if (indexed) {
+        const chunkSize = 98;
+        for (let start = 0; start < names.length; start += chunkSize) {
+          const chunk = names.slice(start, start + chunkSize);
+          const rows = await this.db.query(
+            `${select} AND name IN (${chunk.map(() => "?").join(", ")})`,
+            [this.id, parent, ...chunk],
+          );
+          for (const row of rows) found.add(row.name);
+        }
+      } else {
+        for (const row of await this.db.query(select, [this.id, parent])) {
+          found.add(row.name);
+          incoming.add(row.name);
+        }
+      }
     }
     let totalConflicts = 0;
     for (const job of jobs) {
@@ -746,21 +802,18 @@ export class Library {
       }
       return parts.join(" / ");
     };
-    const existingFile = async (parent, name) =>
-      await this.db.query(
-        "SELECT id, name, size_bytes, updated_at FROM jr_files WHERE library_id = ? AND folder_id IS ? AND name = ? AND trashed_at IS NULL ORDER BY created_at DESC, id DESC",
-        [this.id, parent, name],
-      );
-    const uniqueName = (name, names) => {
+    const uniqueName = async (name, names, parent) => {
       const extension = path.extname(name),
         stem = path.basename(name, extension);
-      let suffix = 1,
-        candidate;
-      do {
+      let suffix = 1;
+      for (;;) {
         const tail = ` (${suffix++})${extension}`;
-        candidate = `${stem.slice(0, Math.max(1, 255 - tail.length))}${tail}`;
-      } while (names.has(candidate));
-      return candidate;
+        const candidate = `${stem.slice(0, Math.max(1, 255 - tail.length))}${tail}`;
+        if (names.has(candidate)) continue;
+        if (!(await this.#filesNamed(parent, candidate)).length)
+          return candidate;
+        names.add(candidate);
+      }
     };
     let processed = 0,
       done = 0,
@@ -777,14 +830,14 @@ export class Library {
         fileState = "failed",
         fileMessage;
       try {
-        const matches = await existingFile(job.folder, name);
+        const matches = await this.#filesNamed(job.folder, name);
         if (matches.length) {
           if (!job.conflict) {
             remaining++;
             totalConflicts++;
           }
           const names = reserved.get(job.folder);
-          const suggestedName = uniqueName(name, names);
+          const suggestedName = await uniqueName(name, names, job.folder);
           let decision = policy ? { action: policy } : null;
           if (!decision) {
             if (!resolveConflict)
@@ -796,7 +849,7 @@ export class Library {
               const candidate = cleanName(answer.name || suggestedName);
               if (
                 names.has(candidate) ||
-                (await existingFile(job.folder, candidate)).length
+                (await this.#filesNamed(job.folder, candidate)).length
               )
                 throw new Error(t("Это имя уже занято. Введите другое имя."));
             };
@@ -867,8 +920,29 @@ export class Library {
         if (result.warning) warnings.push(result.warning);
       } catch (error) {
         fileMessage = error.message;
-        failures.push({ name, message: error.message });
+        const retryId = job.retryId ?? randomUUID();
+        this.#failedUploads.set(retryId, {
+          source: job.source,
+          folder: job.folder,
+          size: job.size,
+          name,
+        });
+        failures.push({
+          name,
+          message: fileMessage,
+          retryId,
+          fileIndex: processed,
+          targetPath: folderPath(job.folder),
+          sizeBytes: job.size,
+        });
       } finally {
+        if (
+          job.retryId &&
+          (fileState === "uploaded" || fileState === "skipped")
+        ) {
+          this.#failedUploads.delete(job.retryId);
+          resolvedRetryIds.push(job.retryId);
+        }
         processed++;
         bytes += job.size;
         report({
@@ -886,7 +960,20 @@ export class Library {
         });
       }
     }
-    return { done, skipped, canceled, failures, warnings };
+    return {
+      done,
+      skipped,
+      canceled,
+      failures,
+      warnings,
+      ...(resolvedRetryIds.length ? { resolvedRetryIds } : {}),
+    };
+  }
+  #filesNamed(parent, name) {
+    return this.db.query(
+      "SELECT id, name, size_bytes, updated_at FROM jr_files WHERE library_id = ? AND folder_id IS ? AND name = ? AND trashed_at IS NULL ORDER BY created_at DESC, id DESC",
+      [this.id, parent, name],
+    );
   }
   async importBucket(report = () => {}) {
     let token,
@@ -925,7 +1012,8 @@ export class Library {
     } while (token);
     return { scanned: done };
   }
-  close() {
+  close(clearCatalog = false) {
+    this.catalog?.close(clearCatalog);
     this.s3.destroy();
   }
 }

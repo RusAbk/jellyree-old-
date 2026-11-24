@@ -53,6 +53,7 @@ export function createApi(bridge: Jellyree): Jellyree {
     // Native File objects must reach webUtils unchanged; they are not DTOs.
     dropUpload: (files, folderId, jobId) =>
       bridge.dropUpload(Array.from(files), folderId, jobId),
+    retryUpload: (ids, jobId) => bridge.retryUpload(toIpcData(ids), jobId),
     importBucket: () => bridge.importBucket(),
     answerUploadConflict: (input) =>
       bridge.answerUploadConflict(toIpcData(input)),

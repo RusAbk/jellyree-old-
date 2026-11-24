@@ -12,8 +12,14 @@ const props = defineProps<{
   jobs: UploadJob[];
   pending: number;
   hasFinished: boolean;
+  retrying: Set<string>;
 }>();
-defineEmits<{ close: []; clear: []; conflict: [] }>();
+defineEmits<{
+  close: [];
+  clear: [];
+  conflict: [];
+  retry: [jobId: string, retryId?: string];
+}>();
 const tab = ref(props.pending ? "active" : "completed"),
   limit = ref(150);
 const summary = computed(() => uploadSummary(props.jobs));
@@ -22,9 +28,23 @@ const completed = computed(() =>
   props.jobs
     .flatMap((job) => {
       if (job.cleared) return [];
+      const retryIds = new Map(
+        uploadFinished(job)
+          ? job.result?.failures.map((failure) => [
+              failure.fileIndex,
+              failure.retryId,
+            ])
+          : [],
+      );
       const files = job.files
         .filter((file) => file.state !== "uploading")
-        .map((file) => ({ key: `${job.id}:${file.index}`, job, file }));
+        .map((file) => ({
+          key: `${job.id}:${file.index}`,
+          job,
+          file,
+          retryId: retryIds.get(file.index),
+          retryIds: [],
+        }));
       return [
         ...files,
         ...(uploadFinished(job) &&
@@ -32,7 +52,17 @@ const completed = computed(() =>
           job.result?.failures.length ||
           job.result?.warnings?.length ||
           job.error)
-          ? [{ key: job.id, job, file: undefined }]
+          ? [
+              {
+                key: job.id,
+                job,
+                file: undefined,
+                retryId: undefined,
+                retryIds: [...retryIds.values()].filter(
+                  (id): id is string => !!id,
+                ),
+              },
+            ]
           : []),
       ];
     })
@@ -291,6 +321,18 @@ function title(job: UploadJob) {
           >
             {{ row.file?.error || row.job.error }}
           </p>
+          <button
+            v-if="row.retryId || row.retryIds.length"
+            class="text-button"
+            :disabled="
+              row.retryId
+                ? retrying.has(row.retryId)
+                : row.retryIds.some((id) => retrying.has(id))
+            "
+            @click="$emit('retry', row.job.id, row.retryId)"
+          >
+            {{ row.retryId ? t("Повторить") : t("Повторить неудачные") }}
+          </button>
           <details
             v-if="
               !row.file &&

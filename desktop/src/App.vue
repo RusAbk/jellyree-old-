@@ -84,7 +84,6 @@ const selection = ref<string[]>([]),
   loading = ref(false),
   loadingMore = ref(false),
   busy = ref(false),
-  total = ref(0),
   hasMore = ref(false),
   page = ref(1);
 const listing = computed(() => ({
@@ -116,10 +115,22 @@ const {
   onConflict: uploadConflictReceived,
   resolveConflict: resolveUploadConflict,
   clearFinished: clearFinishedUploads,
-} = useUploadJobs(api, requestUploadRefresh);
+  retry: retryUpload,
+  retrying: retryingUploads,
+  reset: resetUploads,
+} = useUploadJobs(api, () => requestUploadRefresh("folders"));
 let uploadRefreshPending = false;
+let uploadFoldersPending = false;
+let foldersGeneration = 0,
+  usageGeneration = 0,
+  usageRequestedAt = 0,
+  usageTimer: ReturnType<typeof setTimeout> | undefined;
+const usageRefreshInterval = 30_000;
+let catalogPoll: ReturnType<typeof setInterval> | undefined;
+const checkingCatalog = ref(false);
 const error = ref(""),
   notice = ref(""),
+  catalogError = ref(""),
   progress = ref<Progress | null>(null),
   dragging = ref(false);
 const draggedItems = ref<DragItems | null>(null);
@@ -129,6 +140,7 @@ const preview = ref<DriveFile | null>(null),
   previewUrl = ref(""),
   previewError = ref(""),
   previewLoading = ref(false),
+  previewPageLoading = ref(false),
   editing = ref(false);
 const photo = computed(() =>
   preview.value && isPhotoPreview(preview.value) ? preview.value : null,
@@ -185,6 +197,18 @@ const childFolders = computed(() =>
       )
     : [],
 );
+const listingSummary = computed(() => {
+  if (!currentListing.value) return "";
+  const counts = {
+    "0": files.value.length,
+    "1": childFolders.value.length
+      ? t(" · {0} папок", { "0": childFolders.value.length })
+      : "",
+  };
+  return hasMore.value
+    ? t("Показано {0} файлов{1}", counts)
+    : t("{0} файлов{1}", counts);
+});
 const breadcrumbs = computed(() => {
   const list: Folder[] = [],
     seen = new Set<string>();
@@ -482,7 +506,7 @@ function chooseContext(id: string) {
   if (id === "upload") void upload();
   if (id === "uploadFolder") void upload(true);
   if (id === "createFolder") openModal("createFolder");
-  if (id === "refresh") void reload();
+  if (id === "refresh") void refreshCatalog();
   if (id === "selectAll") selection.value = files.value.map((f) => f.id);
 }
 
@@ -502,8 +526,80 @@ function navigate(next: string, id: string | null = null, nextTag = "") {
   for (const f of breadcrumbs.value) expanded.value.add(f.id);
   void reload();
 }
-function requestUploadRefresh() {
+async function refreshFolders() {
+  const id = ++foldersGeneration;
+  try {
+    const tree = await api.folders();
+    if (id === foldersGeneration) folders.value = tree;
+  } catch (e) {
+    if (id === foldersGeneration) catalogError.value = (e as Error).message;
+  }
+}
+function refreshUsage(immediate = false) {
+  if (!settings.value.configured) return;
+  if (immediate) {
+    clearTimeout(usageTimer);
+    usageTimer = undefined;
+  } else if (usageTimer !== undefined) return;
+  const wait = usageRequestedAt + usageRefreshInterval - Date.now();
+  if (!immediate && wait > 0) {
+    usageTimer = setTimeout(() => {
+      usageTimer = undefined;
+      refreshUsage();
+    }, wait);
+    return;
+  }
+  usageRequestedAt = Date.now();
+  const id = ++usageGeneration;
+  void api.stats().then(
+    (usage) => {
+      if (id === usageGeneration) stats.value = usage;
+    },
+    (e: Error) => {
+      if (id === usageGeneration) catalogError.value = e.message;
+    },
+  );
+}
+function resetCatalog() {
+  ++foldersGeneration;
+  ++usageGeneration;
+  clearTimeout(usageTimer);
+  usageTimer = undefined;
+  usageRequestedAt = 0;
+  uploadRefreshPending = uploadFoldersPending = false;
+  catalogError.value = "";
+  stats.value = { files: 0, bytes: 0, trashed: 0, tags: [] };
+  resetUploads();
+}
+async function refreshCatalog() {
+  if (!settings.value.configured) return;
+  catalogError.value = "";
+  const refresh = Promise.all([reload(false, false, true), refreshFolders()]);
+  refreshUsage(true);
+  await refresh;
+}
+async function pollCatalog() {
+  if (
+    !settings.value.configured ||
+    document.visibilityState !== "visible" ||
+    !currentListing.value ||
+    busy.value ||
+    loading.value
+  )
+    return;
+  checkingCatalog.value = true;
+  try {
+    await reload(false, true);
+  } finally {
+    checkingCatalog.value = false;
+  }
+}
+function requestUploadRefresh(
+  refresh: "files" | "usage" | "folders" = "files",
+) {
   uploadRefreshPending = true;
+  uploadFoldersPending ||= refresh === "folders";
+  if (refresh !== "files") refreshUsage();
   flushUploadRefresh();
 }
 function flushUploadRefresh() {
@@ -516,10 +612,27 @@ function flushUploadRefresh() {
   )
     return;
   uploadRefreshPending = false;
+  if (uploadFoldersPending) {
+    uploadFoldersPending = false;
+    void refreshFolders();
+  }
   void reload(false, true);
 }
 watch([busy, loading, currentListing], flushUploadRefresh);
-async function reload(more = false, background = false) {
+const refreshPages = 5;
+let nextPageRequest:
+  { listing: typeof listing.value; done: Promise<void> } | undefined;
+function loadNextPage() {
+  if (nextPageRequest?.listing === listing.value) return nextPageRequest.done;
+  if (!canLoadMore.value) return;
+  const request = { listing: listing.value, done: reload(true) };
+  nextPageRequest = request;
+  void request.done.finally(() => {
+    if (nextPageRequest === request) nextPageRequest = undefined;
+  });
+  return request.done;
+}
+async function reload(more = false, background = false, refresh = false) {
   if (!settings.value.configured || (more && !canLoadMore.value)) return;
   if (!more && !background) clearTimeout(timer);
   const requestedListing = listing.value,
@@ -532,39 +645,36 @@ async function reload(more = false, background = false) {
     pageFailed.value = false;
   }
   try {
-    const pages = background
-      ? Array.from({ length: nextPage }, (_, index) => index + 1)
-      : [nextPage];
-    const [results, tree, usage] = await Promise.all([
-      Promise.all(
-        pages.map((requestedPage) =>
-          api.list({
-            ...requestedListing,
-            page: requestedPage,
-          }),
-        ),
+    const firstPage = more ? nextPage : 1;
+    const pages = Array.from(
+      { length: Math.ceil((nextPage - firstPage + 1) / refreshPages) },
+      (_, index) => firstPage + index * refreshPages,
+    );
+    const results = await Promise.all(
+      pages.map((requestedPage) =>
+        api.list({
+          ...requestedListing,
+          page: requestedPage,
+          throughPage: Math.min(requestedPage + refreshPages - 1, nextPage),
+          includeTotal: false,
+          refresh: refresh && requestedPage === 1,
+        }),
       ),
-      more ? Promise.resolve(folders.value) : api.folders(),
-      more ? Promise.resolve(stats.value) : api.stats(),
-    ]);
+    );
     if (id !== generation || requestedListing !== listing.value) return;
     const result = {
       ...results[results.length - 1]!,
       items: results.flatMap((result) => result.items),
     };
     const items = more ? [...files.value, ...result.items] : result.items;
-    files.value = [...new Map(items.map((file) => [file.id, file])).values()];
-    folders.value = tree;
-    stats.value = usage;
-    total.value = result.total;
+    const byId = new Map(items.map((file) => [file.id, file]));
+    files.value = [...byId.values()];
     hasMore.value = result.hasMore;
     page.value = nextPage;
     loadedListing.value = requestedListing;
-    selection.value = selection.value.filter((s) =>
-      files.value.some((f) => f.id === s),
-    );
+    selection.value = selection.value.filter((s) => byId.has(s));
     if (preview.value) {
-      const updated = files.value.find((f) => f.id === preview.value?.id);
+      const updated = byId.get(preview.value.id);
       if (
         updated &&
         updated.object_key !== preview.value.object_key &&
@@ -589,7 +699,11 @@ async function reload(more = false, background = false) {
     }
   }
 }
-async function action(fn: () => Promise<unknown>, message = "") {
+async function action(
+  fn: () => Promise<unknown>,
+  message = "",
+  refresh: "files" | "folders" | "usage" | "none" = "files",
+) {
   if (busy.value) return;
   busy.value = true;
   error.value = "";
@@ -599,12 +713,16 @@ async function action(fn: () => Promise<unknown>, message = "") {
     await fn();
     if (message) notice.value = message;
     const operationError = error.value;
-    await reload();
+    if (refresh === "folders") await refreshFolders();
+    if (refresh === "usage") refreshUsage(true);
+    if (refresh !== "none") await reload();
     if (operationError) error.value = operationError;
     return true;
   } catch (e) {
     const message = (e as Error).message;
-    await reload();
+    if (refresh === "folders") await refreshFolders();
+    if (refresh === "usage") refreshUsage(true);
+    if (refresh !== "none") await reload();
     error.value = message;
     return false;
   } finally {
@@ -716,6 +834,7 @@ async function moveDropped(event: DragEvent, target: string | null) {
     await action(
       () => api.updateFolder(items.id, { parentId: target }),
       t("Папка перемещена."),
+      "folders",
     );
   } else {
     const ids = items.ids.filter((id) =>
@@ -785,7 +904,11 @@ function select(
   } else selectOnly(file.id);
 }
 function patch(ids: string[], input: FilePatch, message = "") {
-  return action(() => api.update(ids, input), message);
+  return action(
+    () => api.update(ids, input),
+    message,
+    input.trashed !== undefined || input.tags !== undefined ? "usage" : "files",
+  );
 }
 async function upload(
   folders = false,
@@ -859,40 +982,55 @@ function openModal(
 async function submitModal() {
   const value = modal.value;
   if (!value) return;
-  const success = await action(async () => {
-    if (value.kind === "createFolder")
-      await api.createFolder(value.input, value.parentId ?? null);
-    if (value.kind === "rename")
-      await api.update(value.ids, { name: value.input });
-    if (value.kind === "tags")
-      await api.update(value.ids, {
-        tags: value.input
-          .split(",")
-          .map((t) => t.trim())
-          .filter(Boolean),
-      });
-    if (value.kind === "move")
-      await api.update(value.ids, { folderId: value.target || null });
-    if (value.kind === "renameFolder" && value.folder)
-      await api.updateFolder(value.folder.id, { name: value.input });
-    if (value.kind === "moveFolder" && value.folder)
-      await api.updateFolder(value.folder.id, {
-        parentId: value.target || null,
-      });
-    if (value.kind === "deleteFolder" && value.folder) {
-      await api.deleteFolder(value.folder.id);
-      if (folderId.value === value.folder.id)
-        folderId.value = value.folder.parent_id || null;
-    }
-    if (value.kind === "delete") {
-      await api.remove(value.ids);
-      if (preview.value && value.ids.includes(preview.value.id)) closePreview();
-    }
-    if (value.kind === "import") {
-      const result = await api.importBucket();
-      notice.value = t("Проверено объектов: {0}", { "0": result.scanned });
-    }
-  });
+  const refresh = [
+    "createFolder",
+    "renameFolder",
+    "moveFolder",
+    "deleteFolder",
+  ].includes(value.kind)
+    ? "folders"
+    : ["delete", "import", "tags"].includes(value.kind)
+      ? "usage"
+      : "files";
+  const success = await action(
+    async () => {
+      if (value.kind === "createFolder")
+        await api.createFolder(value.input, value.parentId ?? null);
+      if (value.kind === "rename")
+        await api.update(value.ids, { name: value.input });
+      if (value.kind === "tags")
+        await api.update(value.ids, {
+          tags: value.input
+            .split(",")
+            .map((t) => t.trim())
+            .filter(Boolean),
+        });
+      if (value.kind === "move")
+        await api.update(value.ids, { folderId: value.target || null });
+      if (value.kind === "renameFolder" && value.folder)
+        await api.updateFolder(value.folder.id, { name: value.input });
+      if (value.kind === "moveFolder" && value.folder)
+        await api.updateFolder(value.folder.id, {
+          parentId: value.target || null,
+        });
+      if (value.kind === "deleteFolder" && value.folder) {
+        await api.deleteFolder(value.folder.id);
+        if (folderId.value === value.folder.id)
+          folderId.value = value.folder.parent_id || null;
+      }
+      if (value.kind === "delete") {
+        await api.remove(value.ids);
+        if (preview.value && value.ids.includes(preview.value.id))
+          closePreview();
+      }
+      if (value.kind === "import") {
+        const result = await api.importBucket();
+        notice.value = t("Проверено объектов: {0}", { "0": result.scanned });
+      }
+    },
+    "",
+    refresh,
+  );
   if (success) modal.value = null;
 }
 async function openPreview(file: DriveFile) {
@@ -951,13 +1089,39 @@ function documentSaved(file: DriveFile) {
   files.value = files.value.map((current) =>
     current.id === file.id ? file : current,
   );
-  requestUploadRefresh();
+  requestUploadRefresh("usage");
 }
-function nextPreview(direction: number) {
-  if (editing.value) return;
-  const index = files.value.findIndex((f) => f.id === preview.value?.id),
+async function nextPreview(direction: number) {
+  if (editing.value || !preview.value || !currentListing.value) return;
+  const fileId = preview.value.id;
+  const index = files.value.findIndex((f) => f.id === fileId),
     next = files.value[index + direction];
-  if (next) void openPreview(next);
+  if (index < 0) return;
+  if (next) {
+    await openPreview(next);
+    return;
+  }
+  if (direction < 0 || previewPageLoading.value) return;
+  const pending = loadNextPage();
+  if (!pending) return;
+  const navigation = previewNavigation;
+  const requestedListing = listing.value;
+  previewPageLoading.value = true;
+  try {
+    await pending;
+    if (
+      navigation !== previewNavigation ||
+      preview.value?.id !== fileId ||
+      requestedListing !== listing.value ||
+      editing.value
+    )
+      return;
+    const current = files.value.findIndex((f) => f.id === fileId);
+    const following = files.value[current + 1];
+    if (current >= 0 && following) void openPreview(following);
+  } finally {
+    previewPageLoading.value = false;
+  }
 }
 async function saveVideoFrame(file: DriveFile, frame: CapturedVideoFrame) {
   const saved = await api.saveVideoFrame(
@@ -966,7 +1130,7 @@ async function saveVideoFrame(file: DriveFile, frame: CapturedVideoFrame) {
     frame.timestamp,
     frame.data,
   );
-  requestUploadRefresh();
+  requestUploadRefresh("usage");
   return saved;
 }
 function downloadVideoFrame(file: DriveFile, frame: CapturedVideoFrame) {
@@ -990,19 +1154,25 @@ async function saveImageEdits(adjustments: Adjustments) {
   return true;
 }
 async function download(ids = selection.value) {
-  await action(async () => {
-    const result = await api.download(ids);
-    notice.value = t("Скачано файлов: {0}", { "0": result.done });
-  });
+  await action(
+    async () => {
+      const result = await api.download(ids);
+      notice.value = t("Скачано файлов: {0}", { "0": result.done });
+    },
+    "",
+    "none",
+  );
 }
 async function share(id: string) {
   await action(
     () => api.share(id),
     t("Ссылка скопирована. Действует 1 час; доступна всем, у кого она есть."),
+    "none",
   );
 }
 async function saved(value: Settings) {
   ++generation;
+  resetCatalog();
   loadedListing.value = undefined;
   closePreview();
   clearPhotos();
@@ -1020,10 +1190,11 @@ async function saved(value: Settings) {
     : t(
         "Системное хранилище ключей недоступно. Реквизиты будут забыты при закрытии.",
       );
-  await reload();
+  await refreshCatalog();
 }
 function disconnected() {
   ++generation;
+  resetCatalog();
   loadedListing.value = undefined;
   loading.value = false;
   loadingMore.value = false;
@@ -1034,11 +1205,9 @@ function disconnected() {
   files.value = [];
   folders.value = [];
   selection.value = [];
-  stats.value = { files: 0, bytes: 0, trashed: 0, tags: [] };
   folderId.value = null;
   search.value = "";
   tag.value = "";
-  total.value = 0;
   error.value = "";
   notice.value = t("Подключение удалено с устройства.");
 }
@@ -1163,7 +1332,7 @@ watch(
           autoLoadMore.value &&
           entries.some((entry) => entry.isIntersecting)
         )
-          void reload(true);
+          void loadNextPage();
       },
       { root, rootMargin: "0px 0px 320px 0px" },
     );
@@ -1192,6 +1361,7 @@ onMounted(async () => {
     return;
   }
   await syncLanguage();
+  catalogPoll = setInterval(() => void pollCatalog(), 60_000);
   unsubscribe = api.onProgress((p) => {
     if (p.kind === "upload") uploadProgress(p);
     else progress.value = p;
@@ -1203,7 +1373,7 @@ onMounted(async () => {
   try {
     settings.value = await api.settings.get();
     if (settings.value.startupError) error.value = settings.value.startupError;
-    if (settings.value.configured) await reload();
+    if (settings.value.configured) await refreshCatalog();
     else settingsOpen.value = true;
   } catch (e) {
     error.value = (e as Error).message;
@@ -1215,6 +1385,8 @@ onBeforeUnmount(() => {
   unsubscribe?.();
   unsubscribeConflict?.();
   clearTimeout(timer);
+  clearInterval(catalogPoll);
+  resetCatalog();
   document.removeEventListener("keydown", keydown);
 });
 </script>
@@ -1426,7 +1598,7 @@ onBeforeUnmount(() => {
           :title="t('Обновить')"
           :aria-label="t('Обновить')"
           :disabled="loading || busy"
-          @click="reload()"
+          @click="refreshCatalog()"
         >
           <i
             aria-hidden="true"
@@ -1443,13 +1615,13 @@ onBeforeUnmount(() => {
           J
         </button>
       </header>
-      <div v-if="error" class="banner error" role="alert">
+      <div v-if="error || catalogError" class="banner error" role="alert">
         <i aria-hidden="true" class="ri-error-warning-line"></i
-        ><span>{{ error }}</span
+        ><span>{{ error || catalogError }}</span
         ><button
           class="icon-button small"
           :aria-label="t('Закрыть сообщение')"
-          @click="error = ''"
+          @click="error ? (error = '') : (catalogError = '')"
         >
           <i aria-hidden="true" class="ri-close-line"></i>
         </button>
@@ -1523,12 +1695,7 @@ onBeforeUnmount(() => {
               <p>
                 {{
                   settings.configured
-                    ? t("{0} файлов{1}", {
-                        "0": total,
-                        "1": childFolders.length
-                          ? t(" · {0} папок", { "0": childFolders.length })
-                          : "",
-                      })
+                    ? listingSummary
                     : t("Пространство для ваших файлов, фотографий и идей")
                 }}
               </p>
@@ -1827,9 +1994,8 @@ onBeforeUnmount(() => {
               </button>
             </div>
             <div v-if="view === 'list' && files.length" class="list-heading">
-              <span>{{ t("Название") }}</span><span>{{ t("Размер") }}</span
-              ><span>{{ t("Дата добавления") }}</span
-              ><span></span>
+              <span>{{ t("Название") }}</span><span>{{ t("Размер") }}</span>
+              ><span>{{ t("Дата добавления") }}</span> ><span></span>
             </div>
             <div
               :key="scope"
@@ -1992,7 +2158,10 @@ onBeforeUnmount(() => {
                 {{ t("В R2 уже есть файлы? Добавить в каталог") }}
               </button>
             </div>
-            <div v-if="loading && !loadingMore" class="loading-state">
+            <div
+              v-if="loading && !loadingMore && !checkingCatalog"
+              class="loading-state"
+            >
               <i aria-hidden="true" class="ri-loader-4-line spinning"></i
               >{{ t("Загрузка каталога…") }}
             </div>
@@ -2001,7 +2170,7 @@ onBeforeUnmount(() => {
               ref="loadMoreButton"
               class="button load-more"
               :disabled="!canLoadMore"
-              @click="reload(true)"
+              @click="loadNextPage()"
             >
               <i
                 v-if="loadingMore"
@@ -2013,9 +2182,8 @@ onBeforeUnmount(() => {
                   ? t("Загрузка каталога…")
                   : pageFailed
                     ? t("Повторить")
-                    : t("Показать ещё · {0} из {1}", {
+                    : t("Показать ещё · {0} загружено", {
                         "0": files.length,
-                        "1": total,
                       })
               }}
             </button>
@@ -2122,9 +2290,11 @@ onBeforeUnmount(() => {
     :jobs="uploadJobs"
     :pending="pendingUploads"
     :has-finished="hasFinishedUploads"
+    :retrying="retryingUploads"
     @close="uploadsOpen = false"
     @clear="clearFinishedUploads"
     @conflict="uploadConflictOpen = true"
+    @retry="retryUpload"
   />
   <UploadConflictDialog
     v-if="uploadConflict && uploadConflictOpen"
@@ -2411,9 +2581,18 @@ onBeforeUnmount(() => {
       <button
         class="preview-arrow next"
         :aria-label="t('Следующий файл')"
+        :aria-busy="previewPageLoading"
+        :disabled="previewPageLoading"
         @click="nextPreview(1)"
       >
-        <i aria-hidden="true" class="ri-arrow-right-s-line"></i>
+        <i
+          aria-hidden="true"
+          :class="
+            previewPageLoading
+              ? 'ri-loader-4-line spinning'
+              : 'ri-arrow-right-s-line'
+          "
+        ></i>
       </button>
     </div>
     <footer class="preview-footer">

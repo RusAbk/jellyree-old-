@@ -38,6 +38,19 @@ const thumbnailMedia = new ThumbnailMedia((url, options) =>
 let thumbnailCache;
 const previewRequests = new Map();
 const cacheNamespace = () => `${library.id}:${library.config.databaseId}`;
+const catalogMutations = new Set([
+  "files:update",
+  "files:delete",
+  "files:save-text-document",
+  "files:save-video-frame",
+  "files:pick-upload",
+  "files:drop-upload",
+  "files:retry-upload",
+  "files:import",
+  "folders:create",
+  "folders:update",
+  "folders:delete",
+]);
 const uploadConflicts = new UploadConflictBroker();
 const uploads = new OperationQueue();
 const documentWrites = new OperationQueue();
@@ -63,6 +76,19 @@ const redact = (message) => {
       result = result.replaceAll(store.current[key], t("[скрыто]"));
   return result;
 };
+function enableCatalogCache(source) {
+  const name = `${source.id}-${source.config.databaseId}.sqlite`;
+  try {
+    source.enableCatalogCache(
+      path.join(app.getPath("userData"), "catalog-v1", name),
+    );
+  } catch (error) {
+    console.warn(
+      "Could not open the local catalog cache:",
+      redact(error.message),
+    );
+  }
+}
 async function previewRequest(id, operation, timeoutMs = 45000) {
   if (id !== undefined && (typeof id !== "string" || !id || id.length > 128))
     throw new TypeError("Invalid preview request");
@@ -111,6 +137,7 @@ function handle(name, fn, needsLibrary = true) {
       try {
         return { ok: true, value: await fn(...args) };
       } finally {
+        if (catalogMutations.has(name)) library?.catalog?.invalidate();
         if (needsLibrary) activeOperations--;
       }
     } catch (error) {
@@ -149,13 +176,11 @@ function progress(value) {
   if (!window?.isDestroyed())
     window.webContents.send("jellyree:progress", value);
 }
-function uploadPaths(paths, folderId, jobId) {
+function runUpload(jobId, task) {
   progress({ kind: "upload", jobId, phase: "queued", done: 0 });
   return uploads.run(() => {
     progress({ kind: "upload", jobId, phase: "preparing", done: 0 });
-    return library.uploadPaths(
-      paths,
-      folderId,
+    return task(
       (value) =>
         progress({ kind: "upload", jobId, phase: "uploading", ...value }),
       (info, validate) =>
@@ -167,6 +192,11 @@ function uploadPaths(paths, folderId, jobId) {
         ),
     );
   });
+}
+function uploadPaths(paths, folderId, jobId) {
+  return runUpload(jobId, (report, resolveConflict) =>
+    library.uploadPaths(paths, folderId, report, resolveConflict),
+  );
 }
 function refreshMenu() {
   Menu.setApplicationMenu(
@@ -247,6 +277,7 @@ function registerHandlers() {
           await candidate.initialize();
           const summary = await store.save(config);
           library?.close();
+          enableCatalogCache(candidate);
           library = candidate;
           thumbnailMedia.clear();
           startupError = "";
@@ -263,8 +294,9 @@ function registerHandlers() {
     () =>
       connectionOperation(async () => {
         await store.clear();
-        library?.close();
+        const previous = library;
         library = null;
+        previous?.close(true);
         thumbnailMedia.clear();
         return { configured: false, persisted: false };
       }),
@@ -509,18 +541,23 @@ function registerHandlers() {
   handle("files:drop-upload", (paths, folderId, jobId) =>
     uploadPaths(paths, folderId, jobId),
   );
+  handle("files:retry-upload", (ids, jobId) =>
+    runUpload(jobId, (report, resolveConflict) =>
+      library.retryUploads(ids, report, resolveConflict),
+    ),
+  );
   handle("files:import", () =>
     uploads.run(() =>
       library.importBucket((value) => progress({ kind: "import", ...value })),
     ),
   );
-  handle("folders:list", () => library.folders());
+  handle("folders:list", () => library.cachedFolders());
   handle("folders:create", (name, parentId) =>
     library.createFolder(name, parentId),
   );
   handle("folders:update", (id, input) => library.updateFolder(id, input));
   handle("folders:delete", (id) => library.deleteFolder(id));
-  handle("stats", () => library.stats());
+  handle("stats", () => library.cachedStats());
 }
 async function createWindow() {
   window = new BrowserWindow({
@@ -605,6 +642,7 @@ else {
         await store.load();
         if (store.current) {
           library = new Library(store.current);
+          enableCatalogCache(library);
         }
       } catch (error) {
         startupError = redact(error.message);

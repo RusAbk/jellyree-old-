@@ -302,6 +302,10 @@ export const messages = {
     en: "{0} files{1}",
     es: "{0} archivos{1}",
   },
+  "Показано {0} файлов{1}": {
+    en: "{0} files shown{1}",
+    es: "{0} archivos visibles{1}",
+  },
   " · {0} папок": {
     en: " · {0} folders",
     es: " · {0} carpetas",
@@ -434,9 +438,9 @@ export const messages = {
     en: "Loading catalog…",
     es: "Cargando catálogo…",
   },
-  "Показать ещё · {0} из {1}": {
-    en: "Load more · {0} of {1}",
-    es: "Mostrar más · {0} de {1}",
+  "Показать ещё · {0} загружено": {
+    en: "Load more · {0} shown",
+    es: "Mostrar más · {0} visibles",
   },
   "Прямое подключение к вашему Cloudflare": {
     en: "Direct connection to your Cloudflare",
@@ -884,6 +888,14 @@ export const messages = {
   "Некорректный список файлов.": {
     en: "Invalid file list.",
     es: "Lista de archivos no válida.",
+  },
+  "Эти загрузки больше недоступны для повтора.": {
+    en: "These uploads are no longer available to retry.",
+    es: "Estas cargas ya no están disponibles para reintentar.",
+  },
+  "Повторить неудачные": {
+    en: "Retry failed uploads",
+    es: "Reintentar cargas fallidas",
   },
   "Для совпадающих имён требуется решение пользователя.": {
     en: "Duplicate names require a user decision.",

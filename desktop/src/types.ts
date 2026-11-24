@@ -45,6 +45,9 @@ export type ListInput = {
   tag?: string;
   sort?: string;
   page?: number;
+  throughPage?: number;
+  includeTotal?: boolean;
+  refresh?: boolean;
 };
 export type FilePatch = {
   name?: string;
@@ -97,7 +100,15 @@ export type UploadResult = {
   skipped?: number;
   canceled?: boolean;
   warnings?: string[];
-  failures: { name: string; message: string }[];
+  failures: {
+    name: string;
+    message: string;
+    retryId?: string;
+    fileIndex?: number;
+    targetPath?: string;
+    sizeBytes?: number;
+  }[];
+  resolvedRetryIds?: string[];
 };
 export type UploadConflict = {
   jobId?: string;
@@ -140,7 +151,7 @@ export interface Jellyree {
   };
   list(input: ListInput): Promise<{
     items: DriveFile[];
-    total: number;
+    total?: number;
     hasMore: boolean;
     page: number;
   }>;
@@ -194,6 +205,7 @@ export interface Jellyree {
     folderId: string | null,
     jobId?: string,
   ): Promise<UploadResult>;
+  retryUpload(ids: string[], jobId?: string): Promise<UploadResult>;
   importBucket(): Promise<{ scanned: number }>;
   answerUploadConflict(input: UploadConflictAnswer): Promise<void>;
   onUploadConflict(callback: (conflict: UploadConflict) => void): () => void;

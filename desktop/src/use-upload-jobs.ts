@@ -81,13 +81,14 @@ export function uploadPercent(progress?: Progress) {
   return Math.max(0, Math.min(100, Math.round(value * 100)));
 }
 export function useUploadJobs(
-  bridge: Pick<Jellyree, "pickUpload" | "dropUpload">,
+  bridge: Pick<Jellyree, "pickUpload" | "dropUpload" | "retryUpload">,
   refresh: () => void,
 ) {
   const jobs = ref<UploadJob[]>([]);
   const panelOpen = ref(false);
   const conflict = ref<UploadConflict | null>(null);
   const conflictOpen = ref(false);
+  const retrying = ref(new Set<string>());
   let wave = 0;
   const pending = computed(
     () => jobs.value.filter((job) => !finished(job)).length,
@@ -115,11 +116,29 @@ export function useUploadJobs(
     id
       ? jobs.value.find((job) => job.id === id)
       : jobs.value.find((job) => !finished(job));
-  async function start(
+  function start(
     folders: boolean,
     files: File[] | undefined,
     folderId: string | null,
     destination: string,
+  ) {
+    return run(
+      folders,
+      files?.map((file) => file.name) ?? [],
+      destination,
+      files ? "queued" : "selecting",
+      (id) =>
+        files
+          ? bridge.dropUpload(files, folderId, id)
+          : bridge.pickUpload(folderId, folders, id),
+    );
+  }
+  async function run(
+    folders: boolean,
+    names: string[],
+    destination: string,
+    state: "selecting" | "queued",
+    upload: (id: string) => Promise<UploadResult>,
   ) {
     if (!pending.value) {
       wave++;
@@ -130,16 +149,14 @@ export function useUploadJobs(
       wave,
       files: [],
       folders,
-      names: files?.map((file) => file.name) || [],
+      names,
       destination,
-      state: files ? "queued" : "selecting",
+      state,
     });
     jobs.value.push(job);
     panelOpen.value = true;
     try {
-      const result = await (files
-        ? bridge.dropUpload(files, folderId, job.id)
-        : bridge.pickUpload(folderId, folders, job.id));
+      const result = await upload(job.id);
       job.result = result;
       job.state = result.canceled
         ? "canceled"
@@ -149,9 +166,30 @@ export function useUploadJobs(
       for (const file of job.files.filter((file) => file.state === "uploading"))
         file.state = result.canceled
           ? "canceled"
-          : result.failures.some((failure) => failure.name === file.name)
+          : result.failures.some((failure) =>
+                failure.fileIndex === undefined
+                  ? failure.name === file.name
+                  : failure.fileIndex === file.index,
+              )
             ? "failed"
             : "uploaded";
+      const rows = new Map(job.files.map((file) => [file.index, file]));
+      for (const failure of result.failures) {
+        if (failure.fileIndex === undefined) continue;
+        const failed = {
+          index: failure.fileIndex,
+          name: failure.name,
+          state: "failed" as const,
+          destination: failure.targetPath,
+          sizeBytes: failure.sizeBytes,
+          error: failure.message,
+        };
+        const existing = rows.get(failed.index);
+        if (existing) Object.assign(existing, failed);
+        else job.files.push(failed);
+      }
+      job.files.sort((a, b) => a.index - b.index);
+      return result;
     } catch (error) {
       job.error = (error as Error).message;
       job.state = "failed";
@@ -160,7 +198,51 @@ export function useUploadJobs(
         conflict.value = null;
         conflictOpen.value = false;
       }
-      refresh();
+      if (jobs.value.includes(job)) refresh();
+    }
+  }
+  async function retry(jobId: string, retryId?: string) {
+    const job = findJob(jobId);
+    if (!job?.result || !finished(job) || job.cleared) return;
+    const failures = job.result.failures.filter(
+      (failure) => !retryId || failure.retryId === retryId,
+    );
+    const ids = failures.flatMap((failure) => failure.retryId ?? []);
+    if (!ids.length || ids.some((id) => retrying.value.has(id))) return;
+    for (const id of ids) retrying.value.add(id);
+    try {
+      const result = await run(
+        job.folders,
+        failures.map((failure) => failure.name),
+        job.destination,
+        "queued",
+        (id) => bridge.retryUpload(ids, id),
+      );
+      if (!result) return;
+      const handled = new Set([
+        ...(result.resolvedRetryIds ?? []),
+        ...result.failures.flatMap((failure) => failure.retryId ?? []),
+      ]);
+      const indices = new Set(
+        failures
+          .filter((failure) => failure.retryId && handled.has(failure.retryId))
+          .map((failure) => failure.fileIndex),
+      );
+      job.files = job.files.filter((file) => !indices.has(file.index));
+      job.result.failures = job.result.failures.filter(
+        (failure) => !failure.retryId || !handled.has(failure.retryId),
+      );
+      if (
+        job.state === "issues" &&
+        !job.result.failures.length &&
+        !job.result.warnings?.length
+      ) {
+        if (job.files.length || job.result.done || job.result.skipped)
+          job.state = "complete";
+        else job.cleared = true;
+      }
+    } finally {
+      for (const id of ids) retrying.value.delete(id);
     }
   }
   function onProgress(value: Progress) {
@@ -203,8 +285,17 @@ export function useUploadJobs(
     else
       for (const job of jobs.value) {
         if (finished(job)) job.cleared = true;
-        job.files = job.files.filter((file) => file.state === "uploading");
+        job.files = job.files.filter(
+          (file) => file.state === "uploading" || file.state === "failed",
+        );
       }
+  }
+  function reset() {
+    jobs.value = [];
+    retrying.value.clear();
+    panelOpen.value = false;
+    conflict.value = null;
+    conflictOpen.value = false;
   }
   return {
     jobs,
@@ -216,6 +307,9 @@ export function useUploadJobs(
     conflict,
     conflictOpen,
     start,
+    retry,
+    retrying,
+    reset,
     onProgress,
     onConflict,
     resolveConflict,

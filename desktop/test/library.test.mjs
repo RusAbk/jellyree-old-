@@ -1,7 +1,14 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { DatabaseSync } from "node:sqlite";
-import { mkdtemp, writeFile, rm, readFile, stat } from "node:fs/promises";
+import {
+  mkdir,
+  mkdtemp,
+  writeFile,
+  rm,
+  readFile,
+  stat,
+} from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import {
@@ -530,6 +537,234 @@ test("drive queries paginate, scope storage, escape wildcards and search tags", 
     new Set([...first.items, ...second.items].map((f) => f.id)).size,
     88,
   );
+});
+
+test("D1 listing refreshes five pages with a single count and skips counts on continuation", async (t) => {
+  const { library, insert, requests } = fixture(t);
+  await library.initialize();
+  for (let i = 0; i < 480; i++) insert(`file-${String(i).padStart(3, "0")}`);
+  await library.list({ includeTotal: false });
+  requests.length = 0;
+  const first = await library.list({ throughPage: 5 });
+  assert.equal(first.page, 5);
+  assert.equal(first.items.length, 400);
+  assert.equal(first.total, 480);
+  assert.equal(first.hasMore, true);
+  assert.equal(requests.length, 2);
+  assert.equal(
+    requests.filter(({ sql }) => sql.includes("COUNT(*)")).length,
+    1,
+  );
+  requests.length = 0;
+  const last = await library.list({ page: 6, includeTotal: false });
+  assert.equal(last.hasMore, false);
+  assert.equal(last.items.length, 80);
+  assert.equal(last.items[0].id, "file-079");
+  assert.equal("total" in last, false);
+  assert.equal(requests.length, 1);
+  assert.doesNotMatch(requests[0].sql, /COUNT/i);
+  requests.length = 0;
+  const small = await library.list({ search: "file-479" });
+  assert.equal(small.total, 1);
+  assert.equal(requests.length, 1);
+});
+
+test("catalog cache persists pages and reconciles updates, moves and deletions by revision", async (t) => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "jr-catalog-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const filename = path.join(dir, "catalog.sqlite");
+  const { library, insert, requests, sqlite, db } = fixture(t);
+  await library.initialize();
+  const album = await library.createFolder("Album");
+  for (let index = 1; index <= 180; index++) {
+    insert(`file-${String(index).padStart(3, "0")}`);
+  }
+  library.enableCatalogCache(filename);
+  t.after(() => library.close());
+  const first = await library.list({ includeTotal: false });
+  assert.equal(first.items[0].id, "file-180");
+  assert.equal(first.items.at(-1).id, "file-101");
+  assert.equal(first.hasMore, true);
+  assert.deepEqual(
+    (await library.cachedFolders()).map((folder) => folder.id),
+    [album.id],
+  );
+  await library.cachedStats();
+
+  requests.length = 0;
+  assert.deepEqual(await library.list({ includeTotal: false }), first);
+  await library.cachedFolders();
+  await library.cachedStats();
+  assert.equal(requests.length, 0);
+
+  library.close();
+  library.enableCatalogCache(filename);
+  assert.deepEqual(await library.list({ includeTotal: false }), first);
+  await library.cachedFolders();
+  await library.cachedStats();
+  assert.equal(
+    requests.filter(({ sql }) => /SELECT \* FROM jr_files/i.test(sql)).length,
+    0,
+  );
+  assert.equal(
+    requests.filter(({ sql }) => /SELECT revision, token/.test(sql)).length,
+    2,
+  );
+
+  requests.length = 0;
+  const second = await library.list({ page: 2, includeTotal: false });
+  assert.equal(second.items[0].id, "file-100");
+  assert.equal(second.items.at(-1).id, "file-021");
+  assert.equal(requests.length, 1);
+  assert.match(requests[0].sql, /\(created_at, id\) < \(\?, \?\)/);
+  assert.doesNotMatch(requests[0].sql, /OFFSET|COUNT/i);
+  assert.equal(requests[0].params.at(-1), 80);
+  const plan = sqlite
+    .prepare(`EXPLAIN QUERY PLAN ${requests[0].sql}`)
+    .all(...requests[0].params);
+  assert.ok(
+    plan.some(({ detail }) => detail.includes("jr_active_folder_date")),
+  );
+  assert.ok(plan.every(({ detail }) => !detail.includes("TEMP B-TREE")));
+
+  // Simulate another client, including two updates with no updated_at change.
+  sqlite
+    .prepare("UPDATE jr_files SET name = ? WHERE id = ?")
+    .run("first name", "file-180");
+  sqlite
+    .prepare("UPDATE jr_files SET name = ? WHERE id = ?")
+    .run("final name", "file-180");
+  sqlite
+    .prepare("UPDATE jr_files SET folder_id = ? WHERE id = ?")
+    .run(album.id, "file-179");
+  sqlite.prepare("DELETE FROM jr_files WHERE id = ?").run("file-178");
+  sqlite
+    .prepare("UPDATE jr_folders SET name = ? WHERE id = ?")
+    .run("Updated album", album.id);
+  insert("file-181");
+  library.catalog.invalidate();
+  requests.length = 0;
+  const changed = await library.list({ includeTotal: false });
+  assert.deepEqual(
+    changed.items.slice(0, 3).map(({ id }) => id),
+    ["file-181", "file-180", "file-177"],
+  );
+  assert.equal(changed.items[1].name, "final name");
+  assert.equal(changed.items[1].updated_at, first.items[0].updated_at);
+  assert.equal(requests.length, 3);
+  assert.match(requests[0].sql, /SELECT revision, token/);
+  assert.match(requests[1].sql, /revision > \?/);
+  assert.equal((await library.cachedFolders())[0].name, "Updated album");
+
+  const all = await library.list({ throughPage: 3, includeTotal: false });
+  assert.equal(all.hasMore, false);
+  assert.equal(all.items.length, 179);
+  requests.length = 0;
+  const searched = await library.list({
+    search: "final name",
+    sort: "name",
+    includeTotal: false,
+  });
+  assert.equal(searched.items[0].id, "file-180");
+  assert.equal(requests.length, 1);
+  assert.match(requests[0].sql, /SELECT revision, token/);
+  const moved = await library.list({ folderId: album.id, includeTotal: false });
+  assert.deepEqual(
+    moved.items.map(({ id }) => id),
+    ["file-179"],
+  );
+
+  // An exhausted D1 quota still permits browsing data already on disk.
+  db.request = async () => {
+    throw new Error("D1 row read limit exceeded");
+  };
+  library.catalog.invalidate();
+  assert.deepEqual(
+    await library.list({ throughPage: 3, includeTotal: false }),
+    all,
+  );
+  assert.deepEqual(
+    await library.list({ folderId: album.id, includeTotal: false }),
+    moved,
+  );
+  await assert.rejects(
+    library.list({ section: "trash", includeTotal: false }),
+    /D1 row read limit exceeded/,
+  );
+});
+
+test("catalog checks only the open folder and requested ranges, then validates a different view on navigation", async (t) => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "jr-catalog-scope-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const { library, insert, requests, sqlite } = fixture(t);
+  await library.initialize();
+  const first = await library.createFolder("First");
+  const second = await library.createFolder("Second");
+  const third = await library.createFolder("Third");
+  for (let i = 1; i <= 165; i++) {
+    insert(`first-${String(i).padStart(3, "0")}`, { folder: first.id });
+  }
+  insert("second-file", { folder: second.id });
+  library.enableCatalogCache(path.join(dir, "catalog.sqlite"));
+  t.after(() => library.close());
+  const list = (folder, page = 1) =>
+    library.list({ folderId: folder.id, page, includeTotal: false });
+  await list(first, 2);
+  await list(second);
+
+  const rename = sqlite.prepare("UPDATE jr_files SET name = ? WHERE id = ?");
+  rename.run("changed in second", "second-file");
+  library.catalog.invalidate();
+  requests.length = 0;
+  await list(first);
+  assert.equal(requests.length, 1);
+  assert.deepEqual(requests[0].params, [library.id, `folder:${first.id}`]);
+  const plan = sqlite
+    .prepare(`EXPLAIN QUERY PLAN ${requests[0].sql}`)
+    .all(...requests[0].params);
+  assert.ok(plan.some(({ detail }) => detail.includes("jr_change_by_scope")));
+
+  rename.run("changed on first page", "first-164");
+  rename.run("changed on second page", "first-040");
+  library.catalog.invalidate();
+  requests.length = 0;
+  const top = await list(first);
+  assert.equal(
+    top.items.find(({ id }) => id === "first-164").name,
+    "changed on first page",
+  );
+  assert.equal(requests.length, 2);
+  assert.ok(
+    requests.every(({ params }) => !params.includes(`folder:${second.id}`)),
+  );
+  const deltaPlan = sqlite
+    .prepare(`EXPLAIN QUERY PLAN ${requests[1].sql}`)
+    .all(...requests[1].params);
+  assert.ok(
+    deltaPlan.some(({ detail }) => detail.includes("jr_change_by_scope")),
+  );
+  const cachedName = library.catalog.local.prepare(
+    "SELECT name FROM jr_files WHERE id = ?",
+  );
+  assert.equal(cachedName.get("first-040").name, "first-040.jpg");
+  assert.equal(cachedName.get("second-file").name, "second-file.jpg");
+  assert.equal(
+    (await list(first, 2)).items.find(({ id }) => id === "first-040").name,
+    "changed on second page",
+  );
+
+  requests.length = 0;
+  assert.equal((await list(second)).items[0].name, "changed in second");
+  assert.equal(requests.length, 2);
+  assert.ok(
+    requests.every(({ params }) => params[1] === `folder:${second.id}`),
+  );
+
+  const move = sqlite.prepare("UPDATE jr_files SET folder_id = ? WHERE id = ?");
+  move.run(third.id, "second-file");
+  move.run(first.id, "second-file");
+  assert.equal((await list(first)).items[0].id, "second-file");
+  assert.deepEqual((await list(second)).items, []);
 });
 
 test("bulk metadata and trash restoration preserve object keys and isolate libraries", async (t) => {
@@ -1128,6 +1363,86 @@ test("names in different folders do not conflict, while duplicate incoming basen
   );
   assert.equal(flat.done, 2);
   assert.equal(prompts, 1);
+});
+
+test("retry uses the original source and destination for each failed upload", async (t) => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "jr-retry-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  for (const sub of ["a", "b", "c"]) {
+    await mkdir(path.join(dir, sub));
+    await writeFile(path.join(dir, sub, "same.txt"), sub);
+  }
+  const { library } = fixture(t);
+  await library.initialize();
+  const target = await library.createFolder("Target");
+  const boundUploadFile = library.uploadFile.bind(library);
+  const attempts = [];
+  library.uploadFile = async (source, folder, report, options) => {
+    const sub = path.basename(path.dirname(source));
+    attempts.push({ sub, folder, name: options.name });
+    if (
+      attempts.filter((attempt) => attempt.sub === sub).length === 1 &&
+      sub !== "a"
+    )
+      throw new Error("Network interrupted");
+    return boundUploadFile(source, folder, report, options);
+  };
+  library.createUpload = ({ params }) => ({
+    on() {},
+    async done() {
+      params.Body.destroy();
+    },
+  });
+  const result = await library.uploadPaths(
+    ["a", "b", "c"].map((sub) => path.join(dir, sub)),
+    target.id,
+  );
+  assert.equal(result.done, 1);
+  const [b, c] = result.failures;
+  assert.equal(b.fileIndex, 1);
+  assert.equal(c.fileIndex, 2);
+  assert.notEqual(b.retryId, c.retryId);
+  assert.equal(JSON.stringify(result).includes(dir), false);
+  await assert.rejects(library.retryUploads([path.join(dir, "a", "same.txt")]));
+  const folders = await library.folders();
+  const folderB = folders.find((folder) => folder.name === "b");
+  const folderC = folders.find((folder) => folder.name === "c");
+  assert.equal(folderB.parent_id, target.id);
+  assert.equal(folderC.parent_id, target.id);
+
+  const single = await library.retryUploads([c.retryId, c.retryId]);
+  assert.equal(single.done, 1);
+  assert.deepEqual(single.resolvedRetryIds, [c.retryId]);
+  await assert.rejects(library.retryUploads([c.retryId]));
+
+  // Another device may have created a same-name file before the retry.
+  await boundUploadFile(path.join(dir, "b", "same.txt"), folderB.id);
+  const canceled = await library.retryUploads(
+    [b.retryId],
+    () => {},
+    async () => ({
+      action: "cancel",
+    }),
+  );
+  assert.equal(canceled.canceled, true);
+  const retried = await library.retryUploads(
+    [b.retryId],
+    () => {},
+    async (info) => {
+      assert.equal(info.targetPath, "Target / b");
+      return { action: "rename", name: "renamed.txt" };
+    },
+  );
+  assert.equal(retried.done, 1);
+  assert.deepEqual(retried.resolvedRetryIds, [b.retryId]);
+  assert.deepEqual(
+    attempts.map(({ sub }) => sub),
+    ["a", "b", "c", "c", "b"],
+  );
+  assert.deepEqual(attempts.slice(-2), [
+    { sub: "c", folder: folderC.id, name: "same.txt" },
+    { sub: "b", folder: folderB.id, name: "renamed.txt" },
+  ]);
 });
 
 test("canceling a duplicate decision stops the remaining batch without changing originals", async (t) => {

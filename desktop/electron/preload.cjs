@@ -58,6 +58,7 @@ contextBridge.exposeInMainWorld("jellyree", {
       folderId,
       jobId,
     ),
+  retryUpload: (ids, jobId) => invoke("files:retry-upload", ids, jobId),
   importBucket: () => invoke("files:import"),
   answerUploadConflict: (input) => invoke("uploads:answer", input),
   onUploadConflict: (callback) => {

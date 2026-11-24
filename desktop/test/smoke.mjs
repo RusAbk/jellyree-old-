@@ -454,7 +454,13 @@ try {
         .getBuiltinModule("module")
         .createRequire(queuePath)(queuePath);
       const queue = new OperationQueue();
-      const state = { records: [], active: null, resolve: null, downloads: [] };
+      const state = {
+        records: [],
+        active: null,
+        resolve: null,
+        downloads: [],
+        retries: [],
+      };
       globalThis.__jellyreeBackgroundFixture = state;
       const fixture = globalThis.__jellyreeIpcFixture;
       for (const id of ["during-upload", "extra-1", "extra-2"]) {
@@ -474,13 +480,14 @@ try {
               file.folder_id === (input.folderId || null)),
         );
         const page = input.page || 1;
+        const end = input.throughPage || page;
         return {
           ok: true,
           value: {
-            items: items.slice((page - 1) * 2, page * 2),
-            total: items.length,
-            page,
-            hasMore: items.length > page * 2,
+            items: items.slice((page - 1) * 2, end * 2),
+            ...(input.includeTotal ? { total: items.length } : {}),
+            page: end,
+            hasMore: items.length > end * 2,
           },
         };
       });
@@ -515,6 +522,31 @@ try {
           });
         });
       }
+      ipcMain.removeHandler("jellyree:files:retry-upload");
+      ipcMain.handle("jellyree:files:retry-upload", (_event, ids, jobId) =>
+        queue.run(async () => {
+          state.retries.push(ids);
+          for (const [index, id] of ids.entries()) {
+            BrowserWindow.getAllWindows()[0].webContents.send(
+              "jellyree:progress",
+              {
+                kind: "upload",
+                jobId,
+                name: "failed.jpg",
+                fileIndex: index,
+                done: index + 1,
+                total: ids.length,
+                fileState: "uploaded",
+                targetPath: id === "retry-a" ? "Альбом / a" : "Альбом / b",
+              },
+            );
+          }
+          return {
+            ok: true,
+            value: { done: ids.length, failures: [], resolvedRetryIds: ids },
+          };
+        }),
+      );
       ipcMain.removeHandler("jellyree:files:download");
       ipcMain.handle("jellyree:files:download", (_event, ids) => {
         state.downloads.push({ ids, duringUpload: !!state.active });
@@ -694,7 +726,7 @@ try {
   );
   await nativeAlbum.click();
   await window.getByRole("heading", { name: "Альбом", exact: true }).waitFor();
-  await electron.evaluate(() => {
+  await electron.evaluate(({ BrowserWindow }) => {
     const state = globalThis.__jellyreeBackgroundFixture;
     const files = globalThis.__jellyreeIpcFixture.files;
     files.unshift({
@@ -703,10 +735,29 @@ try {
       name: "uploaded-second.txt",
       folder_id: state.active.folderId,
     });
+    for (const [index, sub] of ["a", "b"].entries()) {
+      BrowserWindow.getAllWindows()[0].webContents.send("jellyree:progress", {
+        kind: "upload",
+        jobId: state.active.id,
+        name: "failed.jpg",
+        fileIndex: index + 1,
+        done: index + 2,
+        total: 3,
+        fileState: "failed",
+        targetPath: `Альбом / ${sub}`,
+        message: "Test network failure",
+      });
+    }
     state.resolve({
       done: 1,
       skipped: 0,
-      failures: [{ name: "failed.jpg", message: "Test network failure" }],
+      failures: ["a", "b"].map((sub, index) => ({
+        name: "failed.jpg",
+        message: index ? "Test network failure B" : "Test network failure",
+        fileIndex: index + 1,
+        retryId: `retry-${sub}`,
+        targetPath: `Альбом / ${sub}`,
+      })),
     });
   });
   await nativeFile("uploaded-second.txt").waitFor();
@@ -721,7 +772,7 @@ try {
     .getByRole("button", { name: "Загрузки", exact: true })
     .click();
   await uploads.getByRole("tab", { name: /Загруженные/ }).click();
-  await uploads.locator('.upload-job[data-state="issues"]').waitFor();
+  await uploads.locator('.upload-job[data-state="issues"]').first().waitFor();
   assert.equal(await uploads.getByRole("progressbar").count(), 0);
   assert.equal(await window.locator(".upload-compact-percent").count(), 0);
   await uploads.getByText("Подробности", { exact: false }).click();
@@ -755,6 +806,25 @@ try {
   await window.screenshot({
     path: path.join(os.tmpdir(), "jellyree-background-uploads.png"),
   });
+  await uploads
+    .locator('.upload-job[data-state="issues"]')
+    .filter({ hasText: "Альбом / b" })
+    .getByRole("button", { name: "Повторить", exact: true })
+    .click();
+  await uploads
+    .locator('.upload-job[data-state="issues"]')
+    .filter({ hasText: "Альбом / b" })
+    .waitFor({ state: "detached" });
+  await uploads.getByRole("button", { name: "Повторить неудачные" }).click();
+  await uploads.locator('.upload-job[data-state="issues"]').first().waitFor({
+    state: "detached",
+  });
+  assert.deepEqual(
+    await electron.evaluate(
+      () => globalThis.__jellyreeBackgroundFixture.retries,
+    ),
+    [["retry-b"], ["retry-a"]],
+  );
   await uploads
     .getByRole("button", { name: "Убрать завершённые", exact: true })
     .click();
@@ -1675,21 +1745,36 @@ try {
 
   await page.evaluate(() => {
     const list = window.jellyree.list;
-    const state = { pages: [] };
+    const stats = window.jellyree.stats;
+    const folders = window.jellyree.folders;
+    const state = { pages: [], metadata: [], counts: [] };
     window.__paginationFixture = state;
     const gate = new Promise((resolve) => {
       state.finish = resolve;
     });
+    const lastGate = new Promise((resolve) => {
+      state.finishLast = resolve;
+    });
+    window.jellyree.stats = () => {
+      state.metadata.push("stats");
+      return stats();
+    };
+    window.jellyree.folders = () => {
+      state.metadata.push("folders");
+      return folders();
+    };
     window.jellyree.list = async (input) => {
       if (input.search !== "pagination") return list(input);
       const page = input.page;
       state.pages.push(page);
+      state.counts.push(input.includeTotal);
       if (page === 2 && state.pages.filter((n) => n === 2).length === 1)
         throw new Error("Pagination test: temporary failure");
       if (page === 3) await gate;
-      const size = page === 3 ? 1 : 25;
+      if (page === 4) await lastGate;
+      const size = page >= 3 ? 1 : 25;
       const items = Array.from({ length: size }, (_, index) => {
-        const id = (page - 1) * 25 + index + 1;
+        const id = page >= 3 ? 48 + page : (page - 1) * 25 + index + 1;
         return {
           id: `pagination-${id}`,
           name: `pagination-${id}.txt`,
@@ -1700,7 +1785,12 @@ try {
           created_at: "2026-11-01",
         };
       });
-      return { items, total: 51, page, hasMore: page < 3 };
+      return {
+        items,
+        ...(input.includeTotal ? { total: 52 } : {}),
+        page,
+        hasMore: page < 4,
+      };
     };
   });
   await tripTree.click();
@@ -1773,10 +1863,40 @@ try {
     await page.evaluate(() => window.__paginationFixture.pages),
     [1, 2, 2],
   );
-  await page.locator(".load-more").scrollIntoViewIfNeeded();
+  await page
+    .locator('[data-file-id="pagination-50"]')
+    .dispatchEvent("dblclick");
+  const viewer = page.getByRole("dialog", {
+    name: "Просмотр файла",
+    exact: true,
+  });
+  const next = viewer.getByRole("button", {
+    name: "Следующий файл",
+    exact: true,
+  });
+  await next.click();
+  await page.keyboard.press("ArrowRight");
   await page.waitForFunction(() =>
     window.__paginationFixture.pages.includes(3),
   );
+  await viewer
+    .locator(".preview-header")
+    .filter({ hasText: "pagination-50.txt" })
+    .waitFor();
+  assert.equal(await next.getAttribute("aria-busy"), "true");
+  await page.evaluate(() => window.__paginationFixture.finish());
+  await viewer
+    .locator(".preview-header")
+    .filter({ hasText: "pagination-51.txt" })
+    .waitFor();
+  await page.keyboard.press("ArrowRight");
+  await page.waitForFunction(() =>
+    window.__paginationFixture.pages.includes(4),
+  );
+  await viewer
+    .getByRole("button", { name: "Закрыть просмотр", exact: true })
+    .click();
+  await viewer.waitFor({ state: "detached" });
   await page
     .locator(".breadcrumbs")
     .getByRole("button", { name: "Мой диск", exact: true })
@@ -1784,7 +1904,7 @@ try {
   await page.getByRole("heading", { name: "Мой диск", exact: true }).waitFor();
   await page.locator(".files[aria-busy=false]").waitFor({ state: "attached" });
   await page.evaluate(async () => {
-    window.__paginationFixture.finish();
+    window.__paginationFixture.finishLast();
     await new Promise(requestAnimationFrame);
   });
   assert.equal(
@@ -1792,13 +1912,23 @@ try {
     0,
   );
   assert.equal(await filesPane.evaluate((element) => element.scrollTop), 0);
+  await viewer.waitFor({ state: "detached" });
   assert.deepEqual(
     await page.evaluate(() => window.__paginationFixture.pages),
-    [1, 2, 2, 3],
+    [1, 2, 2, 3, 4],
+  );
+  assert.deepEqual(
+    await page.evaluate(() => window.__paginationFixture.counts),
+    [false, false, false, false, false],
+  );
+  assert.deepEqual(
+    await page.evaluate(() => window.__paginationFixture.metadata),
+    [],
   );
   console.log(
     "PASS: only the file pane scrolls (wheel and selection), header and breadcrumbs stay fixed, pagination and folder reset work",
   );
+
   assert.deepEqual(rendererErrors, []);
   console.log(
     "PASS: connected UI, rename, trash, restore, create folder, list, search, preview, edit",
