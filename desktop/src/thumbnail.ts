@@ -45,6 +45,13 @@ export function thumbnailRevision(file: DriveFile): ThumbnailRevision {
       : {},
   };
 }
+export function managedMediaUrl(value: string) {
+  if (value.startsWith("jellyree-media:")) return true;
+  if (!value || !document.documentElement.classList.contains("mobile-app"))
+    return false;
+  const url = new URL(value, document.baseURI);
+  return url.origin === location.origin && url.pathname.includes("/_media/");
+}
 export function thumbnailBytes(
   canvas: HTMLCanvasElement,
 ): Promise<Uint8Array | null> {

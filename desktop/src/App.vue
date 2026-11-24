@@ -13,7 +13,7 @@ import FileThumb from "./FileThumb.vue";
 import VideoPlayer from "./VideoPlayer.vue";
 import DocumentViewer from "./DocumentViewer.vue";
 import { documentKind } from "../electron/document-preview.mjs";
-import { thumbnailRevision } from "./thumbnail";
+import { managedMediaUrl, thumbnailRevision } from "./thumbnail";
 import PhotoEditor from "./PhotoEditor.vue";
 import TagEditor from "./TagEditor.vue";
 import { isImageFile } from "../electron/image-formats.mjs";
@@ -53,6 +53,8 @@ import type {
 } from "./types";
 
 const settings = ref<Settings>({ configured: false, persisted: false });
+const mobile = document.documentElement.classList.contains("mobile-app");
+const mobileMenuOpen = ref(false);
 const documentViewer = ref<InstanceType<typeof DocumentViewer>>(),
   documentVersion = ref(0);
 let previewNavigation = 0;
@@ -640,6 +642,7 @@ function toggleExpanded(id: string) {
   expanded.value = set;
 }
 function navigate(next: string, id: string | null = null, nextTag = "") {
+  mobileMenuOpen.value = false;
   closeContextMenu();
   if (
     (isTimeline.value && next !== "timeline") ||
@@ -1176,6 +1179,63 @@ function select(
     selectionAnchor = file.id;
   } else selectOnly(file.id);
 }
+function tapFile(
+  file: DriveFile,
+  event: MouseEvent | KeyboardEvent,
+  toggle = false,
+) {
+  if (mobile && !toggle && !selection.value.length) void openPreview(file);
+  else select(file, event, toggle || mobile);
+}
+let touchHold: ReturnType<typeof setTimeout> | undefined;
+let heldAt: { x: number; y: number } | undefined;
+let swallowTapUntil = 0;
+function stopTouchHold() {
+  clearTimeout(touchHold);
+  touchHold = undefined;
+  heldAt = undefined;
+}
+function startTouchHold(event: PointerEvent) {
+  if (!mobile || event.pointerType !== "touch" || !event.isPrimary) return;
+  const target = (event.target as HTMLElement).closest(
+    ".file-card, .folder-card, .tree-row",
+  );
+  if (
+    !target ||
+    (event.target as HTMLElement).closest(
+      ".file-checkbox, .file-open, .file-star, .tree-chevron",
+    )
+  )
+    return;
+  stopTouchHold();
+  const { clientX, clientY } = event;
+  heldAt = { x: clientX, y: clientY };
+  touchHold = setTimeout(() => {
+    if (!target.isConnected) return;
+    swallowTapUntil = Date.now() + 700;
+    target.dispatchEvent(
+      new MouseEvent("contextmenu", {
+        bubbles: true,
+        cancelable: true,
+        clientX,
+        clientY,
+      }),
+    );
+  }, 470);
+}
+function moveTouchHold(event: PointerEvent) {
+  if (
+    heldAt &&
+    Math.hypot(heldAt.x - event.clientX, heldAt.y - event.clientY) > 9
+  )
+    stopTouchHold();
+}
+function swallowLongPressTap(event: MouseEvent) {
+  if (!mobile || Date.now() >= swallowTapUntil) return;
+  swallowTapUntil = 0;
+  event.preventDefault();
+  event.stopPropagation();
+}
 function patch(ids: string[], input: FilePatch, message = "") {
   return action(
     () => api.update(ids, input),
@@ -1188,6 +1248,7 @@ async function upload(
   dropped?: File[],
   targetFolderId = uploadFolder.value,
 ) {
+  mobileMenuOpen.value = false;
   if (typeof window.jellyree?.onUploadConflict !== "function") {
     error.value = t(
       "Перезапустите приложение, чтобы обновить обработку загрузки.",
@@ -1374,7 +1435,7 @@ async function closePreview() {
 }
 function releasePreviewMedia(url: string) {
   if (
-    url.startsWith("jellyree-media:") &&
+    managedMediaUrl(url) &&
     typeof window.jellyree.releaseMedia === "function"
   )
     void api.releaseMedia(url).catch(() => {});
@@ -1861,7 +1922,33 @@ watch(view, (value) => {
 watch(previewSize, (value) =>
   localStorage.setItem("jellyree-desktop-preview-size", String(value)),
 );
+const mobileWindow = window as Window & { jellyreeMobileBack?: () => boolean };
+function mobileBack() {
+  if (uploadConflictOpen.value) uploadConflictOpen.value = false;
+  else if (contextMenu.value) closeContextMenu();
+  else if (modal.value && !busy.value) modal.value = null;
+  else if (modal.value) return true;
+  else if (editing.value)
+    document
+      .querySelector(".photo-editor")
+      ?.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "Escape", bubbles: true }),
+      );
+  else if (previewTagsOpen.value) closePreviewTags();
+  else if (preview.value) void closePreview();
+  else if (settingsOpen.value) settingsOpen.value = false;
+  else if (mobileMenuOpen.value) mobileMenuOpen.value = false;
+  else if (uploadsOpen.value) uploadsOpen.value = false;
+  else if (inspectorOpen.value) inspectorOpen.value = false;
+  else if (selection.value.length) selection.value = [];
+  else if (currentFolder.value)
+    navigate("drive", currentFolder.value.parent_id);
+  else if (section.value !== "drive") navigate("drive");
+  else return false;
+  return true;
+}
 onMounted(async () => {
+  if (mobile) mobileWindow.jellyreeMobileBack = mobileBack;
   document.addEventListener("keydown", keydown);
   if (!window.jellyree) {
     error.value = t(
@@ -1892,6 +1979,8 @@ onMounted(async () => {
   }
 });
 onBeforeUnmount(() => {
+  if (mobile) delete mobileWindow.jellyreeMobileBack;
+  stopTouchHold();
   unsubscribe?.();
   unsubscribeConflict?.();
   clearTimeout(timer);
@@ -1909,8 +1998,19 @@ onBeforeUnmount(() => {
     @dragleave="dragleave"
     @drop="drop"
     @dragend="finishDrag"
+    @pointerdown="startTouchHold"
+    @pointermove="moveTouchHold"
+    @pointerup="stopTouchHold"
+    @pointercancel="stopTouchHold"
+    @click.capture="swallowLongPressTap"
   >
-    <aside class="sidebar">
+    <button
+      v-if="mobile && mobileMenuOpen"
+      class="mobile-menu-backdrop"
+      :aria-label="t('Закрыть меню')"
+      @click="mobileMenuOpen = false"
+    ></button>
+    <aside class="sidebar" :class="{ 'mobile-sidebar-open': mobileMenuOpen }">
       <a class="brand" href="#" @click.prevent="navigate('drive')"
         ><span class="brand-mark"
           ><i aria-hidden="true" class="ri-bubble-chart-fill"></i></span
@@ -2055,6 +2155,15 @@ onBeforeUnmount(() => {
 
     <main class="workspace">
       <header class="topbar">
+        <button
+          v-if="mobile"
+          class="icon-button mobile-open-menu"
+          :aria-label="t('Открыть меню')"
+          :aria-expanded="mobileMenuOpen"
+          @click="mobileMenuOpen = !mobileMenuOpen"
+        >
+          <i class="ri-menu-line" aria-hidden="true"></i>
+        </button>
         <div class="search-box">
           <i aria-hidden="true" class="ri-search-line"></i
           ><input
@@ -2459,7 +2568,7 @@ onBeforeUnmount(() => {
           :tabindex="isTimeline ? 0 : undefined"
           :aria-label="isTimeline ? t('Медиалента') : undefined"
           @wheel.passive="scrollTimelineNewer"
-          @pointerdown="startSelectionBox"
+          @pointerdown="!mobile && startSelectionBox($event)"
           @pointermove="moveSelectionBox"
           @pointerup="endSelectionBox"
           @pointercancel="interruptSelectionBox"
@@ -2563,7 +2672,7 @@ onBeforeUnmount(() => {
                 :preview-size="previewSize"
                 :busy="busy"
                 @day="timelineDay = $event"
-                @select="select"
+                @select="tapFile"
                 @open="openPreview"
                 @context="fileContext"
                 @drag="fileDragStart"
@@ -2609,8 +2718,8 @@ onBeforeUnmount(() => {
                   :draggable="!busy && !file.trashed_at"
                   @dragstart.stop="fileDragStart($event, file)"
                   tabindex="0"
-                  @click="select(file, $event)"
-                  @dblclick="openPreview(file)"
+                  @click="tapFile(file, $event)"
+                  @dblclick="!mobile && openPreview(file)"
                   @contextmenu="fileContext($event, file)"
                   @keydown.enter="openPreview(file)"
                   @keydown.space.self.prevent="select(file, $event, true)"
@@ -2804,6 +2913,23 @@ onBeforeUnmount(() => {
           @retry="refreshTimelineBounds"
         />
       </section>
+      <nav v-if="mobile" class="mobile-tab-bar" :aria-label="t('Библиотека')">
+        <button
+          v-for="item in nav.filter((item) =>
+            ['drive', 'timeline', 'favorites'].includes(item.id),
+          )"
+          :key="item.id"
+          :class="{ active: section === item.id && !tag }"
+          :aria-current="section === item.id ? 'page' : undefined"
+          @click="navigate(item.id)"
+        >
+          <i :class="item.icon" aria-hidden="true"></i>{{ item.label }}
+        </button>
+        <button :disabled="busy || !ready" @click="upload()">
+          <i class="ri-add-circle-line" aria-hidden="true"></i
+          >{{ t("Загрузить") }}
+        </button>
+      </nav>
       <footer class="workspace-footer">
         <span
           ><i aria-hidden="true" class="ri-shield-check-line"></i
@@ -3193,6 +3319,14 @@ onBeforeUnmount(() => {
             @pointerup="photoZoom.stop"
             @pointercancel="photoZoom.stop"
             @lostpointercapture="photoZoom.stop"
+            @touchstart.passive="!photoLoading && photoZoom.touchStart($event)"
+            @touchmove.passive="!photoLoading && photoZoom.touchMove($event)"
+            @touchend.passive="
+              ((direction) => direction && nextPreview(direction))(
+                photoZoom.touchEnd($event),
+              )
+            "
+            @touchcancel.passive="photoZoom.touchEnd($event)"
             @dragstart.prevent
           >
             <div

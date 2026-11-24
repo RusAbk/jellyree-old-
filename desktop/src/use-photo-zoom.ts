@@ -14,6 +14,17 @@ export function usePhotoZoom(stage: Ref<HTMLElement | undefined>) {
   let pointer: number | undefined;
   let startX = 0,
     startY = 0;
+  let touch:
+    | {
+        x: number;
+        y: number;
+        scale: number;
+        panX: number;
+        panY: number;
+        distance: number;
+        moved: boolean;
+      }
+    | undefined;
   const transform = computed(() =>
     scale.value === 1
       ? undefined
@@ -62,7 +73,13 @@ export function usePhotoZoom(stage: Ref<HTMLElement | undefined>) {
   }
 
   function start(event: PointerEvent) {
-    if (scale.value === 1 || event.button !== 0 || !event.isPrimary) return;
+    if (
+      event.pointerType === "touch" ||
+      scale.value === 1 ||
+      event.button !== 0 ||
+      !event.isPrimary
+    )
+      return;
     pointer = event.pointerId;
     startX = event.clientX - x.value;
     startY = event.clientY - y.value;
@@ -85,8 +102,82 @@ export function usePhotoZoom(stage: Ref<HTMLElement | undefined>) {
     if (pointer !== undefined && viewport.value?.hasPointerCapture(pointer))
       viewport.value.releasePointerCapture(pointer);
     pointer = undefined;
+    touch = undefined;
     dragging.value = false;
     reposition(1, 0, 0);
+  }
+
+  function touchPosition(event: TouchEvent) {
+    const first = event.touches[0];
+    const second = event.touches[1];
+    if (!first) return;
+    return second
+      ? {
+          x: (first.clientX + second.clientX) / 2,
+          y: (first.clientY + second.clientY) / 2,
+          distance: Math.max(
+            1,
+            Math.hypot(
+              first.clientX - second.clientX,
+              first.clientY - second.clientY,
+            ),
+          ),
+        }
+      : { x: first.clientX, y: first.clientY, distance: 0 };
+  }
+
+  function touchStart(event: TouchEvent) {
+    const point = touchPosition(event);
+    if (point)
+      touch = {
+        ...point,
+        scale: scale.value,
+        panX: x.value,
+        panY: y.value,
+        moved: !!touch?.moved,
+      };
+  }
+
+  function touchMove(event: TouchEvent) {
+    const point = touchPosition(event);
+    const box = viewport.value?.getBoundingClientRect();
+    if (!touch || !point || !box) return;
+    const next =
+      point.distance && touch.distance
+        ? clamp((touch.scale * point.distance) / touch.distance, 1, maxScale)
+        : touch.scale;
+    const ratio = next / touch.scale;
+    const tx = box.left + box.width / 2;
+    const ty = box.top + box.height / 2;
+    if (point.distance || next > 1) {
+      touch.moved = true;
+      reposition(
+        next,
+        point.x - tx + (touch.panX - touch.x + tx) * ratio,
+        point.y - ty + (touch.panY - touch.y + ty) * ratio,
+      );
+    }
+  }
+
+  function touchEnd(event: TouchEvent) {
+    const previous = touch;
+    touch = undefined;
+    if (!previous || event.type === "touchcancel") return 0;
+    if (event.touches.length) {
+      touchStart(event);
+      if (touch) (touch as { moved: boolean }).moved = true;
+      return 0;
+    }
+    const last = event.changedTouches[0];
+    if (previous.moved || previous.scale > 1 || previous.distance || !last)
+      return 0;
+    const dx = last.clientX - previous.x;
+    const dy = last.clientY - previous.y;
+    return Math.abs(dx) >= 55 && Math.abs(dx) > Math.abs(dy) * 1.4
+      ? dx < 0
+        ? 1
+        : -1
+      : 0;
   }
 
   watch(
@@ -115,5 +206,8 @@ export function usePhotoZoom(stage: Ref<HTMLElement | undefined>) {
     move,
     stop,
     reset,
+    touchStart,
+    touchMove,
+    touchEnd,
   };
 }

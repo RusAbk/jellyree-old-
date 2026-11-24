@@ -1,0 +1,460 @@
+.mobile-app {
+  -webkit-text-size-adjust: 100%;
+  -webkit-tap-highlight-color: transparent;
+  --timeline-width: 78px;
+}
+
+.mobile-app .app-shell {
+  height: 100vh;
+  height: 100dvh;
+}
+.mobile-app button {
+  touch-action: manipulation;
+}
+.mobile-app input,
+.mobile-app textarea,
+.mobile-app select {
+  font-size: 16px;
+}
+.mobile-app .file-card,
+.mobile-app .folder-card,
+.mobile-app .tree-row,
+.mobile-app .photo-viewport {
+  -webkit-touch-callout: none;
+  user-select: none;
+}
+.mobile-app .sidebar {
+  position: fixed;
+  z-index: 42;
+  inset: 0 auto 0 0;
+  width: min(310px, 86vw);
+  padding: 17px 14px;
+  box-shadow: 16px 0 36px #25233c25;
+  display: none;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+.mobile-app .sidebar.mobile-sidebar-open {
+  display: flex;
+}
+.mobile-app .sidebar .main-nav button {
+  min-height: 43px;
+  font-size: 14px;
+}
+.mobile-app .mobile-menu-backdrop {
+  position: fixed;
+  z-index: 41;
+  inset: 0;
+  border: 0;
+  background: #25233c55;
+}
+.mobile-app .workspace {
+  width: 100%;
+}
+.mobile-app .workspace-footer {
+  display: none;
+}
+.mobile-app .topbar {
+  height: 54px;
+  gap: 5px;
+  padding-inline: 8px;
+}
+.mobile-app .topbar .language-select,
+.mobile-app .topbar .direct-badge {
+  display: none;
+}
+.mobile-app .topbar .icon-button {
+  width: 38px;
+  height: 40px;
+}
+.mobile-app .topbar .search-box {
+  min-width: 0;
+  height: 35px;
+  padding-inline: 8px;
+}
+.mobile-app .topbar .quick-connection {
+  min-width: 0;
+  flex: 0 1 18vw;
+}
+.mobile-app .topbar .quick-connection i {
+  display: none;
+}
+.mobile-app .topbar .quick-connection select {
+  font-size: 12px;
+}
+.mobile-app .topbar .avatar {
+  flex-shrink: 0;
+}
+.mobile-app .uploads-toggle {
+  padding: 7px;
+}
+.mobile-app .uploads-toggle > span {
+  display: none;
+}
+.mobile-app .mobile-tab-bar {
+  display: flex;
+  flex-shrink: 0;
+  border-top: 1px solid #ebe8f3;
+  background: #fff;
+  padding: 2px 3px;
+}
+.mobile-app .mobile-tab-bar > button {
+  flex: 1;
+  min-width: 0;
+  min-height: 45px;
+  padding: 2px;
+  border: 0;
+  border-radius: 9px;
+  background: transparent;
+  color: #68667d;
+  display: grid;
+  justify-items: center;
+  align-content: center;
+  gap: 2px;
+  font-size: 10px;
+}
+.mobile-app .mobile-tab-bar > button i {
+  font-size: 20px;
+}
+.mobile-app .mobile-tab-bar > button.active {
+  background: #f2edfd;
+  color: #624bcc;
+}
+.mobile-app .content {
+  --catalog-gutter: 11px;
+}
+.mobile-app .catalog-header {
+  padding-top: 6px;
+}
+.mobile-app .page-header {
+  gap: 3px 6px;
+  margin-bottom: 3px;
+}
+.mobile-app .page-header h1 {
+  font-size: 20px;
+}
+.mobile-app .page-actions {
+  justify-content: flex-start;
+}
+.mobile-app .page-actions .button {
+  min-height: 31px;
+  padding: 4px 6px;
+  font-size: 10px;
+}
+.mobile-app .page-actions .icon-button {
+  width: 28px;
+  height: 28px;
+}
+.mobile-app .file-controls {
+  position: relative;
+}
+.mobile-app .file-toolbar select {
+  font-size: 12px;
+}
+.mobile-app .toolbar-area {
+  margin-bottom: 2px;
+}
+.mobile-app .selection-toolbar {
+  gap: 2px;
+}
+.mobile-app .selection-toolbar > button {
+  min-height: 30px;
+}
+.mobile-app .preview-settings label {
+  gap: 4px;
+}
+.mobile-app .preview-settings {
+  padding-bottom: 5px;
+}
+.mobile-app .file-checkbox {
+  opacity: 1;
+}
+.mobile-app .file-checkbox,
+.mobile-app .file-favorite {
+  min-width: 28px;
+  min-height: 28px;
+}
+.mobile-app .file-card input,
+.mobile-app .files-scroll {
+  overscroll-behavior: contain;
+}
+.mobile-app .files.grid,
+.mobile-app .media-day-grid {
+  grid-template-columns: repeat(
+    auto-fill,
+    minmax(min(100%, max(105px, calc(var(--preview-size, 220px) * 0.68))), 1fr)
+  );
+  gap: 7px;
+}
+.mobile-app .files.grid .file-thumb {
+  height: calc(var(--preview-size, 220px) * 0.59);
+}
+.mobile-app .folder-grid {
+  grid-template-columns: repeat(auto-fill, minmax(128px, 1fr));
+  gap: 7px;
+  margin-bottom: 12px;
+}
+.mobile-app .folder-card {
+  min-height: 45px;
+  padding: 6px;
+}
+.mobile-app .folder-card-icon {
+  width: 27px;
+  height: 27px;
+  font-size: 19px;
+}
+.mobile-app .files.list .file-card {
+  grid-template-columns: 32px minmax(0, 1fr) 48px 26px;
+}
+.mobile-app .list-heading {
+  grid-template-columns: minmax(0, 1fr) 48px 26px;
+}
+.mobile-app .list-heading > span:nth-child(3),
+.mobile-app .files.list .list-meta:nth-of-type(2) {
+  display: none;
+}
+.mobile-app .empty-state {
+  padding: 18px 7px;
+}
+.mobile-app .timeline-scroll {
+  padding-inline-end: 5px;
+}
+.mobile-app .timeline-scale {
+  padding: 10px 2px 3px 4px;
+  margin: 0 3px 7px 0;
+  gap: 10px;
+}
+.mobile-app .timeline-heading {
+  font-size: 9px;
+}
+.mobile-app .timeline-heading span {
+  overflow-wrap: anywhere;
+}
+.mobile-app .timeline-current {
+  font-size: 9px;
+}
+.mobile-app .timeline-mark {
+  padding-inline: 2px;
+}
+.mobile-app .media-day + .media-day {
+  margin-top: 12px;
+}
+.mobile-app .media-day-heading {
+  color: #4e4666;
+  font-size: 12px;
+  padding-block: 5px;
+}
+.mobile-app .overlay {
+  padding: 12px;
+}
+.mobile-app .dialog {
+  max-width: 100%;
+  max-height: calc(100dvh - 24px);
+  padding: 15px;
+}
+.mobile-app .dialog-footer {
+  flex-wrap: wrap;
+  gap: 5px;
+}
+.mobile-app .dialog .button {
+  min-height: 42px;
+}
+.mobile-app .banner {
+  margin: 5px 9px;
+  padding: 4px 7px;
+}
+.mobile-app .inspector {
+  z-index: 45;
+  position: fixed;
+  inset: auto 0 0;
+  width: 100%;
+  max-height: 62dvh;
+  overflow: auto;
+  border-radius: 14px 14px 0 0;
+  box-shadow: 0 -10px 28px #25233c25;
+}
+.mobile-app .upload-panel {
+  bottom: 53px;
+  right: 8px;
+  max-height: min(350px, 52dvh);
+  width: min(320px, calc(100vw - 16px));
+}
+.mobile-app .upload-panel-next-to-timeline {
+  right: 8px;
+}
+.mobile-app .preview-header {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 2px;
+  padding: 5px 8px;
+}
+.mobile-app .preview-header > div:last-child {
+  justify-content: space-between;
+  flex-wrap: wrap;
+}
+.mobile-app .preview-header > div:first-child > span {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+}
+.mobile-app .preview-header > div:first-child {
+  gap: 6px;
+}
+.mobile-app .preview-header small {
+  display: none;
+}
+.mobile-app .preview-header .icon-button {
+  width: 34px;
+  height: 36px;
+}
+.mobile-app .preview-stage {
+  padding: 6px 9px;
+}
+.mobile-app .preview-stage:has(.photo-viewport) {
+  padding: 4px 6px;
+}
+.mobile-app .preview-arrow {
+  width: 34px;
+  height: 40px;
+}
+.mobile-app .preview-arrow.previous {
+  left: 6px;
+}
+.mobile-app .preview-arrow.next {
+  right: 6px;
+}
+.mobile-app .preview-footer {
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 4px 8px;
+}
+.mobile-app .preview-footer > span:last-child {
+  display: none;
+}
+.mobile-app .preview-tags {
+  inset: auto 7px 7px;
+  width: auto;
+  max-height: min(430px, 69dvh);
+  padding: 9px;
+}
+.mobile-app .photo-zoom .icon-button.small,
+.mobile-app .tag-editor-choice {
+  min-height: 34px;
+}
+.mobile-app .photo-editor-header {
+  display: grid;
+  padding: 5px 8px;
+  gap: 3px;
+}
+.mobile-app .photo-editor-header > div:first-child {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  max-width: 100%;
+}
+.mobile-app .photo-editor-header small {
+  margin-top: 0;
+  min-width: 0;
+}
+.mobile-app .photo-editor-actions {
+  gap: 4px;
+  flex-wrap: wrap;
+}
+.mobile-app .photo-editor-actions .button {
+  min-height: 31px;
+  padding: 4px 6px;
+  font-size: 10px;
+}
+.mobile-app .photo-editor-actions .compare-button {
+  max-width: 100%;
+  white-space: normal;
+}
+.mobile-app .photo-editor-body {
+  display: grid;
+  min-height: 0;
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: minmax(130px, 1fr) minmax(100px, 0.85fr);
+}
+.mobile-app .photo-editor-preview,
+.mobile-app .photo-editor-controls {
+  min-height: 0;
+  min-width: 0;
+}
+.mobile-app .photo-editor-controls {
+  width: auto;
+  padding: 7px 11px;
+  border-left: 0;
+  border-top: 1px solid #34384b;
+}
+.mobile-app .editor-controls-header {
+  top: -7px;
+}
+.mobile-app .editor-tabs {
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  padding-block-end: 2px;
+}
+.mobile-app .editor-tabs button {
+  flex-shrink: 0;
+  min-height: 32px;
+}
+.mobile-app .editor-view-toolbar {
+  gap: 4px;
+  padding: 4px 8px;
+}
+.mobile-app .editor-view-toolbar input[type="range"] {
+  width: 69px;
+}
+.mobile-app .editor-render-status {
+  min-height: 25px;
+  padding: 3px 8px;
+}
+.mobile-app .editor-discard {
+  width: calc(100% - 18px);
+  flex-wrap: wrap;
+}
+.mobile-app .desktop-video-player {
+  width: 100%;
+}
+.mobile-app .video-player-toolbar {
+  gap: 4px;
+  padding: 5px;
+}
+.mobile-app .document-viewer {
+  width: 100%;
+}
+.mobile-app .text-editor-body.preview-enabled {
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: repeat(2, minmax(0, 1fr));
+}
+.mobile-app .document-toolbar {
+  overflow-x: auto;
+  flex-wrap: nowrap;
+}
+.mobile-app .document-toolbar button {
+  flex-shrink: 0;
+}
+
+@media (orientation: landscape) and (max-height: 550px) {
+  .mobile-app .photo-editor-body {
+    grid-template-columns: minmax(0, 1fr) minmax(200px, 0.55fr);
+    grid-template-rows: minmax(0, 1fr);
+  }
+}
+@media (min-width: 680px) {
+  .mobile-app .content {
+    --catalog-gutter: 18px;
+  }
+  .mobile-app .photo-editor-body {
+    grid-template-columns: minmax(0, 1fr) minmax(295px, 0.55fr);
+    grid-template-rows: minmax(0, 1fr);
+  }
+  .mobile-app .preview-header {
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 7px;
+  }
+  .mobile-app .preview-tags {
+    inset: 8px 50px auto auto;
+    width: 300px;
+  }
+}

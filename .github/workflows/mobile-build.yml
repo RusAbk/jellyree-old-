@@ -1,0 +1,77 @@
+name: Build Jellyree Mobile
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'mobile/**'
+      - 'desktop/src/**'
+      - 'desktop/mobile.html'
+      - 'desktop/vite.config.ts'
+      - 'desktop/package*.json'
+      - 'desktop/electron/*.mjs'
+      - 'desktop/electron/schema.sql'
+      - '.github/workflows/mobile-build.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  mobile:
+    name: ${{ matrix.target }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: iOS simulator
+            platform: ios
+            os: macos-latest
+          - target: Android debug APK
+            platform: android
+            os: ubuntu-latest
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.50.0'
+          channel: stable
+          cache: true
+      - if: matrix.platform == 'android'
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - run: npm ci --prefix desktop
+      - run: node mobile/tool/build-ui.mjs
+      - run: flutter pub get --enforce-lockfile
+        working-directory: mobile
+      - run: flutter analyze --no-pub && flutter test --no-pub
+        working-directory: mobile
+      - if: matrix.platform == 'ios'
+        run: flutter build ios --simulator --debug --no-codesign
+        working-directory: mobile
+      - if: matrix.platform == 'ios'
+        run: tar -czf jellyree-ios-simulator.tar.gz -C mobile/build/ios/iphonesimulator Runner.app
+      - if: matrix.platform == 'ios'
+        uses: actions/upload-artifact@v7
+        with:
+          name: jellyree-ios-simulator
+          path: jellyree-ios-simulator.tar.gz
+          if-no-files-found: error
+      - if: matrix.platform == 'android'
+        run: flutter build apk --debug
+        working-directory: mobile
+      - if: matrix.platform == 'android'
+        uses: actions/upload-artifact@v7
+        with:
+          name: jellyree-android
+          path: mobile/build/app/outputs/flutter-apk/app-debug.apk
+          if-no-files-found: error

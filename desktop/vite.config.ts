@@ -2,7 +2,15 @@ import { defineConfig, normalizePath } from "vite";
 import vue from "@vitejs/plugin-vue";
 import { viteStaticCopy } from "vite-plugin-static-copy";
 import { fileURLToPath } from "node:url";
-export default defineConfig({
+export default defineConfig(({ mode }) => ({
+  build:
+    mode === "mobile"
+      ? {
+          rollupOptions: {
+            input: fileURLToPath(new URL("./mobile.html", import.meta.url)),
+          },
+        }
+      : undefined,
   plugins: [
     vue(),
     viteStaticCopy({
@@ -13,7 +21,8 @@ export default defineConfig({
               new URL(`./node_modules/pdfjs-dist/${name}`, import.meta.url),
             ),
           ),
-          dest: "pdfjs",
+          dest: `pdfjs/${name}`,
+          rename: { stripBase: true as const },
         })),
         {
           src: normalizePath(
@@ -25,12 +34,14 @@ export default defineConfig({
             ),
           ),
           dest: "licenses/libheif-js",
+          rename: { stripBase: true as const },
         },
         {
           src: normalizePath(
             fileURLToPath(new URL("./THIRD_PARTY_NOTICES.md", import.meta.url)),
           ),
           dest: "licenses",
+          rename: { stripBase: true as const },
         },
       ],
     }),
@@ -40,4 +51,4 @@ export default defineConfig({
   optimizeDeps: { include: ["libheif-js/libheif-wasm/libheif-bundle.mjs"] },
   base: "./",
   server: { host: "127.0.0.1", port: 5174, strictPort: true },
-});
+}));

@@ -1,0 +1,39 @@
+name: jellyree_mobile
+description: Jellyree for iOS and Android, connected directly to Cloudflare R2 and D1.
+publish_to: none
+version: 0.1.0+1
+
+environment:
+  sdk: '>=3.14.0 <4.0.0'
+  flutter: '>=3.50.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+  crypto: ^3.0.7
+  file_picker: ^8.3.7
+  flutter_secure_storage: ^9.2.4
+  image_picker: ^1.2.1
+  mime: ^2.0.0
+  path_provider: ^2.1.6
+  share_plus: ^10.1.4
+  uuid: ^4.5.3
+  webview_flutter: ^4.13.0
+  webview_flutter_wkwebview: ^3.26.0
+  xml: ^6.6.1
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+
+flutter:
+  uses-material-design: true
+  assets:
+    - assets/ui/
+    - assets/ui/assets/
+    - assets/ui/pdfjs/cmaps/
+    - assets/ui/pdfjs/standard_fonts/
+    - assets/ui/pdfjs/wasm/
+    - assets/ui/licenses/
+    - assets/ui/licenses/libheif-js/

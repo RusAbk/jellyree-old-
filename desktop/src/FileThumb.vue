@@ -7,6 +7,7 @@ import { api } from "./api";
 import { runThumbnailPreview, videoDuration } from "./video-preview";
 import ProcessedImage from "./ProcessedImage.vue";
 import {
+  managedMediaUrl,
   thumbnailRevision,
   thumbnailBytes,
   thumbnailGeometry,
@@ -103,7 +104,7 @@ const ready = ref(false);
 function releaseMedia(value: string) {
   if (value === mediaUrl) mediaUrl = "";
   if (
-    value.startsWith("jellyree-media:") &&
+    managedMediaUrl(value) &&
     typeof window.jellyree.releaseMedia === "function"
   )
     void api.releaseMedia(value).catch(() => {});
@@ -363,7 +364,7 @@ async function fetchPreview(useCache = true) {
           acquired = value.url;
           if (!current() || !visible || signal.aborted) return;
           readable = value.readable;
-          if (acquired.startsWith("jellyree-media:")) mediaUrl = acquired;
+          if (managedMediaUrl(acquired)) mediaUrl = acquired;
           await new Promise<void>((resolve, reject) => {
             let settled = false;
             const abort = () => finish(signal.reason);

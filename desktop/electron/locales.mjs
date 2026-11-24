@@ -14,6 +14,40 @@ export const messages = {
     es: "Fotos y vídeos",
   },
   Медиалента: { en: "Media timeline", es: "Cronología multimedia" },
+  "Открыть меню": { en: "Open menu", es: "Abrir menú" },
+  "Закрыть меню": { en: "Close menu", es: "Cerrar menú" },
+  "Ошибка Cloudflare D1 (HTTP {0}).": {
+    en: "Cloudflare D1 error (HTTP {0}).",
+    es: "Error de Cloudflare D1 (HTTP {0}).",
+  },
+  "Ошибка Cloudflare R2 (HTTP {0}).": {
+    en: "Cloudflare R2 error (HTTP {0}).",
+    es: "Error de Cloudflare R2 (HTTP {0}).",
+  },
+  "Не удалось завершить операцию в R2.": {
+    en: "Could not complete the R2 operation.",
+    es: "No se pudo completar la operación en R2.",
+  },
+  "Файл слишком большой.": {
+    en: "This file is too large.",
+    es: "El archivo es demasiado grande.",
+  },
+  "Не удалось прочитать сохранённые подключения.": {
+    en: "Could not read saved connections.",
+    es: "No se pudieron leer las conexiones guardadas.",
+  },
+  "Дождитесь окончания текущей операции.": {
+    en: "Wait for the current operation to finish.",
+    es: "Espera a que termine la operación actual.",
+  },
+  "Встроенный просмотр доступен для PDF, TXT и Markdown.": {
+    en: "Built-in viewing is available for PDF, TXT and Markdown.",
+    es: "El visor integrado admite PDF, TXT y Markdown.",
+  },
+  "Не удалось выполнить операцию.": {
+    en: "The operation could not be completed.",
+    es: "No se pudo completar la operación.",
+  },
   "Временная шкала": { en: "Timeline", es: "Línea de tiempo" },
   "Загрузка дат…": { en: "Loading dates…", es: "Cargando fechas…" },
   "Даты недоступны": { en: "Dates unavailable", es: "Fechas no disponibles" },
