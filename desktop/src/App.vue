@@ -1,6 +1,13 @@
 <script setup lang="ts">
 import { t } from "./i18n";
-import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import {
+  computed,
+  onBeforeUnmount,
+  onMounted,
+  ref,
+  shallowRef,
+  watch,
+} from "vue";
 import FileThumb from "./FileThumb.vue";
 import VideoPlayer from "./VideoPlayer.vue";
 import DocumentViewer from "./DocumentViewer.vue";
@@ -74,10 +81,25 @@ const contextMenu = ref<{
 let contextSerial = 0;
 const selection = ref<string[]>([]),
   loading = ref(false),
+  loadingMore = ref(false),
   busy = ref(false),
   total = ref(0),
   hasMore = ref(false),
   page = ref(1);
+const listing = computed(() => ({
+  section: section.value,
+  folderId: folderId.value,
+  search: search.value,
+  tag: tag.value,
+  sort: sort.value,
+}));
+const loadedListing = shallowRef<typeof listing.value>();
+const currentListing = computed(() => loadedListing.value === listing.value);
+const loadMoreButton = ref<HTMLButtonElement>(),
+  pageFailed = ref(false);
+const canLoadMore = computed(
+  () => currentListing.value && hasMore.value && !loading.value && !busy.value,
+);
 const {
   jobs: uploadJobs,
   panelOpen: uploadsOpen,
@@ -458,19 +480,26 @@ function flushUploadRefresh() {
     !uploadRefreshPending ||
     busy.value ||
     loading.value ||
+    !currentListing.value ||
     !settings.value.configured
   )
     return;
   uploadRefreshPending = false;
   void reload(false, true);
 }
-watch([busy, loading], flushUploadRefresh);
+watch([busy, loading, currentListing], flushUploadRefresh);
 async function reload(more = false, background = false) {
-  if (!settings.value.configured) return;
-  const id = ++generation,
+  if (!settings.value.configured || (more && !canLoadMore.value)) return;
+  if (!more && !background) clearTimeout(timer);
+  const requestedListing = listing.value,
+    id = ++generation,
     nextPage = more ? page.value + 1 : background ? page.value : 1;
   loading.value = true;
-  if (!background) error.value = "";
+  loadingMore.value = more;
+  if (!background) {
+    error.value = "";
+    pageFailed.value = false;
+  }
   try {
     const pages = background
       ? Array.from({ length: nextPage }, (_, index) => index + 1)
@@ -479,11 +508,7 @@ async function reload(more = false, background = false) {
       Promise.all(
         pages.map((requestedPage) =>
           api.list({
-            section: section.value,
-            folderId: folderId.value,
-            search: search.value,
-            tag: tag.value,
-            sort: sort.value,
+            ...requestedListing,
             page: requestedPage,
           }),
         ),
@@ -491,17 +516,19 @@ async function reload(more = false, background = false) {
       more ? Promise.resolve(folders.value) : api.folders(),
       more ? Promise.resolve(stats.value) : api.stats(),
     ]);
-    if (id !== generation) return;
+    if (id !== generation || requestedListing !== listing.value) return;
     const result = {
       ...results[results.length - 1]!,
       items: results.flatMap((result) => result.items),
     };
-    files.value = more ? [...files.value, ...result.items] : result.items;
+    const items = more ? [...files.value, ...result.items] : result.items;
+    files.value = [...new Map(items.map((file) => [file.id, file])).values()];
     folders.value = tree;
     stats.value = usage;
     total.value = result.total;
     hasMore.value = result.hasMore;
     page.value = nextPage;
+    loadedListing.value = requestedListing;
     selection.value = selection.value.filter((s) =>
       files.value.some((f) => f.id === s),
     );
@@ -516,9 +543,19 @@ async function reload(more = false, background = false) {
       } else if (updated && !editing.value) preview.value = updated;
     }
   } catch (e) {
-    if (id === generation && !background) error.value = (e as Error).message;
+    if (
+      id === generation &&
+      requestedListing === listing.value &&
+      !background
+    ) {
+      error.value = (e as Error).message;
+      pageFailed.value = more;
+    }
   } finally {
-    if (id === generation) loading.value = false;
+    if (id === generation) {
+      loading.value = false;
+      loadingMore.value = false;
+    }
   }
 }
 async function action(fn: () => Promise<unknown>, message = "") {
@@ -915,6 +952,7 @@ async function share(id: string) {
 }
 async function saved(value: Settings) {
   ++generation;
+  loadedListing.value = undefined;
   closePreview();
   clearPhotos();
   settings.value = value;
@@ -935,6 +973,9 @@ async function saved(value: Settings) {
 }
 function disconnected() {
   ++generation;
+  loadedListing.value = undefined;
+  loading.value = false;
+  loadingMore.value = false;
   closePreview();
   clearPhotos();
   settings.value = { configured: false, persisted: false };
@@ -1019,16 +1060,53 @@ function keydown(event: KeyboardEvent) {
       );
   }
 }
-watch(search, () => {
-  clearTimeout(timer);
-  timer = setTimeout(() => {
-    selection.value = [];
-    void reload();
-  }, 300);
-});
+watch(
+  search,
+  () => {
+    clearTimeout(timer);
+    timer = setTimeout(() => {
+      selection.value = [];
+      void reload();
+    }, 300);
+  },
+  { flush: "sync" },
+);
 watch(sort, () => {
   void reload();
 });
+watch(listing, () => window.scrollTo(0, 0), { flush: "post" });
+const autoLoadMore = computed(
+  () =>
+    canLoadMore.value &&
+    !pageFailed.value &&
+    !preview.value &&
+    !settingsOpen.value &&
+    !modal.value,
+);
+watch(
+  [loadMoreButton, autoLoadMore],
+  ([button, enabled], _, onCleanup) => {
+    if (!button || !enabled) return;
+    let active = true;
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (
+          active &&
+          autoLoadMore.value &&
+          entries.some((entry) => entry.isIntersecting)
+        )
+          void reload(true);
+      },
+      { rootMargin: "0px 0px 320px 0px" },
+    );
+    observer.observe(button);
+    onCleanup(() => {
+      active = false;
+      observer.disconnect();
+    });
+  },
+  { flush: "post" },
+);
 watch(view, (value) => localStorage.setItem("jellyree-desktop-view", value));
 watch(previewSize, (value) =>
   localStorage.setItem("jellyree-desktop-preview-size", String(value)),
@@ -1813,18 +1891,31 @@ onBeforeUnmount(() => {
               {{ t("В R2 уже есть файлы? Добавить в каталог") }}
             </button>
           </div>
-          <div v-if="loading" class="loading-state">
+          <div v-if="loading && !loadingMore" class="loading-state">
             <i aria-hidden="true" class="ri-loader-4-line spinning"></i
             >{{ t("Загрузка каталога…") }}
           </div>
           <button
-            v-if="hasMore"
+            v-if="currentListing && hasMore"
+            ref="loadMoreButton"
             class="button load-more"
-            :disabled="loading"
+            :disabled="!canLoadMore"
             @click="reload(true)"
           >
+            <i
+              v-if="loadingMore"
+              aria-hidden="true"
+              class="ri-loader-4-line spinning"
+            ></i>
             {{
-              t("Показать ещё · {0} из {1}", { "0": files.length, "1": total })
+              loadingMore
+                ? t("Загрузка каталога…")
+                : pageFailed
+                  ? t("Повторить")
+                  : t("Показать ещё · {0} из {1}", {
+                      "0": files.length,
+                      "1": total,
+                    })
             }}
           </button>
         </template>

@@ -601,7 +601,6 @@ try {
     "40",
     "foreground actions do not reset upload progress",
   );
-  await window.getByRole("button", { name: /Показать ещё/ }).click();
   await nativeFile("extra-2.txt").waitFor();
   await window
     .getByRole("button", { name: "Выбрать extra-2.txt", exact: true })
@@ -1607,6 +1606,87 @@ try {
   assert.equal(await page.locator(".drop-overlay").count(), 0);
   console.log(
     "PASS: external drop uploads into target album; folders move into albums and root; descendant drops rejected",
+  );
+
+  await page.evaluate(() => {
+    const list = window.jellyree.list;
+    const state = { pages: [] };
+    window.__paginationFixture = state;
+    const gate = new Promise((resolve) => {
+      state.finish = resolve;
+    });
+    window.jellyree.list = async (input) => {
+      if (input.search !== "pagination") return list(input);
+      const page = input.page;
+      state.pages.push(page);
+      if (page === 2 && state.pages.filter((n) => n === 2).length === 1)
+        throw new Error("Pagination test: temporary failure");
+      if (page === 3) await gate;
+      const size = page === 3 ? 1 : 25;
+      const items = Array.from({ length: size }, (_, index) => {
+        const id = (page - 1) * 25 + index + 1;
+        return {
+          id: `pagination-${id}`,
+          name: `pagination-${id}.txt`,
+          mime_type: "text/plain",
+          size_bytes: 100,
+          tags: [],
+          adjustments: {},
+          created_at: "2026-11-01",
+        };
+      });
+      return { items, total: 51, page, hasMore: page < 3 };
+    };
+  });
+  await page
+    .getByRole("textbox", { name: "Поиск файлов и тегов" })
+    .fill("pagination");
+  await page.getByText("pagination-25.txt", { exact: true }).waitFor();
+  assert.deepEqual(
+    await page.evaluate(() => window.__paginationFixture.pages),
+    [1],
+  );
+  await page.locator(".load-more").scrollIntoViewIfNeeded();
+  await page
+    .getByText("Pagination test: temporary failure", { exact: true })
+    .waitFor();
+  const retryPage = page.getByRole("button", {
+    name: "Повторить",
+    exact: true,
+  });
+  await retryPage.waitFor();
+  assert.deepEqual(
+    await page.evaluate(() => window.__paginationFixture.pages),
+    [1, 2],
+  );
+  await retryPage.click();
+  await page.getByText("pagination-50.txt", { exact: true }).waitFor();
+  assert.equal(await page.locator(".file-card").count(), 50);
+  assert.deepEqual(
+    await page.evaluate(() => window.__paginationFixture.pages),
+    [1, 2, 2],
+  );
+  await page.locator(".load-more").scrollIntoViewIfNeeded();
+  await page.waitForFunction(() =>
+    window.__paginationFixture.pages.includes(3),
+  );
+  await page.locator(".tree-row").filter({ hasText: "Поездки" }).click();
+  await page.getByRole("heading", { name: "Поездки", exact: true }).waitFor();
+  await page.locator(".files[aria-busy=false]").waitFor({ state: "attached" });
+  await page.evaluate(async () => {
+    window.__paginationFixture.finish();
+    await new Promise(requestAnimationFrame);
+  });
+  assert.equal(
+    await page.locator(".file-card").filter({ hasText: "pagination-" }).count(),
+    0,
+  );
+  assert.deepEqual(
+    await page.evaluate(() => window.__paginationFixture.pages),
+    [1, 2, 2, 3],
+  );
+  console.log(
+    "PASS: automatic pagination on scroll, manual retry, and ignoring an old page after folder navigation",
   );
   assert.deepEqual(rendererErrors, []);
   console.log(
