@@ -15,7 +15,7 @@ import DocumentViewer from "./DocumentViewer.vue";
 import { documentKind } from "../electron/document-preview.mjs";
 import { thumbnailRevision } from "./thumbnail";
 import PhotoEditor from "./PhotoEditor.vue";
-import PreviewTags from "./PreviewTags.vue";
+import TagEditor from "./TagEditor.vue";
 import { isImageFile } from "../electron/image-formats.mjs";
 import { isPhotoPreview, usePhotoPreview } from "./use-photo-preview";
 import { usePhotoZoom } from "./use-photo-zoom";
@@ -237,10 +237,12 @@ const modal = ref<{
   title: string;
   input: string;
   ids: string[];
+  tags: string[];
   target: string;
   folder?: Folder;
   parentId?: string | null;
 } | null>(null);
+const tagEditor = ref<InstanceType<typeof TagEditor>>();
 let generation = 0,
   timer: ReturnType<typeof setTimeout> | undefined,
   previewGeneration = 0,
@@ -1231,15 +1233,25 @@ function openModal(
     input:
       kind === "rename"
         ? file?.name || ""
-        : kind === "tags"
-          ? file?.tags.join(", ") || ""
-          : kind === "renameFolder"
-            ? folder?.name || ""
-            : "",
+        : kind === "renameFolder"
+          ? folder?.name || ""
+          : "",
     ids: [...ids],
+    tags: kind === "tags" ? [...(file?.tags || [])] : [],
     target: "",
     folder,
     parentId,
+  };
+}
+function updateDraftTags(tags: string[]) {
+  if (modal.value?.kind !== "tags") return false;
+  modal.value.tags = tags;
+  return true;
+}
+function rememberTags(tags: string[]) {
+  stats.value = {
+    ...stats.value,
+    tags: [...new Set([...stats.value.tags, ...tags])],
   };
 }
 async function submitModal() {
@@ -1270,13 +1282,11 @@ async function submitModal() {
         await api.createFolder(value.input, value.parentId ?? null);
       if (value.kind === "rename")
         await api.update(value.ids, { name: value.input });
-      if (value.kind === "tags")
-        await api.update(value.ids, {
-          tags: value.input
-            .split(",")
-            .map((t) => t.trim())
-            .filter(Boolean),
-        });
+      if (value.kind === "tags") {
+        const tags = tagEditor.value?.pendingTags() ?? value.tags;
+        await api.update(value.ids, { tags });
+        rememberTags(tags);
+      }
       if (value.kind === "move")
         await api.update(value.ids, { folderId: value.target || null });
       if (value.kind === "renameFolder" && value.folder)
@@ -1421,6 +1431,7 @@ async function savePreviewTags(tags: string[]) {
   const saved = await action(
     async () => {
       await api.update([file.id], { tags });
+      rememberTags(tags);
       if (preview.value?.id === file.id)
         preview.value = { ...preview.value, tags };
       files.value = files.value.map((current) =>
@@ -2928,6 +2939,7 @@ onBeforeUnmount(() => {
       aria-modal="true"
       aria-labelledby="modal-title"
       @submit.prevent="submitModal"
+      @keydown.esc.stop="!busy && (modal = null)"
     >
       <header class="dialog-header">
         <h2 id="modal-title">{{ modal.title }}</h2>
@@ -2941,21 +2953,26 @@ onBeforeUnmount(() => {
           <i aria-hidden="true" class="ri-close-line"></i>
         </button>
       </header>
+      <p v-if="modal.kind === 'tags' && modal.ids.length > 1" class="muted">
+        {{ t("Этот набор заменит теги всех выбранных файлов.") }}
+      </p>
+      <TagEditor
+        v-if="modal.kind === 'tags'"
+        ref="tagEditor"
+        :tags="modal.tags"
+        :known="stats.tags"
+        :busy="busy"
+        :save="updateDraftTags"
+        comma-separated
+      />
       <label
-        v-if="
-          ['createFolder', 'rename', 'renameFolder', 'tags'].includes(
-            modal.kind,
-          )
-        "
-        >{{
-          modal.kind === "tags"
-            ? t("Теги через запятую (заменят текущие)")
-            : t("Название")
+        v-if="['createFolder', 'rename', 'renameFolder'].includes(modal.kind)"
+        >{{ t("Название")
         }}<input
           v-model="modal.input"
           autofocus
-          :required="modal.kind !== 'tags'"
-          :maxlength="modal.kind === 'tags' ? 3000 : 255"
+          required
+          maxlength="255"
           :disabled="busy" /></label
       ><label v-if="['move', 'moveFolder'].includes(modal.kind)"
         >{{ t("Папка назначения")
@@ -3236,15 +3253,31 @@ onBeforeUnmount(() => {
           "
         ></i>
       </button>
-      <PreviewTags
+      <aside
         v-if="photo && previewTagsOpen"
-        :key="preview.id"
-        :tags="preview.tags"
-        :known="stats.tags"
-        :busy="busy || previewPageLoading"
-        :save="savePreviewTags"
-        @close="closePreviewTags"
-      />
+        class="preview-tags"
+        :aria-label="t('Теги')"
+        @keydown.esc.stop="closePreviewTags"
+      >
+        <header>
+          <strong>{{ t("Теги") }}</strong>
+          <button
+            type="button"
+            class="icon-button small"
+            :aria-label="t('Закрыть')"
+            @click="closePreviewTags"
+          >
+            <i class="ri-close-line" aria-hidden="true"></i>
+          </button>
+        </header>
+        <TagEditor
+          :key="preview.id"
+          :tags="preview.tags"
+          :known="stats.tags"
+          :busy="busy || previewPageLoading"
+          :save="savePreviewTags"
+        />
+      </aside>
     </div>
     <footer class="preview-footer">
       <span v-if="previewIndex >= 0"

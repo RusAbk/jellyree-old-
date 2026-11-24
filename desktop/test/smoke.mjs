@@ -1279,7 +1279,14 @@ try {
         files: files.length,
         bytes: files.reduce((n, f) => n + f.size_bytes, 0),
         trashed: files.filter((f) => f.trashed_at).length,
-        tags: ["отпуск", "море", "работа"],
+        tags: [
+          ...new Set([
+            ...files
+              .filter((file) => !file.trashed_at)
+              .flatMap((file) => file.tags),
+            ...Array.from({ length: 12 }, (_, index) => `проект ${index + 1}`),
+          ]),
+        ],
       }),
       update: async (ids, patch) => {
         files = files.map((f) =>
@@ -1640,12 +1647,41 @@ try {
   await page
     .getByRole("menuitem", { name: "Изменить теги", exact: true })
     .click();
-  await page.getByRole("dialog").getByRole("textbox").fill("проверка");
-  await page
-    .getByRole("dialog")
+  const tagDialog = page.getByRole("dialog", { name: "Теги", exact: true });
+  const catalogTagInput = tagDialog.getByRole("textbox", {
+    name: "Добавить тег",
+  });
+  const catalogExistingTags = tagDialog.getByRole("group", {
+    name: "Существующие теги",
+  });
+  await catalogTagInput.fill("ПРОЕКТ 1");
+  await catalogExistingTags
+    .getByRole("button", { name: "проект 12", exact: true })
+    .click();
+  assert.equal(await catalogTagInput.inputValue(), "");
+  await tagDialog
+    .getByRole("button", { name: "Удалить тег «море»", exact: true })
+    .click();
+  await catalogTagInput.fill("из каталога, МО");
+  await tagDialog
+    .getByRole("group", { name: "Подсказки" })
+    .getByRole("button", { name: "море", exact: true })
+    .click();
+  await catalogTagInput.fill("проверка");
+  await tagDialog
     .getByRole("button", { name: "Сохранить", exact: true })
     .click();
-  await page.getByRole("dialog").waitFor({ state: "hidden" });
+  await tagDialog.waitFor({ state: "hidden" });
+  const catalogTags = await page.evaluate(async () => {
+    const { items } = await window.jellyree.list({ section: "all" });
+    return items
+      .filter((file) => ["Море.jpg", "Заметки.txt"].includes(file.name))
+      .map((file) => file.tags);
+  });
+  assert.deepEqual(
+    catalogTags,
+    Array(2).fill(["отпуск", "проект 12", "из каталога", "море", "проверка"]),
+  );
   assert.equal(await page.locator(".file-card.selected").count(), 2);
   await page
     .getByText("Панорама.jpg", { exact: true })
@@ -1946,14 +1982,20 @@ try {
   await previewTags
     .getByRole("button", { name: "Удалить тег «из просмотра»" })
     .waitFor();
+  await tagInput.fill("ОТПУ");
   await previewTags
+    .getByRole("group", { name: "Подсказки" })
     .getByRole("button", { name: "отпуск", exact: true })
     .click();
   await previewTags
     .getByRole("button", { name: "Удалить тег «отпуск»" })
     .click();
   await previewTags
-    .getByRole("button", { name: "отпуск", exact: true })
+    .getByRole("group", { name: "Существующие теги" })
+    .getByRole("button", { name: "проект 12", exact: true })
+    .click();
+  await previewTags
+    .getByRole("button", { name: "Удалить тег «проект 12»" })
     .waitFor();
   await tagInput.press("Escape");
   await previewTags.waitFor({ state: "hidden" });

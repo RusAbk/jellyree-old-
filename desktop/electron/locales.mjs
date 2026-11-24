@@ -22,6 +22,12 @@ export const messages = {
   "Уменьшить фото": { en: "Zoom out photo", es: "Alejar foto" },
   "Увеличить фото": { en: "Zoom in photo", es: "Acercar foto" },
   "Добавить тег": { en: "Add tag", es: "Añadir etiqueta" },
+  "Существующие теги": { en: "Existing tags", es: "Etiquetas existentes" },
+  Подсказки: { en: "Suggestions", es: "Sugerencias" },
+  "Этот набор заменит теги всех выбранных файлов.": {
+    en: "This tag set will replace the tags on all selected files.",
+    es: "Este conjunto sustituirá las etiquetas de todos los archivos seleccionados.",
+  },
   "Удалить тег «{0}»": { en: "Remove tag “{0}”", es: "Quitar etiqueta «{0}»" },
   "Создать дубликат": { en: "Create duplicate", es: "Crear duplicado" },
   "Дубликат создан.": { en: "Duplicate created.", es: "Duplicado creado." },
@@ -573,10 +579,6 @@ export const messages = {
   Закрыть: {
     en: "Close",
     es: "Cerrar",
-  },
-  "Теги через запятую (заменят текущие)": {
-    en: "Comma-separated tags (replace current tags)",
-    es: "Etiquetas separadas por comas (sustituyen las actuales)",
   },
   "Папка назначения": {
     en: "Destination folder",

@@ -1481,55 +1481,98 @@ button {
   font-size: 12px;
 }
 .preview-tags > header,
-.preview-tags > form {
+.tag-editor-input {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 8px;
 }
-.preview-tags > form {
-  margin-block: 8px;
+.preview-tags > header {
+  margin-bottom: 8px;
 }
-.preview-tags input {
+.tag-editor {
+  --tag-text: #51446e;
+  --tag-muted: #655d72;
+  --tag-chip: #f0eafa;
+  --tag-hover: #f4effb;
+  --tag-border: #d9d1e7;
+  --tag-input: #fff;
+  display: grid;
+  gap: 9px;
+  font-size: 12px;
+}
+.preview-tags .tag-editor {
+  --tag-text: #e6dbfc;
+  --tag-muted: #a3a8bd;
+  --tag-chip: #39344f;
+  --tag-hover: #39344f;
+  --tag-border: #53536c;
+  --tag-input: #1b1d29;
+}
+.tag-editor input {
   width: 100%;
   min-width: 0;
   padding: 7px 9px;
-  border: 1px solid #53536c;
+  border: 1px solid var(--tag-border);
   border-radius: 6px;
-  color: #eee7ff;
-  background: #1b1d29;
+  color: var(--tag-text);
+  background: var(--tag-input);
 }
-.preview-tags p {
-  margin: 7px 0;
-  color: #a3a8bd;
+.tag-editor-muted {
+  color: var(--tag-muted);
 }
-.preview-tag-list {
+.tag-editor-group > strong {
+  display: block;
+  margin-bottom: 5px;
+  color: var(--tag-muted);
+  font-size: 11px;
+  font-weight: 650;
+}
+.tag-editor-list {
   display: flex;
   flex-wrap: wrap;
+  align-items: start;
   gap: 5px;
 }
-.preview-tag {
+.tag-editor-choices {
+  max-height: 120px;
+  overflow: auto;
+  scrollbar-gutter: stable;
+  padding: 4px;
+  margin: -4px;
+  overscroll-behavior: contain;
+}
+.tag-editor-suggestions .tag-editor-choices {
+  max-height: 84px;
+}
+.tag-editor-chip {
   display: inline-flex;
   align-items: center;
   gap: 3px;
   max-width: 100%;
-  padding: 2px 6px;
+  padding: 3px 7px;
   overflow-wrap: anywhere;
   border-radius: 6px;
-  background: #39344f;
-  color: #e6dbfc;
+  background: var(--tag-chip);
+  color: var(--tag-text);
 }
-.preview-tag .icon-button.small {
+.tag-editor-chip .icon-button.small {
   flex: none;
   width: 20px;
   height: 20px;
 }
-.preview-tag-suggestion {
-  border: 1px solid #53536c;
+.tag-editor-choice {
+  min-height: 24px;
+  border: 1px solid var(--tag-border);
   background: transparent;
+  text-align: start;
 }
-.preview-tag-suggestion:hover:not(:disabled) {
-  background: #39344f;
+.tag-editor-choice:hover:not(:disabled),
+.tag-editor-selected:disabled {
+  background: var(--tag-hover);
+}
+.tag-editor-choice > i {
+  font-size: 13px;
 }
 .photo-frame > img,
 .photo-frame > canvas,
