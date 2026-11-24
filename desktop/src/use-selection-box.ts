@@ -15,10 +15,6 @@ type Gesture = {
 const interactive = [
   ".file-card",
   ".folder-card",
-  ".page-header",
-  ".breadcrumbs",
-  ".toolbar-area",
-  ".preview-settings",
   ".list-heading",
   "button",
   "a",
@@ -51,11 +47,15 @@ export function useSelectionBox(
       return;
     event.preventDefault();
     const content = event.currentTarget as HTMLElement;
+    const bounds = content.getBoundingClientRect();
     const pointer = { x: event.clientX, y: event.clientY };
     gesture = {
       content,
       pointerId: event.pointerId,
-      origin: { x: pointer.x + window.scrollX, y: pointer.y + window.scrollY },
+      origin: {
+        x: pointer.x - bounds.left + content.scrollLeft,
+        y: pointer.y - bounds.top + content.scrollTop,
+      },
       start: pointer,
       pointer,
       additive: event.ctrlKey || event.metaKey || event.shiftKey,
@@ -74,15 +74,22 @@ export function useSelectionBox(
   }
 
   function draw(current: Gesture) {
-    const bounds = current.content.getBoundingClientRect();
-    const x = Math.min(bounds.right, Math.max(bounds.left, current.pointer.x));
-    const y = Math.min(bounds.bottom, Math.max(bounds.top, current.pointer.y));
-    const originX = current.origin.x - window.scrollX;
-    const originY = current.origin.y - window.scrollY;
-    const left = Math.min(x, originX),
-      right = Math.max(x, originX);
-    const top = Math.min(y, originY),
-      bottom = Math.max(y, originY);
+    const { content } = current;
+    const bounds = content.getBoundingClientRect();
+    const x =
+      Math.min(
+        content.clientWidth,
+        Math.max(0, current.pointer.x - bounds.left),
+      ) + content.scrollLeft;
+    const y =
+      Math.min(
+        content.clientHeight,
+        Math.max(0, current.pointer.y - bounds.top),
+      ) + content.scrollTop;
+    const left = Math.min(x, current.origin.x),
+      right = Math.max(x, current.origin.x);
+    const top = Math.min(y, current.origin.y),
+      bottom = Math.max(y, current.origin.y);
     const width = right - left,
       height = bottom - top;
     const previous = box.value;
@@ -96,15 +103,17 @@ export function useSelectionBox(
       box.value = { left, top, width, height };
 
     const selected = new Set(current.additive ? selection.value : []);
-    for (const card of current.content.querySelectorAll<HTMLElement>(
+    const offsetX = content.scrollLeft - bounds.left;
+    const offsetY = content.scrollTop - bounds.top;
+    for (const card of content.querySelectorAll<HTMLElement>(
       ".file-card[data-file-id]",
     )) {
       const rect = card.getBoundingClientRect();
       if (
-        left < rect.right &&
-        right > rect.left &&
-        top < rect.bottom &&
-        bottom > rect.top
+        left < rect.right + offsetX &&
+        right > rect.left + offsetX &&
+        top < rect.bottom + offsetY &&
+        bottom > rect.top + offsetY
       )
         selected.add(card.dataset.fileId!);
     }
@@ -125,12 +134,15 @@ export function useSelectionBox(
       cancel();
       return;
     }
-    const edge = 48;
+    const { content } = gesture;
+    const { top } = content.getBoundingClientRect();
+    const bottom = top + content.clientHeight;
+    const edge = Math.min(48, content.clientHeight / 3);
     const y = gesture.pointer.y;
     const delta =
-      y < edge ? y - edge : Math.max(0, y - (window.innerHeight - edge));
+      y < top + edge ? y - (top + edge) : Math.max(0, y - (bottom - edge));
     if (delta)
-      window.scrollBy(
+      content.scrollBy(
         0,
         Math.sign(delta) * Math.min(20, Math.ceil(Math.abs(delta) / 3)),
       );

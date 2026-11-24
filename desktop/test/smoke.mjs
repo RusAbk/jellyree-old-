@@ -1703,6 +1703,11 @@ try {
       return { items, total: 51, page, hasMore: page < 3 };
     };
   });
+  await tripTree.click();
+  await page
+    .locator(".breadcrumbs")
+    .getByRole("button", { name: "Поездки" })
+    .waitFor();
   await page
     .getByRole("textbox", { name: "Поиск файлов и тегов" })
     .fill("pagination");
@@ -1711,6 +1716,43 @@ try {
     await page.evaluate(() => window.__paginationFixture.pages),
     [1],
   );
+  const fixedPositions = () =>
+    page.evaluate(() =>
+      [
+        ".topbar",
+        ".breadcrumbs",
+        ".page-header",
+        ".file-controls",
+        ".workspace-footer",
+      ].map(
+        (selector) =>
+          document.querySelector(selector).getBoundingClientRect().top,
+      ),
+    );
+  const beforeScroll = await fixedPositions();
+  const filesPane = page.locator(".files-scroll");
+  const pane = await filesPane.boundingBox();
+  const firstRow = await fileCards.first().boundingBox();
+  await page.mouse.move(firstRow.x - 10, firstRow.y + 18);
+  await page.mouse.down();
+  await page.mouse.move(firstRow.x + 90, pane.y + pane.height - 5, {
+    steps: 8,
+  });
+  await page.waitForFunction(
+    () => document.querySelector(".files-scroll").scrollTop > 80,
+  );
+  await page.keyboard.press("Escape");
+  await page.mouse.up();
+  assert.deepEqual(await fixedPositions(), beforeScroll);
+  await page.mouse.move(pane.x + 120, pane.y + 120);
+  const scrollTop = await filesPane.evaluate((element) => element.scrollTop);
+  await page.mouse.wheel(0, 180);
+  await page.waitForFunction(
+    (previous) => document.querySelector(".files-scroll").scrollTop > previous,
+    scrollTop,
+  );
+  assert.deepEqual(await fixedPositions(), beforeScroll);
+  assert.equal(await page.evaluate(() => window.scrollY), 0);
   await page.locator(".load-more").scrollIntoViewIfNeeded();
   await page
     .getByText("Pagination test: temporary failure", { exact: true })
@@ -1735,8 +1777,11 @@ try {
   await page.waitForFunction(() =>
     window.__paginationFixture.pages.includes(3),
   );
-  await page.locator(".tree-row").filter({ hasText: "Поездки" }).click();
-  await page.getByRole("heading", { name: "Поездки", exact: true }).waitFor();
+  await page
+    .locator(".breadcrumbs")
+    .getByRole("button", { name: "Мой диск", exact: true })
+    .click();
+  await page.getByRole("heading", { name: "Мой диск", exact: true }).waitFor();
   await page.locator(".files[aria-busy=false]").waitFor({ state: "attached" });
   await page.evaluate(async () => {
     window.__paginationFixture.finish();
@@ -1746,12 +1791,13 @@ try {
     await page.locator(".file-card").filter({ hasText: "pagination-" }).count(),
     0,
   );
+  assert.equal(await filesPane.evaluate((element) => element.scrollTop), 0);
   assert.deepEqual(
     await page.evaluate(() => window.__paginationFixture.pages),
     [1, 2, 2, 3],
   );
   console.log(
-    "PASS: automatic pagination on scroll, manual retry, and ignoring an old page after folder navigation",
+    "PASS: only the file pane scrolls (wheel and selection), header and breadcrumbs stay fixed, pagination and folder reset work",
   );
   assert.deepEqual(rendererErrors, []);
   console.log(

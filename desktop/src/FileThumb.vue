@@ -455,7 +455,7 @@ onMounted(() => {
         }
       }
     },
-    { rootMargin: "180px" },
+    { root: root.value?.closest(".files-scroll"), rootMargin: "180px" },
   );
   if (root.value) observer.observe(root.value);
 });

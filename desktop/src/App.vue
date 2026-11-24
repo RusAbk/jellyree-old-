@@ -96,7 +96,8 @@ const listing = computed(() => ({
 }));
 const loadedListing = shallowRef<typeof listing.value>();
 const currentListing = computed(() => loadedListing.value === listing.value);
-const loadMoreButton = ref<HTMLButtonElement>(),
+const filesScroll = ref<HTMLElement>(),
+  loadMoreButton = ref<HTMLButtonElement>(),
   pageFailed = ref(false);
 const canLoadMore = computed(
   () => currentListing.value && hasMore.value && !loading.value && !busy.value,
@@ -1133,13 +1134,14 @@ watch(
   () => {
     selectionAnchor = undefined;
     cancelSelectionBox();
-    window.scrollTo(0, 0);
+    filesScroll.value?.scrollTo(0, 0);
   },
   { flush: "post" },
 );
 watch(scope, () => {
   selectionAnchor = undefined;
   cancelSelectionBox();
+  filesScroll.value?.scrollTo(0, 0);
 });
 const autoLoadMore = computed(
   () =>
@@ -1150,9 +1152,9 @@ const autoLoadMore = computed(
     !modal.value,
 );
 watch(
-  [loadMoreButton, autoLoadMore],
-  ([button, enabled], _, onCleanup) => {
-    if (!button || !enabled) return;
+  [filesScroll, loadMoreButton, autoLoadMore],
+  ([root, button, enabled], _, onCleanup) => {
+    if (!root || !button || !enabled) return;
     let active = true;
     const observer = new IntersectionObserver(
       (entries) => {
@@ -1163,7 +1165,7 @@ watch(
         )
           void reload(true);
       },
-      { rootMargin: "0px 0px 320px 0px" },
+      { root, rootMargin: "0px 0px 320px 0px" },
     );
     observer.observe(button);
     onCleanup(() => {
@@ -1485,172 +1487,103 @@ onBeforeUnmount(() => {
         </div>
         <progress v-if="progress" :value="progressPercent" max="100"></progress>
       </div>
-      <section
-        class="content"
-        :class="{ 'selecting-files': !!selectionBox }"
-        @contextmenu="emptyContext"
-        @pointerdown="startSelectionBox"
-        @pointermove="moveSelectionBox"
-        @pointerup="endSelectionBox"
-        @pointercancel="interruptSelectionBox"
-        @lostpointercapture="interruptSelectionBox"
-      >
-        <div
-          v-if="selectionBox"
-          class="selection-box"
-          aria-hidden="true"
-          :style="{
-            left: `${selectionBox.left}px`,
-            top: `${selectionBox.top}px`,
-            width: `${selectionBox.width}px`,
-            height: `${selectionBox.height}px`,
-          }"
-        ></div>
-        <div v-if="section === 'drive' && folderId" class="breadcrumbs">
-          <button
-            @click="navigate('drive')"
-            :class="{ 'drop-target': dropTarget === null }"
-            @dragover="folderDragOver($event, null)"
-            @dragleave="folderDragLeave($event, null)"
-            @drop="folderDrop($event, null)"
-          >
-            {{ t("Мой диск") }}</button><template
-            v-for="crumb in breadcrumbs"
-            :key="crumb.id"
-            ><i aria-hidden="true" class="ri-arrow-right-s-line"></i
-            ><button
-              @click="navigate('drive', crumb.id)"
-              :class="{ 'drop-target': dropTarget === crumb.id }"
-              @dragover="folderDragOver($event, crumb.id)"
-              @dragleave="folderDragLeave($event, crumb.id)"
-              @drop="folderDrop($event, crumb.id)"
-            >
-              {{ crumb.name }}
-            </button></template
-          >
-        </div>
-        <header class="page-header">
-          <div>
-            <span class="eyebrow">{{
-              section === "trash"
-                ? t("МОЖНО ВОССТАНОВИТЬ")
-                : t("ВСЁ НА СВОИХ МЕСТАХ")
-            }}</span>
-            <h1>{{ title }}</h1>
-            <p>
-              {{
-                settings.configured
-                  ? t("{0} файлов{1}", {
-                      "0": total,
-                      "1": childFolders.length
-                        ? t(" · {0} папок", { "0": childFolders.length })
-                        : "",
-                    })
-                  : t("Пространство для ваших файлов, фотографий и идей")
-              }}
-            </p>
-          </div>
-          <div class="page-actions">
-            <template v-if="currentFolder && section === 'drive'"
-              ><button
-                class="icon-button"
-                :title="t('Переименовать папку')"
-                :aria-label="t('Переименовать папку')"
-                :disabled="busy"
-                @click="openModal('renameFolder', [], currentFolder)"
-              >
-                <i aria-hidden="true" class="ri-edit-line"></i></button
-              ><button
-                class="icon-button"
-                :title="t('Переместить папку')"
-                :aria-label="t('Переместить папку')"
-                :disabled="busy"
-                @click="openModal('moveFolder', [], currentFolder)"
-              >
-                <i
-                  aria-hidden="true"
-                  class="ri-folder-transfer-line"
-                ></i></button
-              ><button
-                class="icon-button"
-                :title="t('Удалить пустую папку')"
-                :aria-label="t('Удалить пустую папку')"
-                :disabled="busy"
-                @click="openModal('deleteFolder', [], currentFolder)"
-              >
-                <i
-                  aria-hidden="true"
-                  class="ri-delete-bin-line"
-                ></i></button></template
-            ><button
-              class="button"
-              :disabled="busy || !settings.configured"
-              @click="openModal('createFolder')"
-            >
-              <i aria-hidden="true" class="ri-folder-add-line"></i
-              >{{ t("Новая папка") }}</button
-            ><button
-              class="button"
-              :disabled="busy || !settings.configured"
-              @click="upload(true)"
-            >
-              <i aria-hidden="true" class="ri-folder-upload-line"></i
-              >{{ t("Загрузить папку") }}
-            </button>
-          </div>
-        </header>
-
-        <div v-if="!settings.configured" class="welcome-state">
-          <div class="welcome-illustration">
-            <i aria-hidden="true" class="ri-cloud-line"></i
-            ><span><i aria-hidden="true" class="ri-folder-3-fill"></i></span>
-          </div>
-          <h2>{{ t("Ваши файлы. Ваше облако.") }}</h2>
-          <p>
-            {{ t("Подключите R2 и D1, чтобы собрать всё в одном месте.")
-            }}<br />{{
-              t("Без собственного сервера и промежуточных сервисов.")
-            }}
-          </p>
-          <button class="button primary" @click="settingsOpen = true">
-            <i aria-hidden="true" class="ri-plug-line"></i
-            >{{ t("Подключить Cloudflare") }}
-          </button>
-        </div>
-        <template v-else>
-          <div v-if="childFolders.length" class="folder-grid">
+      <section class="content" @contextmenu="emptyContext">
+        <div class="catalog-header">
+          <div v-if="section === 'drive' && folderId" class="breadcrumbs">
             <button
-              v-for="folder in childFolders"
-              :key="folder.id"
-              class="folder-card"
-              :class="{
-                'drop-target': dropTarget === folder.id,
-                'drag-source':
-                  draggedItems?.kind === 'folder' &&
-                  draggedItems.id === folder.id,
-              }"
-              :title="folder.name"
-              @click="navigate('drive', folder.id)"
-              @contextmenu="folderContext($event, folder)"
-              :draggable="!busy"
-              @dragstart.stop="folderDragStart($event, folder)"
-              @dragover="folderDragOver($event, folder.id)"
-              @dragleave="folderDragLeave($event, folder.id)"
-              @drop="folderDrop($event, folder.id)"
+              @click="navigate('drive')"
+              :class="{ 'drop-target': dropTarget === null }"
+              @dragover="folderDragOver($event, null)"
+              @dragleave="folderDragLeave($event, null)"
+              @drop="folderDrop($event, null)"
             >
-              <span class="folder-card-icon"
-                ><i aria-hidden="true" class="ri-folder-3-fill"></i></span
-              ><span
-                >{{ folder.name
-                }}<small>{{
-                  t("{0} вложенных папок", {
-                    "0": folders.filter((f) => f.parent_id === folder.id)
-                      .length,
-                  })
-                }}</small></span
-              ><i aria-hidden="true" class="ri-arrow-right-s-line"></i>
-            </button>
+              {{ t("Мой диск") }}</button><template
+              v-for="crumb in breadcrumbs"
+              :key="crumb.id"
+              ><i aria-hidden="true" class="ri-arrow-right-s-line"></i
+              ><button
+                @click="navigate('drive', crumb.id)"
+                :class="{ 'drop-target': dropTarget === crumb.id }"
+                @dragover="folderDragOver($event, crumb.id)"
+                @dragleave="folderDragLeave($event, crumb.id)"
+                @drop="folderDrop($event, crumb.id)"
+              >
+                {{ crumb.name }}
+              </button></template
+            >
           </div>
+          <header class="page-header">
+            <div>
+              <span class="eyebrow">{{
+                section === "trash"
+                  ? t("МОЖНО ВОССТАНОВИТЬ")
+                  : t("ВСЁ НА СВОИХ МЕСТАХ")
+              }}</span>
+              <h1>{{ title }}</h1>
+              <p>
+                {{
+                  settings.configured
+                    ? t("{0} файлов{1}", {
+                        "0": total,
+                        "1": childFolders.length
+                          ? t(" · {0} папок", { "0": childFolders.length })
+                          : "",
+                      })
+                    : t("Пространство для ваших файлов, фотографий и идей")
+                }}
+              </p>
+            </div>
+            <div class="page-actions">
+              <template v-if="currentFolder && section === 'drive'"
+                ><button
+                  class="icon-button"
+                  :title="t('Переименовать папку')"
+                  :aria-label="t('Переименовать папку')"
+                  :disabled="busy"
+                  @click="openModal('renameFolder', [], currentFolder)"
+                >
+                  <i aria-hidden="true" class="ri-edit-line"></i></button
+                ><button
+                  class="icon-button"
+                  :title="t('Переместить папку')"
+                  :aria-label="t('Переместить папку')"
+                  :disabled="busy"
+                  @click="openModal('moveFolder', [], currentFolder)"
+                >
+                  <i
+                    aria-hidden="true"
+                    class="ri-folder-transfer-line"
+                  ></i></button
+                ><button
+                  class="icon-button"
+                  :title="t('Удалить пустую папку')"
+                  :aria-label="t('Удалить пустую папку')"
+                  :disabled="busy"
+                  @click="openModal('deleteFolder', [], currentFolder)"
+                >
+                  <i
+                    aria-hidden="true"
+                    class="ri-delete-bin-line"
+                  ></i></button></template
+              ><button
+                class="button"
+                :disabled="busy || !settings.configured"
+                @click="openModal('createFolder')"
+              >
+                <i aria-hidden="true" class="ri-folder-add-line"></i
+                >{{ t("Новая папка") }}</button
+              ><button
+                class="button"
+                :disabled="busy || !settings.configured"
+                @click="upload(true)"
+              >
+                <i aria-hidden="true" class="ri-folder-upload-line"></i
+                >{{ t("Загрузить папку") }}
+              </button>
+            </div>
+          </header>
+        </div>
+        <div v-if="settings.configured" class="file-controls">
           <div class="toolbar-area">
             <div v-show="!selection.length" class="file-toolbar">
               <div>
@@ -1820,196 +1753,274 @@ onBeforeUnmount(() => {
               /><output>{{ previewSize }} px</output></label
             >
           </div>
-          <div v-if="view === 'list' && files.length" class="list-heading">
-            <span>{{ t("Название") }}</span><span>{{ t("Размер") }}</span
-            ><span>{{ t("Дата добавления") }}</span
-            ><span></span>
-          </div>
+        </div>
+        <div
+          ref="filesScroll"
+          class="files-scroll"
+          :class="{ 'selecting-files': !!selectionBox }"
+          @pointerdown="startSelectionBox"
+          @pointermove="moveSelectionBox"
+          @pointerup="endSelectionBox"
+          @pointercancel="interruptSelectionBox"
+          @lostpointercapture="interruptSelectionBox"
+        >
           <div
-            :key="scope"
-            class="files"
-            :class="view"
-            :style="{ '--preview-size': `${previewSize}px` }"
-            :aria-busy="loading"
-          >
-            <article
-              v-for="file in files"
-              :key="file.id"
-              class="file-card"
-              :data-file-id="file.id"
-              :class="{
-                selected: highlightedIds.has(file.id),
-                'drag-source':
-                  draggedItems?.kind === 'files' &&
-                  draggedItems.ids.includes(file.id),
-              }"
-              :draggable="!busy && !file.trashed_at"
-              @dragstart.stop="fileDragStart($event, file)"
-              tabindex="0"
-              @click="select(file, $event)"
-              @dblclick="openPreview(file)"
-              @contextmenu="fileContext($event, file)"
-              @keydown.enter="openPreview(file)"
-              @keydown.space.self.prevent="select(file, $event, true)"
-            >
-              <div class="thumb-wrap">
-                <FileThumb
-                  :file="file"
-                  :compact="view === 'list'"
-                  :natural="view === 'gallery'"
-                /><button
-                  class="file-checkbox"
-                  :class="{ checked: highlightedIds.has(file.id) }"
-                  :aria-label="t('Выбрать {0}', { '0': file.name })"
-                  :aria-pressed="selectedIds.has(file.id)"
-                  @click.stop="select(file, $event, true)"
-                >
-                  <i
-                    aria-hidden="true"
-                    :class="
-                      highlightedIds.has(file.id)
-                        ? 'ri-checkbox-fill'
-                        : 'ri-checkbox-blank-line'
-                    "
-                  ></i></button
-                ><button
-                  class="favorite-button"
-                  :class="{ starred: file.favorite }"
-                  :disabled="busy"
-                  :aria-label="
-                    file.favorite ? t('Убрать из избранного') : t('В избранное')
-                  "
-                  @click.stop="patch([file.id], { favorite: !file.favorite })"
-                >
-                  <i
-                    aria-hidden="true"
-                    :class="file.favorite ? 'ri-star-fill' : 'ri-star-line'"
-                  ></i>
-                </button>
-              </div>
-              <div class="file-info">
-                <div class="file-name" :title="file.name">
-                  <i
-                    aria-hidden="true"
-                    :class="icon(file.mime_type, file.name)"
-                  ></i
-                  ><span>{{ file.name }}</span>
-                </div>
-                <small v-if="view !== 'list'"
-                  >{{ bytes(file.size_bytes) }}<span>·</span
-                  >{{ date(file.created_at) }}</small
-                >
-                <div
-                  v-if="file.tags.length && view !== 'list'"
-                  class="tag-chips"
-                >
-                  <span v-for="name in file.tags.slice(0, 3)" :key="name">{{
-                    name
-                  }}</span>
-                </div>
-              </div>
-              <span v-if="view === 'list'" class="list-meta">{{
-                bytes(file.size_bytes)
-              }}</span><span v-if="view === 'list'" class="list-meta">{{
-                date(file.created_at)
-              }}</span
-              ><button
-                class="file-open icon-button small"
-                :title="t('Открыть')"
-                :aria-label="t('Открыть файл')"
-                @click.stop="openPreview(file)"
-              >
-                <i aria-hidden="true" class="ri-arrow-right-up-line"></i>
-              </button>
-            </article>
-          </div>
-          <div
-            v-if="!files.length && !childFolders.length && !loading"
-            class="empty-state"
-          >
-            <div>
-              <i
-                aria-hidden="true"
-                :class="
-                  section === 'trash'
-                    ? 'ri-delete-bin-6-line'
-                    : search || tag
-                      ? 'ri-search-line'
-                      : 'ri-folder-open-line'
-                "
-              ></i>
+            v-if="selectionBox"
+            class="selection-box"
+            aria-hidden="true"
+            :style="{
+              left: `${selectionBox.left}px`,
+              top: `${selectionBox.top}px`,
+              width: `${selectionBox.width}px`,
+              height: `${selectionBox.height}px`,
+            }"
+          ></div>
+          <div v-if="!settings.configured" class="welcome-state">
+            <div class="welcome-illustration">
+              <i aria-hidden="true" class="ri-cloud-line"></i
+              ><span><i aria-hidden="true" class="ri-folder-3-fill"></i></span>
             </div>
-            <h2>
-              {{
-                search || tag
-                  ? t("Ничего не найдено")
-                  : section === "trash"
-                    ? t("Корзина пуста")
-                    : section === "favorites"
-                      ? t("Здесь будет избранное")
-                      : t("Здесь пока свободно")
-              }}
-            </h2>
+            <h2>{{ t("Ваши файлы. Ваше облако.") }}</h2>
             <p>
-              {{
-                search || tag
-                  ? t("Попробуйте другое имя или тег.")
-                  : section === "trash"
-                    ? t(
-                        "Удалённые файлы остаются здесь до окончательного удаления.",
-                      )
-                    : section === "favorites"
-                      ? t("Нажмите на звёздочку рядом с нужным файлом.")
-                      : t("Перетащите файлы сюда или загрузите целую папку.")
+              {{ t("Подключите R2 и D1, чтобы собрать всё в одном месте.")
+              }}<br />{{
+                t("Без собственного сервера и промежуточных сервисов.")
               }}
             </p>
-            <button
-              v-if="
-                !search && !tag && ['drive', 'all', 'photos'].includes(section)
-              "
-              class="button primary"
-              :disabled="busy"
-              @click="upload()"
-            >
-              <i aria-hidden="true" class="ri-upload-cloud-2-line"></i
-              >{{ t("Загрузить файлы") }}</button
-            ><button
-              v-if="section === 'drive' && !folderId && !search"
-              class="text-button"
-              :disabled="busy"
-              @click="openModal('import')"
-            >
-              {{ t("В R2 уже есть файлы? Добавить в каталог") }}
+            <button class="button primary" @click="settingsOpen = true">
+              <i aria-hidden="true" class="ri-plug-line"></i
+              >{{ t("Подключить Cloudflare") }}
             </button>
           </div>
-          <div v-if="loading && !loadingMore" class="loading-state">
-            <i aria-hidden="true" class="ri-loader-4-line spinning"></i
-            >{{ t("Загрузка каталога…") }}
-          </div>
-          <button
-            v-if="currentListing && hasMore"
-            ref="loadMoreButton"
-            class="button load-more"
-            :disabled="!canLoadMore"
-            @click="reload(true)"
-          >
-            <i
-              v-if="loadingMore"
-              aria-hidden="true"
-              class="ri-loader-4-line spinning"
-            ></i>
-            {{
-              loadingMore
-                ? t("Загрузка каталога…")
-                : pageFailed
-                  ? t("Повторить")
-                  : t("Показать ещё · {0} из {1}", {
-                      "0": files.length,
-                      "1": total,
+          <template v-else>
+            <div v-if="childFolders.length" class="folder-grid">
+              <button
+                v-for="folder in childFolders"
+                :key="folder.id"
+                class="folder-card"
+                :class="{
+                  'drop-target': dropTarget === folder.id,
+                  'drag-source':
+                    draggedItems?.kind === 'folder' &&
+                    draggedItems.id === folder.id,
+                }"
+                :title="folder.name"
+                @click="navigate('drive', folder.id)"
+                @contextmenu="folderContext($event, folder)"
+                :draggable="!busy"
+                @dragstart.stop="folderDragStart($event, folder)"
+                @dragover="folderDragOver($event, folder.id)"
+                @dragleave="folderDragLeave($event, folder.id)"
+                @drop="folderDrop($event, folder.id)"
+              >
+                <span class="folder-card-icon"
+                  ><i aria-hidden="true" class="ri-folder-3-fill"></i></span
+                ><span
+                  >{{ folder.name
+                  }}<small>{{
+                    t("{0} вложенных папок", {
+                      "0": folders.filter((f) => f.parent_id === folder.id)
+                        .length,
                     })
-            }}
-          </button>
-        </template>
+                  }}</small></span
+                ><i aria-hidden="true" class="ri-arrow-right-s-line"></i>
+              </button>
+            </div>
+            <div v-if="view === 'list' && files.length" class="list-heading">
+              <span>{{ t("Название") }}</span><span>{{ t("Размер") }}</span
+              ><span>{{ t("Дата добавления") }}</span
+              ><span></span>
+            </div>
+            <div
+              :key="scope"
+              class="files"
+              :class="view"
+              :style="{ '--preview-size': `${previewSize}px` }"
+              :aria-busy="loading"
+            >
+              <article
+                v-for="file in files"
+                :key="file.id"
+                class="file-card"
+                :data-file-id="file.id"
+                :class="{
+                  selected: highlightedIds.has(file.id),
+                  'drag-source':
+                    draggedItems?.kind === 'files' &&
+                    draggedItems.ids.includes(file.id),
+                }"
+                :draggable="!busy && !file.trashed_at"
+                @dragstart.stop="fileDragStart($event, file)"
+                tabindex="0"
+                @click="select(file, $event)"
+                @dblclick="openPreview(file)"
+                @contextmenu="fileContext($event, file)"
+                @keydown.enter="openPreview(file)"
+                @keydown.space.self.prevent="select(file, $event, true)"
+              >
+                <div class="thumb-wrap">
+                  <FileThumb
+                    :file="file"
+                    :compact="view === 'list'"
+                    :natural="view === 'gallery'"
+                  /><button
+                    class="file-checkbox"
+                    :class="{ checked: highlightedIds.has(file.id) }"
+                    :aria-label="t('Выбрать {0}', { '0': file.name })"
+                    :aria-pressed="selectedIds.has(file.id)"
+                    @click.stop="select(file, $event, true)"
+                  >
+                    <i
+                      aria-hidden="true"
+                      :class="
+                        highlightedIds.has(file.id)
+                          ? 'ri-checkbox-fill'
+                          : 'ri-checkbox-blank-line'
+                      "
+                    ></i></button
+                  ><button
+                    class="favorite-button"
+                    :class="{ starred: file.favorite }"
+                    :disabled="busy"
+                    :aria-label="
+                      file.favorite
+                        ? t('Убрать из избранного')
+                        : t('В избранное')
+                    "
+                    @click.stop="patch([file.id], { favorite: !file.favorite })"
+                  >
+                    <i
+                      aria-hidden="true"
+                      :class="file.favorite ? 'ri-star-fill' : 'ri-star-line'"
+                    ></i>
+                  </button>
+                </div>
+                <div class="file-info">
+                  <div class="file-name" :title="file.name">
+                    <i
+                      aria-hidden="true"
+                      :class="icon(file.mime_type, file.name)"
+                    ></i
+                    ><span>{{ file.name }}</span>
+                  </div>
+                  <small v-if="view !== 'list'"
+                    >{{ bytes(file.size_bytes) }}<span>·</span
+                    >{{ date(file.created_at) }}</small
+                  >
+                  <div
+                    v-if="file.tags.length && view !== 'list'"
+                    class="tag-chips"
+                  >
+                    <span v-for="name in file.tags.slice(0, 3)" :key="name">{{
+                      name
+                    }}</span>
+                  </div>
+                </div>
+                <span v-if="view === 'list'" class="list-meta">{{
+                  bytes(file.size_bytes)
+                }}</span><span v-if="view === 'list'" class="list-meta">{{
+                  date(file.created_at)
+                }}</span
+                ><button
+                  class="file-open icon-button small"
+                  :title="t('Открыть')"
+                  :aria-label="t('Открыть файл')"
+                  @click.stop="openPreview(file)"
+                >
+                  <i aria-hidden="true" class="ri-arrow-right-up-line"></i>
+                </button>
+              </article>
+            </div>
+            <div
+              v-if="!files.length && !childFolders.length && !loading"
+              class="empty-state"
+            >
+              <div>
+                <i
+                  aria-hidden="true"
+                  :class="
+                    section === 'trash'
+                      ? 'ri-delete-bin-6-line'
+                      : search || tag
+                        ? 'ri-search-line'
+                        : 'ri-folder-open-line'
+                  "
+                ></i>
+              </div>
+              <h2>
+                {{
+                  search || tag
+                    ? t("Ничего не найдено")
+                    : section === "trash"
+                      ? t("Корзина пуста")
+                      : section === "favorites"
+                        ? t("Здесь будет избранное")
+                        : t("Здесь пока свободно")
+                }}
+              </h2>
+              <p>
+                {{
+                  search || tag
+                    ? t("Попробуйте другое имя или тег.")
+                    : section === "trash"
+                      ? t(
+                          "Удалённые файлы остаются здесь до окончательного удаления.",
+                        )
+                      : section === "favorites"
+                        ? t("Нажмите на звёздочку рядом с нужным файлом.")
+                        : t("Перетащите файлы сюда или загрузите целую папку.")
+                }}
+              </p>
+              <button
+                v-if="
+                  !search &&
+                  !tag &&
+                  ['drive', 'all', 'photos'].includes(section)
+                "
+                class="button primary"
+                :disabled="busy"
+                @click="upload()"
+              >
+                <i aria-hidden="true" class="ri-upload-cloud-2-line"></i
+                >{{ t("Загрузить файлы") }}</button
+              ><button
+                v-if="section === 'drive' && !folderId && !search"
+                class="text-button"
+                :disabled="busy"
+                @click="openModal('import')"
+              >
+                {{ t("В R2 уже есть файлы? Добавить в каталог") }}
+              </button>
+            </div>
+            <div v-if="loading && !loadingMore" class="loading-state">
+              <i aria-hidden="true" class="ri-loader-4-line spinning"></i
+              >{{ t("Загрузка каталога…") }}
+            </div>
+            <button
+              v-if="currentListing && hasMore"
+              ref="loadMoreButton"
+              class="button load-more"
+              :disabled="!canLoadMore"
+              @click="reload(true)"
+            >
+              <i
+                v-if="loadingMore"
+                aria-hidden="true"
+                class="ri-loader-4-line spinning"
+              ></i>
+              {{
+                loadingMore
+                  ? t("Загрузка каталога…")
+                  : pageFailed
+                    ? t("Повторить")
+                    : t("Показать ещё · {0} из {1}", {
+                        "0": files.length,
+                        "1": total,
+                      })
+              }}
+            </button>
+          </template>
+        </div>
       </section>
       <footer class="workspace-footer">
         <span
