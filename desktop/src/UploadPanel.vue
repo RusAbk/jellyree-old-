@@ -107,7 +107,16 @@ function title(job: UploadJob) {
         <i aria-hidden="true" class="ri-subtract-line"></i>
       </button>
     </header>
-    <div v-if="jobs.length" class="upload-overall" role="status">
+    <div
+      v-if="pending"
+      class="upload-overall"
+      role="status"
+      :title="
+        summary.totalBytes
+          ? `${bytes(summary.loaded)} / ${bytes(summary.totalBytes)}`
+          : undefined
+      "
+    >
       <div>
         <span
           >{{ t("Общий прогресс")
@@ -122,10 +131,7 @@ function title(job: UploadJob) {
         :value="summary.indeterminate ? undefined : summary.percent"
         max="100"
         :aria-label="t('Общий прогресс загрузки')"
-      ></progress
-      ><small v-if="summary.totalBytes"
-        >{{ bytes(summary.loaded) }} / {{ bytes(summary.totalBytes) }}</small
-      >
+      ></progress>
     </div>
     <div
       class="upload-tabs"

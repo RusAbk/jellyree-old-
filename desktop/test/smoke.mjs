@@ -327,6 +327,16 @@ try {
     await dialog.waitFor({ state: "hidden" });
     await window.locator(".uploads-toggle strong").waitFor({ state: "hidden" });
   }
+  const overallUploadProgress = window.getByRole("progressbar", {
+    name: "Общий прогресс загрузки",
+    exact: true,
+  });
+  await window.locator(".upload-panel").waitFor();
+  assert.equal(
+    await overallUploadProgress.count(),
+    0,
+    "completion removes the progress bar while the panel stays open",
+  );
   await window.locator(".upload-button").click();
   await window
     .getByRole("dialog", {
@@ -335,6 +345,7 @@ try {
     })
     .waitFor();
   assert.equal(await window.locator(".upload-panel").count(), 1);
+  await overallUploadProgress.waitFor();
   await window.keyboard.press("Tab");
   await window.keyboard.press("Escape");
   await window.getByRole("dialog").waitFor({ state: "hidden" });
@@ -352,6 +363,11 @@ try {
     .getByRole("button", { name: "Отменить оставшиеся загрузки", exact: true })
     .click();
   await window.locator(".uploads-toggle strong").waitFor({ state: "hidden" });
+  assert.equal(
+    await overallUploadProgress.count(),
+    0,
+    "canceling the last job removes the progress bar",
+  );
   const uploadFixture = await electron.evaluate(() => ({
     questions: globalThis.__jellyreeUploadFixture.questions,
     answers: globalThis.__jellyreeUploadFixture.answers,
@@ -637,9 +653,10 @@ try {
   });
   assert.equal(scroll.scrollable, true);
   assert.ok(scroll.scroll > 0);
+  const uploadPanelBounds = await uploads.boundingBox();
+  assert.ok(uploadPanelBounds.width <= 321 && uploadPanelBounds.height <= 341);
   assert.ok(
-    (await uploads.locator(".upload-job").first().boundingBox()).height < 75,
-    "file rows remain compact",
+    (await uploads.locator(".upload-job").first().boundingBox()).height < 45,
   );
   await uploads
     .getByRole("progressbar", { name: "Общий прогресс загрузки", exact: true })
@@ -705,6 +722,8 @@ try {
     .click();
   await uploads.getByRole("tab", { name: /Загруженные/ }).click();
   await uploads.locator('.upload-job[data-state="issues"]').waitFor();
+  assert.equal(await uploads.getByRole("progressbar").count(), 0);
+  assert.equal(await window.locator(".upload-compact-percent").count(), 0);
   await uploads.getByText("Подробности", { exact: false }).click();
   await uploads
     .getByText("failed.jpg: Test network failure", { exact: true })
