@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import {
   ref,
+  shallowRef,
   reactive,
   computed,
   watch,
@@ -16,10 +17,21 @@ import {
   defaultImageAdjustments,
   adjustmentRanges,
   imageBounds,
+  cropRectangle,
   type ImageAdjustments,
 } from "../electron/image-adjustments.mjs";
 import { renderImage, cancelImageWork } from "./image-service";
-import type { Histogram } from "./image-pixels.mjs";
+import { stretchMapping, type Histogram } from "./image-pixels.mjs";
+import {
+  clamp,
+  dragCrop,
+  dragStretch,
+  type Band,
+  type CropMode,
+  type Point,
+  type Rectangle,
+  type StretchMode,
+} from "./image-geometry";
 import {
   editGroups,
   imagePresets,
@@ -73,16 +85,21 @@ let observer: ResizeObserver | undefined,
   request = 0,
   disposed = false;
 let previousFocus: HTMLElement | null = null;
-let drag:
-  | {
-      id: number;
-      mode: string;
-      x: number;
-      y: number;
-      original: ImageAdjustments;
-      last: { x: number; y: number };
-    }
-  | undefined;
+let gestureFrame = 0;
+type Drag = {
+  id: number;
+  mode: CropMode | "liquify" | StretchMode;
+  origin: Point;
+  start: Point;
+  pointer: Point;
+  original: ImageAdjustments;
+  crop: Rectangle;
+  aspect?: number;
+  stretch?: { source: number; map: ReturnType<typeof stretchMapping> };
+  last: Point;
+  moved: boolean;
+};
+let drag: Drag | undefined;
 const dirty = computed(
   () =>
     JSON.stringify(normalizeImageAdjustments(draft)) !==
@@ -91,6 +108,42 @@ const dirty = computed(
 const geometry = computed(
   () => section.value === "geometry" && !comparing.value,
 );
+const renderedGeometry = shallowRef<ImageAdjustments>();
+const geometryReady = computed(() => {
+  const rendered = renderedGeometry.value;
+  return (
+    geometry.value &&
+    rendered &&
+    rendered.rotate === draft.rotate &&
+    rendered.flipX === draft.flipX &&
+    rendered.flipY === draft.flipY
+  );
+});
+const stretchDraft = shallowRef<Band>();
+const stretchGuide = computed(() => {
+  const shown = renderedGeometry.value;
+  if (!shown || shown.stretchAxis !== draft.stretchAxis) return;
+  const map = stretchMapping(
+    shown.stretchStart,
+    shown.stretchEnd,
+    shown.stretchAmount,
+  );
+  const start = map.toDisplay(stretchDraft.value?.start ?? shown.stretchStart);
+  const end = map.toDisplay(stretchDraft.value?.end ?? shown.stretchEnd);
+  return shown.stretchAxis === "x"
+    ? {
+        left: `${start * 100}%`,
+        width: `${(end - start) * 100}%`,
+        top: 0,
+        height: "100%",
+      }
+    : {
+        top: `${start * 100}%`,
+        height: `${(end - start) * 100}%`,
+        left: 0,
+        width: "100%",
+      };
+});
 const fit = computed(() =>
   Math.min(
     1,
@@ -102,12 +155,18 @@ const frameStyle = computed(() => ({
   width: `${Math.max(1, (displaySize.value.width * fit.value * previewScale.value) / 100)}px`,
   height: `${Math.max(1, (displaySize.value.height * fit.value * previewScale.value) / 100)}px`,
 }));
-const cropStyle = computed(() => ({
-  left: `${draft.cropX * 100}%`,
-  top: `${draft.cropY * 100}%`,
-  width: `${draft.cropWidth * 100}%`,
-  height: `${draft.cropHeight * 100}%`,
-}));
+const crop = computed(() => cropRectangle(draft));
+const cropStyle = computed(() => {
+  const { x, y, width, height } = crop.value;
+  return {
+    "--crop-left": `${x * 100}%`,
+    "--crop-top": `${y * 100}%`,
+    "--crop-width": `${width * 100}%`,
+    "--crop-height": `${height * 100}%`,
+    "--crop-right": `${(x + width) * 100}%`,
+    "--crop-bottom": `${(y + height) * 100}%`,
+  };
+});
 const resultSize = computed(() =>
   imageBounds(sourceSize.value.width, sourceSize.value.height, draft),
 );
@@ -115,10 +174,12 @@ const controls = computed(
   () => editGroups.find((group) => group.id === section.value)?.controls || [],
 );
 const brushStyle = computed(() => {
-  if (!cursor.value || !frame.value) return {};
+  if (!cursor.value) return {};
   const size =
     (brushSize.value / 100) *
-    Math.min(frame.value.clientWidth, frame.value.clientHeight) *
+    Math.min(displaySize.value.width, displaySize.value.height) *
+    fit.value *
+    (previewScale.value / 100) *
     2;
   return {
     left: `${cursor.value.x * 100}%`,
@@ -203,28 +264,43 @@ function cropRatio() {
       : Number(ratio.value);
   Object.assign(draft, fitCrop(snapshot(), value, bounds.width, bounds.height));
 }
+function activeAspect() {
+  if (ratio.value === "free") return;
+  return ratio.value === "original"
+    ? resultSize.value.fullWidth / resultSize.value.fullHeight
+    : Number(ratio.value);
+}
 function setRotation(delta: number) {
   mutate(() => {
     draft.rotate = ((draft.rotate + delta + 540) % 360) - 180;
     cropRatio();
   });
 }
+const renderOptions = computed(() => {
+  const adjustments = comparing.value ? defaultImageAdjustments : snapshot();
+  return {
+    adjustments: geometry.value
+      ? {
+          ...adjustments,
+          cropX: 0,
+          cropY: 0,
+          cropWidth: 1,
+          cropHeight: 1,
+          cropZoom: 0,
+        }
+      : adjustments,
+    maxSize: 1200,
+    uncropped: geometry.value,
+    clipping: clipping.value && !comparing.value,
+  };
+});
 async function render() {
   if (!canvas.value || disposed) return;
   const id = ++request;
+  const options = renderOptions.value;
   rendering.value = true;
   try {
-    const result = await renderImage(
-      owner,
-      props.file,
-      {
-        adjustments: comparing.value ? defaultImageAdjustments : snapshot(),
-        maxSize: 1200,
-        uncropped: geometry.value,
-        clipping: clipping.value && !comparing.value,
-      },
-      true,
-    );
+    const result = await renderImage(owner, props.file, options, true);
     if (disposed || id !== request || !canvas.value) {
       result.bitmap?.close();
       return;
@@ -234,6 +310,9 @@ async function render() {
     canvas.value.height = image.height;
     canvas.value.getContext("2d")!.drawImage(image, 0, 0);
     displaySize.value = { width: image.width, height: image.height };
+    renderedGeometry.value = options.uncropped
+      ? options.adjustments
+      : undefined;
     sourceSize.value = {
       width: result.sourceWidth,
       height: result.sourceHeight,
@@ -249,117 +328,203 @@ async function render() {
   }
 }
 watch(
-  () => [
-    JSON.stringify(draft),
-    comparing.value,
-    geometry.value,
-    clipping.value,
-  ],
+  () => JSON.stringify(renderOptions.value),
   () => {
     clearTimeout(timer);
     timer = setTimeout(() => void render(), 45);
   },
 );
-function point(event: PointerEvent) {
-  const box = frame.value!.getBoundingClientRect();
-  return {
-    x: Math.max(0, Math.min(1, (event.clientX - box.left) / box.width)),
-    y: Math.max(0, Math.min(1, (event.clientY - box.top) / box.height)),
-  };
-}
+const clientPoint = (event: PointerEvent) => ({
+  x: event.clientX,
+  y: event.clientY,
+});
+const imagePoint = (point: Point, box: DOMRect) => ({
+  x: (point.x - box.left) / box.width,
+  y: (point.y - box.top) / box.height,
+});
+const inside = (point: Point) => ({ x: clamp(point.x), y: clamp(point.y) });
 function pointerDown(event: PointerEvent) {
   if (
-    !geometry.value ||
+    drag ||
+    !geometryReady.value ||
     busy.value ||
     event.button !== 0 ||
     !sourceSize.value.width
   )
     return;
+  const target = event.target as HTMLElement;
+  const origin = clientPoint(event);
+  const p = imagePoint(origin, frame.value!.getBoundingClientRect());
+  const original = snapshot();
+  let mode: Drag["mode"] = "liquify";
+  let stretch: Drag["stretch"];
+  if (tool.value === "stretch") {
+    const shown = renderedGeometry.value!;
+    if (
+      shown.stretchAxis !== draft.stretchAxis ||
+      shown.stretchStart !== draft.stretchStart ||
+      shown.stretchEnd !== draft.stretchEnd ||
+      shown.stretchAmount !== draft.stretchAmount
+    )
+      return;
+    const map = stretchMapping(
+      shown.stretchStart,
+      shown.stretchEnd,
+      shown.stretchAmount,
+    );
+    stretch = { map, source: map.toSource(p[shown.stretchAxis]) };
+    mode = (target.closest<HTMLElement>("[data-stretch]")?.dataset.stretch ??
+      "stretch-new") as StretchMode;
+  } else if (tool.value === "crop") {
+    mode = (target.closest<HTMLElement>("[data-handle]")?.dataset.handle ??
+      (target.closest(".crop-box") ? "move" : "new")) as CropMode;
+  }
   event.preventDefault();
   frame.value!.focus({ preventScroll: true });
   frame.value!.setPointerCapture(event.pointerId);
-  const p = point(event),
-    target = event.target as HTMLElement;
   drag = {
     id: event.pointerId,
-    mode:
-      tool.value === "crop"
-        ? target.dataset.handle ||
-          (target.closest(".crop-box") ? "move" : "new")
-        : tool.value,
-    x: p.x,
-    y: p.y,
-    original: snapshot(),
-    last: p,
+    mode,
+    origin,
+    pointer: origin,
+    start: mode === "new" ? inside(p) : p,
+    original,
+    crop: crop.value,
+    aspect: activeAspect(),
+    stretch,
+    last: inside(p),
+    moved: false,
   };
+}
+function applyDrag(current: Drag, final = false) {
+  const box = frame.value!.getBoundingClientRect();
+  const p = imagePoint(current.pointer, box);
+  cursor.value = inside(p);
+  if (current.stretch) {
+    const a = current.original;
+    stretchDraft.value = dragStretch(
+      current.mode as StretchMode,
+      { start: a.stretchStart, end: a.stretchEnd },
+      current.stretch.source,
+      current.stretch.map.toSource(p[a.stretchAxis]),
+    );
+  } else if (current.mode === "liquify") {
+    const point = inside(p),
+      { x, y } = current.last;
+    const dx = point.x - x,
+      dy = point.y - y;
+    const distance = Math.hypot(dx * box.width, dy * box.height);
+    const radius = brushSize.value / 100;
+    const radiusPx = radius * Math.min(box.width, box.height);
+    if (distance < (final ? 0.25 : Math.max(2, radiusPx * 0.12))) return;
+    const steps = Math.min(
+      128 - draft.strokes.length,
+      Math.ceil(distance / (radiusPx * 0.4)),
+    );
+    if (!steps) return;
+    for (let i = 0; i < steps; i++) {
+      draft.strokes.push({
+        x: clamp(x + (dx * i) / steps),
+        y: clamp(y + (dy * i) / steps),
+        dx: dx / steps,
+        dy: dy / steps,
+        radius,
+        strength: brushStrength.value / 100,
+      });
+    }
+    current.last = point;
+  } else {
+    const next = dragCrop(
+      current.mode as CropMode,
+      current.crop,
+      current.start,
+      p,
+      {
+        width: resultSize.value.fullWidth,
+        height: resultSize.value.fullHeight,
+      },
+      current.aspect,
+    );
+    Object.assign(draft, {
+      cropX: next.x,
+      cropY: next.y,
+      cropWidth: next.width,
+      cropHeight: next.height,
+      cropZoom: 0,
+    });
+  }
+}
+function edgeScroll() {
+  gestureFrame = 0;
+  if (!drag || !viewport.value || drag.mode === "liquify") return;
+  const pane = viewport.value,
+    bounds = pane.getBoundingClientRect();
+  const speed = (p: number, start: number, end: number) =>
+    clamp(
+      (p < start + 26 ? p - start - 26 : Math.max(0, p - end + 26)) / 3,
+      -20,
+      20,
+    );
+  const left = pane.scrollLeft,
+    top = pane.scrollTop;
+  pane.scrollBy(
+    speed(drag.pointer.x, bounds.left, bounds.right),
+    speed(drag.pointer.y, bounds.top, bounds.bottom),
+  );
+  if (pane.scrollLeft !== left || pane.scrollTop !== top) {
+    applyDrag(drag);
+    gestureFrame = requestAnimationFrame(edgeScroll);
+  }
 }
 function pointerMove(event: PointerEvent) {
   if (!frame.value) return;
-  const p = point(event);
-  cursor.value = p;
-  if (!drag || drag.id !== event.pointerId) return;
-  const a = drag.original,
-    dx = p.x - drag.x,
-    dy = p.y - drag.y;
-  if (drag.mode === "liquify") {
-    if (
-      draft.strokes.length >= 128 ||
-      Math.hypot(p.x - drag.last.x, p.y - drag.last.y) < 0.008
-    )
-      return;
-    draft.strokes.push({
-      ...drag.last,
-      dx: p.x - drag.last.x,
-      dy: p.y - drag.last.y,
-      radius: brushSize.value / 100,
-      strength: brushStrength.value / 100,
-    });
-    drag.last = p;
-  } else if (drag.mode === "stretch") {
-    const start = draft.stretchAxis === "x" ? drag.x : drag.y,
-      end = draft.stretchAxis === "x" ? p.x : p.y;
-    draft.stretchStart = Math.min(0.98, Math.min(start, end));
-    draft.stretchEnd = Math.max(
-      draft.stretchStart + 0.02,
-      Math.max(start, end),
+  const pointer = clientPoint(event);
+  if (!drag || drag.id !== event.pointerId) {
+    cursor.value = inside(
+      imagePoint(pointer, frame.value.getBoundingClientRect()),
     );
-  } else if (drag.mode === "move") {
-    draft.cropX = Math.max(0, Math.min(1 - a.cropWidth, a.cropX + dx));
-    draft.cropY = Math.max(0, Math.min(1 - a.cropHeight, a.cropY + dy));
-  } else {
-    let left = a.cropX,
-      top = a.cropY,
-      right = left + a.cropWidth,
-      bottom = top + a.cropHeight;
-    if (drag.mode === "new") {
-      left = Math.min(drag.x, p.x);
-      top = Math.min(drag.y, p.y);
-      right = Math.max(drag.x, p.x);
-      bottom = Math.max(drag.y, p.y);
-    } else {
-      if (drag.mode.includes("w"))
-        left = Math.max(0, Math.min(right - 0.02, left + dx));
-      if (drag.mode.includes("e"))
-        right = Math.min(1, Math.max(left + 0.02, right + dx));
-      if (drag.mode.includes("n"))
-        top = Math.max(0, Math.min(bottom - 0.02, top + dy));
-      if (drag.mode.includes("s"))
-        bottom = Math.min(1, Math.max(top + 0.02, bottom + dy));
-    }
-    const width = Math.max(0.02, right - left),
-      height = Math.max(0.02, bottom - top);
-    draft.cropX = Math.min(1 - width, left);
-    draft.cropY = Math.min(1 - height, top);
-    draft.cropWidth = width;
-    draft.cropHeight = height;
-    cropRatio();
+    return;
   }
+  drag.pointer = pointer;
+  drag.moved ||=
+    Math.hypot(pointer.x - drag.origin.x, pointer.y - drag.origin.y) >= 3;
+  if (!drag.moved) return;
+  applyDrag(drag);
+  if (!gestureFrame && drag.mode !== "liquify")
+    gestureFrame = requestAnimationFrame(edgeScroll);
+}
+function finishDrag(canceled: boolean) {
+  if (!drag) return false;
+  const current = drag;
+  drag = undefined;
+  cancelAnimationFrame(gestureFrame);
+  gestureFrame = 0;
+  if (frame.value?.hasPointerCapture(current.id))
+    frame.value.releasePointerCapture(current.id);
+  if (canceled && current.moved) Object.assign(draft, current.original);
+  if (!canceled && current.moved) {
+    if (stretchDraft.value) {
+      draft.stretchStart = stretchDraft.value.start;
+      draft.stretchEnd = stretchDraft.value.end;
+    }
+    record();
+  }
+  stretchDraft.value = undefined;
+  return true;
 }
 function pointerUp(event: PointerEvent) {
   if (!drag || drag.id !== event.pointerId) return;
-  frame.value?.releasePointerCapture(event.pointerId);
-  drag = undefined;
-  record();
+  drag.pointer = clientPoint(event);
+  drag.moved ||=
+    Math.hypot(
+      drag.pointer.x - drag.origin.x,
+      drag.pointer.y - drag.origin.y,
+    ) >= 3;
+  if (drag.moved) applyDrag(drag, true);
+  finishDrag(false);
+}
+function pointerCancel(event: PointerEvent) {
+  if (drag?.id === event.pointerId) finishDrag(true);
 }
 function close() {
   if (busy.value) return;
@@ -434,6 +599,7 @@ function keydown(event: KeyboardEvent) {
   }
   if (event.key === "Escape") {
     event.preventDefault();
+    if (finishDrag(true)) return;
     if (discard.value) discard.value = false;
     else close();
   }
@@ -478,6 +644,7 @@ onBeforeUnmount(() => {
   disposed = true;
   request++;
   clearTimeout(timer);
+  finishDrag(true);
   cancelImageWork(owner);
   cancelImageWork(exportOwner);
   observer?.disconnect();
@@ -583,10 +750,12 @@ onBeforeUnmount(() => {
               :style="frameStyle"
               tabindex="0"
               :aria-label="t('Область изображения')"
+              :aria-busy="geometry && !geometryReady"
               @pointerdown="pointerDown"
               @pointermove="pointerMove"
               @pointerup="pointerUp"
-              @pointercancel="pointerUp"
+              @pointercancel="pointerCancel"
+              @lostpointercapture="pointerCancel"
               @pointerleave="!drag && (cursor = undefined)"
             >
               <canvas
@@ -597,39 +766,48 @@ onBeforeUnmount(() => {
                 role="img"
               ></canvas>
               <div
-                v-if="geometry && tool === 'crop' && sourceSize.width"
-                class="crop-box"
+                v-if="geometryReady && tool === 'crop'"
+                class="crop-guide"
                 :style="cropStyle"
               >
-                <span
-                  v-for="handle in ['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w']"
-                  :key="handle"
-                  class="crop-handle"
-                  :class="handle"
-                  :data-handle="handle"
-                ></span>
+                <div class="crop-shade"></div>
+                <div class="crop-box">
+                  <span
+                    v-for="handle in [
+                      'nw',
+                      'n',
+                      'ne',
+                      'e',
+                      'se',
+                      's',
+                      'sw',
+                      'w',
+                    ]"
+                    :key="handle"
+                    class="crop-handle"
+                    :class="handle"
+                    :data-handle="handle"
+                  ></span>
+                </div>
               </div>
               <div
-                v-if="geometry && tool === 'stretch'"
+                v-if="geometryReady && tool === 'stretch' && stretchGuide"
                 class="stretch-band"
-                :style="
-                  draft.stretchAxis === 'x'
-                    ? {
-                        left: `${draft.stretchStart * 100}%`,
-                        width: `${(draft.stretchEnd - draft.stretchStart) * 100}%`,
-                        top: 0,
-                        height: '100%',
-                      }
-                    : {
-                        top: `${draft.stretchStart * 100}%`,
-                        height: `${(draft.stretchEnd - draft.stretchStart) * 100}%`,
-                        left: 0,
-                        width: '100%',
-                      }
-                "
-              ></div>
+                :class="{ horizontal: draft.stretchAxis === 'x' }"
+                :style="stretchGuide"
+                data-stretch="stretch-move"
+              >
+                <span
+                  class="stretch-handle start"
+                  data-stretch="stretch-start"
+                ></span>
+                <span
+                  class="stretch-handle end"
+                  data-stretch="stretch-end"
+                ></span>
+              </div>
               <span
-                v-if="geometry && tool === 'liquify' && cursor"
+                v-if="geometryReady && tool === 'liquify' && cursor"
                 class="liquify-cursor"
                 :style="brushStyle"
               ></span>
@@ -819,6 +997,23 @@ onBeforeUnmount(() => {
                   )
                 }}
               </p>
+              <button
+                class="button"
+                @click="
+                  mutate(() => {
+                    ratio = 'free';
+                    Object.assign(draft, {
+                      cropX: 0,
+                      cropY: 0,
+                      cropWidth: 1,
+                      cropHeight: 1,
+                      cropZoom: 0,
+                    });
+                  })
+                "
+              >
+                {{ t("На весь кадр") }}
+              </button>
             </template>
             <template v-if="tool === 'liquify'"
               ><label class="editor-slider"
@@ -878,7 +1073,9 @@ onBeforeUnmount(() => {
               /></label>
               <p class="editor-hint">
                 {{
-                  t("Потяните по изображению, чтобы выбрать полосу растяжения.")
+                  t(
+                    "Перетащите полосу или её границы. Чтобы выбрать новую полосу, начните снаружи.",
+                  )
                 }}
               </p>
               <button

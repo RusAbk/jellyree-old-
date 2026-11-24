@@ -17,5 +17,13 @@ export function stretchCoordinate(
   end: number,
   amount: number,
 ): number;
+export function stretchMapping(
+  start: number,
+  end: number,
+  amount: number,
+): {
+  toSource(value: number): number;
+  toDisplay(value: number): number;
+};
 export type Histogram = { bins: number[]; shadows: number; highlights: number };
 export function imageHistogram(data: Uint8ClampedArray): Histogram;

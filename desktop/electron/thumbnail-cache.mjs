@@ -33,8 +33,13 @@ export function thumbnailKey(namespace, revision) {
   return createHash("sha256")
     .update(
       JSON.stringify({
-        // HEIC previews now bake in orientation and edits in the decoder worker.
-        version: isHeicFile({ name: "", mime_type: revision.mimeType }) ? 2 : 1,
+        // Brush sampling changed in stretched coordinates. Old edited WebPs
+        // must be regenerated to match the viewer and export.
+        version: revision.adjustments?.strokes?.length
+          ? 3
+          : isHeicFile({ name: "", mime_type: revision.mimeType })
+            ? 2
+            : 1,
         namespace,
         id: revision.id,
         objectKey: revision.objectKey,

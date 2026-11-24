@@ -208,6 +208,7 @@ export const editorMessages = {
   Свободно: { en: "Free", es: "Libre" },
   Исходные: { en: "Original ratio", es: "Proporción original" },
   "Приближение кадра": { en: "Crop zoom", es: "Zoom de recorte" },
+  "На весь кадр": { en: "Full image", es: "Imagen completa" },
   "Перетащите рамку или её края. Потяните по изображению, чтобы задать новый кадр.":
     {
       en: "Drag the frame or its edges. Drag on the image to draw a new crop.",
@@ -225,10 +226,11 @@ export const editorMessages = {
   "По вертикали": { en: "Vertical", es: "Vertical" },
   "По горизонтали": { en: "Horizontal", es: "Horizontal" },
   "Сила растяжения": { en: "Stretch amount", es: "Cantidad de estiramiento" },
-  "Потяните по изображению, чтобы выбрать полосу растяжения.": {
-    en: "Drag on the image to select the stretch band.",
-    es: "Arrastra sobre la imagen para seleccionar la franja de estiramiento.",
-  },
+  "Перетащите полосу или её границы. Чтобы выбрать новую полосу, начните снаружи.":
+    {
+      en: "Drag the band or its edges. Start outside it to select a new band.",
+      es: "Arrastra la franja o sus bordes. Empieza fuera para seleccionar otra franja.",
+    },
   "Сбросить растяжение": {
     en: "Reset stretch",
     es: "Restablecer estiramiento",

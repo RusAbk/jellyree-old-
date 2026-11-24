@@ -122,21 +122,38 @@ export function adjustPixels(source, width, height, a) {
   }
   return out;
 }
-export function stretchCoordinate(value, start, end, amount) {
-  if (!amount || end - start > 0.98) return value;
+function mapBand(value, start, end, nextStart, nextEnd) {
+  if (value <= 0 || value >= 1) return clamp(value, 0, 1);
+  if (value < start) return (value * nextStart) / start;
+  if (value <= end)
+    return (
+      nextStart + ((value - start) * (nextEnd - nextStart)) / (end - start)
+    );
+  return nextEnd + ((value - end) * (1 - nextEnd)) / (1 - end);
+}
+export function stretchMapping(start, end, amount) {
+  if (!amount || end - start > 0.98) {
+    const same = (value) => clamp(value, 0, 1);
+    return { toSource: same, toDisplay: same };
+  }
   const length = end - start,
     target = clamp(length * (1 + amount / 100), 0.02, 0.98);
-  const before = (start * (1 - target)) / (1 - length),
-    after = before + target;
-  if (value < before) return before ? (value * start) / before : 0;
-  if (value <= after) return start + ((value - before) * length) / target;
-  return end + ((value - after) * (1 - end)) / (1 - after);
+  const before = end === 1 ? 1 - target : (start * (1 - target)) / (1 - length);
+  const after = end === 1 ? 1 : before + target;
+  return {
+    toSource: (value) => mapBand(value, before, after, start, end),
+    toDisplay: (value) => mapBand(value, start, end, before, after),
+  };
+}
+export function stretchCoordinate(value, start, end, amount) {
+  return stretchMapping(start, end, amount).toSource(value);
 }
 export function warpPixels(source, width, height, a) {
   if (!a.strokes.length && !a.stretchAmount) return source;
   const out = new Uint8ClampedArray(source.length);
-  const dx = new Float32Array(width * height),
-    dy = new Float32Array(width * height);
+  const dx = a.strokes.length ? new Float32Array(width * height) : undefined,
+    dy = a.strokes.length ? new Float32Array(width * height) : undefined;
+  const stretch = stretchMapping(a.stretchStart, a.stretchEnd, a.stretchAmount);
   for (const stroke of a.strokes) {
     const cx = stroke.x * width,
       cy = stroke.y * height,
@@ -151,7 +168,7 @@ export function warpPixels(source, width, height, a) {
         x <= Math.min(width - 1, Math.ceil(cx + radius));
         x++
       ) {
-        const d = Math.hypot(x - cx, y - cy) / radius;
+        const d = Math.hypot(x + 0.5 - cx, y + 0.5 - cy) / radius;
         if (d >= 1) continue;
         const n = y * width + x,
           weight = (1 - d * d) ** 2 * stroke.strength;
@@ -163,14 +180,13 @@ export function warpPixels(source, width, height, a) {
   for (let y = 0; y < height; y++)
     for (let x = 0; x < width; x++) {
       const n = y * width + x;
-      let u = (x + 0.5) / width,
-        v = (y + 0.5) / height;
-      if (a.stretchAxis === "x")
-        u = stretchCoordinate(u, a.stretchStart, a.stretchEnd, a.stretchAmount);
-      else
-        v = stretchCoordinate(v, a.stretchStart, a.stretchEnd, a.stretchAmount);
-      const sx = clamp(u * width - 0.5 - dx[n], 0, width - 1),
-        sy = clamp(v * height - 0.5 - dy[n], 0, height - 1);
+      // Brush displacements are measured in the displayed, stretched image.
+      let u = (x + 0.5 - (dx?.[n] ?? 0)) / width,
+        v = (y + 0.5 - (dy?.[n] ?? 0)) / height;
+      if (a.stretchAxis === "x") u = stretch.toSource(u);
+      else v = stretch.toSource(v);
+      const sx = clamp(u * width - 0.5, 0, width - 1),
+        sy = clamp(v * height - 0.5, 0, height - 1);
       const x0 = Math.floor(sx),
         y0 = Math.floor(sy),
         x1 = Math.min(width - 1, x0 + 1),

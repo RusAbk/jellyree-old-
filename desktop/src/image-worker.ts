@@ -1,6 +1,7 @@
 import {
   normalizeImageAdjustments,
   imageBounds,
+  cropRectangle,
 } from "../electron/image-adjustments.mjs";
 import { adjustPixels, warpPixels, imageHistogram } from "./image-pixels.mjs";
 import type { ImageRenderRequest } from "./image-service";
@@ -101,29 +102,19 @@ channel.onmessage = async ({
     }
     const output = new OffscreenCanvas(bounds.width, bounds.height),
       outputCtx = output.getContext("2d", { willReadFrequently: true })!;
-    const zoom = data.uncropped ? 1 : 1 + a.cropZoom / 100;
-    const cropW = data.uncropped
-        ? rotated.width
-        : (rotated.width * a.cropWidth) / zoom,
-      cropH = data.uncropped
-        ? rotated.height
-        : (rotated.height * a.cropHeight) / zoom;
-    const cropX = data.uncropped
-        ? 0
-        : rotated.width * (a.cropX + a.cropWidth / 2) - cropW / 2,
-      cropY = data.uncropped
-        ? 0
-        : rotated.height * (a.cropY + a.cropHeight / 2) - cropH / 2;
+    const crop = data.uncropped
+      ? { x: 0, y: 0, width: 1, height: 1 }
+      : cropRectangle(a);
     if (data.export === "jpeg") {
       outputCtx.fillStyle = "#ffffff";
       outputCtx.fillRect(0, 0, output.width, output.height);
     }
     outputCtx.drawImage(
       rotated,
-      cropX,
-      cropY,
-      cropW,
-      cropH,
+      crop.x * rotated.width,
+      crop.y * rotated.height,
+      crop.width * rotated.width,
+      crop.height * rotated.height,
       0,
       0,
       output.width,

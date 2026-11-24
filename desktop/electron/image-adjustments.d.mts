@@ -54,6 +54,12 @@ export const defaultImageAdjustments: Readonly<ImageAdjustments>;
 export function needsImageProcessing(
   input?: Partial<ImageAdjustments>,
 ): boolean;
+export function cropRectangle(input: ImageAdjustments): {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+};
 export function imageBounds(
   width: number,
   height: number,

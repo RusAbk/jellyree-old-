@@ -91,6 +91,17 @@ export function needsImageProcessing(input = {}) {
       JSON.stringify(a[key]) !== JSON.stringify(defaultImageAdjustments[key]),
   );
 }
+export function cropRectangle(a) {
+  const scale = 1 + a.cropZoom / 100;
+  const width = a.cropWidth / scale;
+  const height = a.cropHeight / scale;
+  return {
+    x: a.cropX + (a.cropWidth - width) / 2,
+    y: a.cropY + (a.cropHeight - height) / 2,
+    width,
+    height,
+  };
+}
 export function imageBounds(width, height, input = {}, uncropped = false) {
   const a = normalizeImageAdjustments(input),
     angle = (a.rotate * Math.PI) / 180;
@@ -106,15 +117,15 @@ export function imageBounds(width, height, input = {}, uncropped = false) {
       Math.abs(height * Math.cos(angle)) + Math.abs(width * Math.sin(angle)),
     ),
   );
-  const zoom = 1 + a.cropZoom / 100;
+  const crop = cropRectangle(a);
   return {
     fullWidth,
     fullHeight,
     width: uncropped
       ? fullWidth
-      : Math.max(1, Math.round((fullWidth * a.cropWidth) / zoom)),
+      : Math.max(1, Math.round(fullWidth * crop.width)),
     height: uncropped
       ? fullHeight
-      : Math.max(1, Math.round((fullHeight * a.cropHeight) / zoom)),
+      : Math.max(1, Math.round(fullHeight * crop.height)),
   };
 }

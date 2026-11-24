@@ -9,6 +9,7 @@ import {
   adjustPixels,
   warpPixels,
   stretchCoordinate,
+  stretchMapping,
   imageHistogram,
 } from "../src/image-pixels.mjs";
 import {
@@ -16,6 +17,7 @@ import {
   smartAuto,
   resetColorAndTone,
 } from "../src/image-editor-model.ts";
+import { dragCrop, dragStretch } from "../src/image-geometry.ts";
 
 test("desktop edit documents preserve old defaults and validate geometry, brush and scalar bounds", () => {
   const old = normalize({ brightness: 120, rotate: 90 });
@@ -78,6 +80,60 @@ test("color pipeline is identity at defaults, preserves alpha and produces real 
     assert.notDeepEqual(result, source, JSON.stringify(values));
     assert.equal(result[7], source[7]);
   }
+});
+
+test("crop grips reach the canvas boundary without moving the opposite corner", () => {
+  const image = { width: 400, height: 600 };
+  const rect = { x: 0.15, y: 0.1, width: 0.6, height: 0.4 };
+  const start = { x: 0.762, y: 0.513 };
+  const free = dragCrop("se", rect, start, { x: 1, y: 1 }, image);
+  assert.ok(Math.abs(free.y - rect.y) < 1e-10);
+  assert.equal(free.x, rect.x);
+  assert.equal(free.x + free.width, 1);
+  assert.equal(free.y + free.height, 1);
+  const locked = dragCrop("se", rect, start, { x: 1, y: 0.53 }, image, 1);
+  assert.deepEqual(locked, { ...rect, width: 0.85, height: 0.85 / 1.5 });
+  const otherCorner = dragCrop(
+    "nw",
+    rect,
+    { x: 0.14, y: 0.09 },
+    { x: 0, y: 0 },
+    image,
+    1,
+  );
+  assert.equal(otherCorner.x + otherCorner.width, 0.75);
+  assert.ok(Math.abs(otherCorner.y + otherCorner.height - 0.5) < 1e-10);
+  assert.equal(
+    otherCorner.width * image.width,
+    otherCorner.height * image.height,
+  );
+});
+
+test("stretch maps a picked band through the current deformation on either axis", () => {
+  for (const [start, end, amount] of [
+    [0.16, 0.41, 70],
+    [0.82, 1, -60],
+    [0, 0.3, 85],
+  ]) {
+    const map = stretchMapping(start, end, amount);
+    for (const coordinate of [0, 0.08, start, (start + end) / 2, end, 0.92, 1])
+      assert.ok(
+        Math.abs(map.toSource(map.toDisplay(coordinate)) - coordinate) < 1e-10,
+      );
+  }
+  const map = stretchMapping(0.2, 0.5, 60);
+  const picked = dragStretch(
+    "stretch-new",
+    { start: 0.2, end: 0.5 },
+    map.toSource(0.8),
+    map.toSource(0.66),
+  );
+  assert.ok(Math.abs(map.toDisplay(picked.start) - 0.66) < 1e-10);
+  assert.ok(Math.abs(map.toDisplay(picked.end) - 0.8) < 1e-10);
+  assert.deepEqual(
+    dragStretch("stretch-move", { start: 0.2, end: 0.45 }, 0.3, 1),
+    { start: 0.75, end: 1 },
+  );
 });
 
 test("liquify and stretch move pixels while retaining dimensions and fixed image edges", () => {

@@ -177,10 +177,36 @@ try {
       document.querySelector('input[aria-label="Температура"]')?.value === "60",
   );
   await editor.getByRole("button", { name: "Геометрия", exact: true }).click();
+  const frame = editor.locator(".editor-image-frame");
+  await editor.locator(".crop-guide").waitFor();
+  const viewport = await frame.boundingBox();
+  await slider("Приближение кадра", 50);
+  const guide = editor.locator(".crop-box");
+  const edge = await editor.locator(".crop-handle.e").boundingBox();
+  assert.ok(
+    Math.abs((await guide.boundingBox()).width / viewport.width - 2 / 3) < 0.01,
+  );
+  await page.mouse.move(edge.x + edge.width / 2 - 5, edge.y + edge.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(
+    viewport.x + viewport.width + 3,
+    edge.y + edge.height / 2,
+    { steps: 8 },
+  );
+  await page.mouse.up();
+  const extended = await guide.boundingBox();
+  assert.ok(
+    Math.abs(extended.x + extended.width - (viewport.x + viewport.width)) < 1,
+  );
+  await editor
+    .getByRole("button", { name: "На весь кадр", exact: true })
+    .click();
+  assert.ok(Math.abs((await guide.boundingBox()).width - viewport.width) < 1);
   await editor
     .getByRole("combobox", { name: "Пропорции кадра", exact: true })
     .selectOption("1");
-  const cropBefore = await editor.locator(".crop-box").getAttribute("style");
+  const cropBefore = await editor.locator(".crop-guide").getAttribute("style");
+  const beforeBounds = await guide.boundingBox();
   const cropHandle = await editor.locator(".crop-handle.se").boundingBox();
   await page.mouse.move(
     cropHandle.x + cropHandle.width / 2,
@@ -190,22 +216,28 @@ try {
   await page.mouse.move(cropHandle.x - 24, cropHandle.y - 24, { steps: 6 });
   await page.mouse.up();
   assert.notEqual(
-    await editor.locator(".crop-box").getAttribute("style"),
+    await editor.locator(".crop-guide").getAttribute("style"),
     cropBefore,
   );
+  const afterBounds = await guide.boundingBox();
+  assert.ok(
+    Math.abs(afterBounds.x - beforeBounds.x) < 1 &&
+      Math.abs(afterBounds.y - beforeBounds.y) < 1,
+  );
+  assert.ok(Math.abs(afterBounds.width - afterBounds.height) < 1);
   await editor
     .getByRole("button", { name: "Отменить шаг", exact: true })
     .click();
   assert.equal(
-    await editor.locator(".crop-box").getAttribute("style"),
+    await editor.locator(".crop-guide").getAttribute("style"),
     cropBefore,
   );
   await editor
     .getByRole("button", { name: "Отразить по горизонтали", exact: true })
     .click();
   await editor.getByRole("button", { name: "Пластика", exact: true }).click();
-  const frame = editor.locator(".editor-image-frame"),
-    bounds = await frame.boundingBox();
+  await editor.locator('.editor-image-frame[aria-busy="false"]').waitFor();
+  const bounds = await frame.boundingBox();
   await page.mouse.move(
     bounds.x + bounds.width * 0.45,
     bounds.y + bounds.height * 0.5,
@@ -220,6 +252,35 @@ try {
   await editor.getByText(/Мазков: [1-9]/).waitFor();
   await editor.getByRole("button", { name: "Растяжение", exact: true }).click();
   await slider("Сила растяжения", 30);
+  await page.waitForFunction(() => {
+    const band = document.querySelector(".stretch-band");
+    return (
+      band &&
+      Math.abs(parseFloat(band.style.top) - 24) < 0.01 &&
+      Math.abs(parseFloat(band.style.height) - 52) < 0.01
+    );
+  });
+  const x = bounds.x + bounds.width * 0.5;
+  await page.mouse.move(x, bounds.y + bounds.height * 0.08);
+  await page.mouse.down();
+  await page.mouse.move(x, bounds.y + bounds.height * 0.19, { steps: 8 });
+  const band = editor.locator(".stretch-band");
+  const picking = await band.boundingBox();
+  assert.ok(Math.abs(picking.y - bounds.y - bounds.height * 0.08) < 2);
+  assert.ok(
+    Math.abs(picking.y + picking.height - bounds.y - bounds.height * 0.19) < 2,
+  );
+  await page.mouse.up();
+  // The original region under the pointer is 0.10..0.2375 under the old warp.
+  await page.waitForFunction(() => {
+    const band = document.querySelector(".stretch-band");
+    return (
+      band &&
+      parseFloat(band.style.top) < 12 &&
+      parseFloat(band.style.height) > 16 &&
+      parseFloat(band.style.height) < 20
+    );
+  });
   await editor.getByRole("button", { name: "Детали", exact: true }).click();
   await slider("Резкость", 25);
   await slider("Виньетка", 20);
@@ -298,6 +359,8 @@ try {
   assert.equal(result.file.adjustments.temperature, 60);
   assert.equal(result.file.adjustments.flipX, true);
   assert.equal(result.file.adjustments.stretchAmount, 30);
+  assert.ok(Math.abs(result.file.adjustments.stretchStart - 0.1) < 0.01);
+  assert.ok(Math.abs(result.file.adjustments.stretchEnd - 0.2375) < 0.01);
   assert.ok(result.file.adjustments.strokes.length > 0);
   assert.equal(result.exports[0].format, "png");
   assert.deepEqual(result.exports[0].size, { width: 400, height: 400 });
