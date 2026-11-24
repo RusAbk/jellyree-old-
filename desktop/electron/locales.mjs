@@ -15,6 +15,7 @@ export const messages = {
   },
   Медиалента: { en: "Media timeline", es: "Cronología multimedia" },
   "Открыть меню": { en: "Open menu", es: "Abrir menú" },
+  "Загрузка отменена.": { en: "Loading canceled.", es: "Carga cancelada." },
   "Закрыть меню": { en: "Close menu", es: "Cerrar menú" },
   "Ошибка Cloudflare D1 (HTTP {0}).": {
     en: "Cloudflare D1 error (HTTP {0}).",

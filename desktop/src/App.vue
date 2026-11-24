@@ -566,6 +566,14 @@ function showContext(
   };
 }
 function fileContext(event: MouseEvent, file: DriveFile) {
+  if (mobile) {
+    showContext(
+      event,
+      "files",
+      selectedIds.value.has(file.id) ? selection.value : [file.id],
+    );
+    return;
+  }
   if (!selectedIds.value.has(file.id)) selectOnly(file.id);
   showContext(event, "files", selection.value);
 }
@@ -600,7 +608,10 @@ function chooseContext(id: string) {
           editing.value = true;
       });
   }
-  if (id === "info") inspectorOpen.value = true;
+  if (id === "info") {
+    if (mobile && menu.ids[0]) selectOnly(menu.ids[0]);
+    inspectorOpen.value = true;
+  }
   if (id === "download") void download(menu.ids);
   if (id === "share") void share(menu.ids[0]!);
   if (["rename", "tags", "move", "delete"].includes(id))
@@ -1197,6 +1208,7 @@ function stopTouchHold() {
 }
 function startTouchHold(event: PointerEvent) {
   if (!mobile || event.pointerType !== "touch" || !event.isPrimary) return;
+  swallowTapUntil = 0;
   const target = (event.target as HTMLElement).closest(
     ".file-card, .folder-card, .tree-row",
   );
@@ -2142,6 +2154,18 @@ onBeforeUnmount(() => {
           >{{ t("Ключи только на эту сессию") }}</small
         >
       </div>
+      <button
+        v-if="mobile && settings.configured"
+        class="button settings-link"
+        :disabled="busy || pendingUploads > 0"
+        @click="
+          mobileMenuOpen = false;
+          openModal('import');
+        "
+      >
+        <i class="ri-database-2-line" aria-hidden="true"></i
+        >{{ t("Индексировать R2") }}
+      </button>
       <button
         class="settings-link"
         :disabled="busy || switchingProfile"

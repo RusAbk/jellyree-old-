@@ -194,7 +194,21 @@ try {
     .tap({ position: { x: 367, y: 340 } });
   await page.locator(".sidebar").waitFor({ state: "hidden" });
 
-  await page.locator('.file-card[data-file-id="first"]').tap();
+  const firstCard = page.locator('.file-card[data-file-id="first"]');
+  await firstCard.dispatchEvent("pointerdown", {
+    pointerType: "touch",
+    isPrimary: true,
+    clientX: 90,
+    clientY: 240,
+  });
+  await page.getByRole("menu").waitFor();
+  await firstCard.dispatchEvent("pointerup", {
+    pointerType: "touch",
+    isPrimary: true,
+  });
+  await page.evaluate(() => window.jellyreeMobileBack());
+  await page.getByRole("menu").waitFor({ state: "hidden" });
+  await firstCard.tap();
   const viewer = page.locator(".preview-overlay");
   await viewer.locator(".photo-frame img").waitFor();
   const stage = viewer.locator(".photo-viewport");

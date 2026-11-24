@@ -43,6 +43,7 @@ class _DriveScreen extends StatefulWidget {
 }
 
 class _DriveScreenState extends State<_DriveScreen> {
+  static const _systemFolders = MethodChannel('app.jellyree.mobile/folders');
   MobileHost? _host;
   WebViewController? _view;
   String? _error;
@@ -135,7 +136,20 @@ class _DriveScreenState extends State<_DriveScreen> {
   Future<List<Picked>> _pick(bool folders) async {
     if (!mounted) return [];
     if (folders) {
-      final selected = await FilePicker.platform.getDirectoryPath();
+      String? selected;
+      if (Platform.isIOS) {
+        selected = await _systemFolders.invokeMethod<String>('pick');
+      } else {
+        final directory = await FilePicker.pickDirectory();
+        if (directory != null) {
+          selected = directory.scheme == 'content'
+              ? await _systemFolders.invokeMethod<String>(
+                  'stage',
+                  directory.toString(),
+                )
+              : directory.toFilePath();
+        }
+      }
       if (selected == null) return [];
       final root = Directory(selected);
       final name = root.uri.pathSegments
@@ -190,12 +204,9 @@ class _DriveScreenState extends State<_DriveScreen> {
       ];
     }
     if (source != 'files') return [];
-    final items = await FilePicker.platform.pickFiles(
-      allowMultiple: true,
-      withData: false,
-    );
+    final items = await FilePicker.pickFiles();
     return [
-      for (final file in items?.files ?? <PlatformFile>[])
+      for (final file in items)
         if (file.path != null)
           (file: File(file.path!), name: file.name, folders: <String>[]),
     ];
@@ -209,15 +220,19 @@ class _DriveScreenState extends State<_DriveScreen> {
 
   Future<void> _shareFiles(List<String> paths) async {
     if (!mounted || paths.isEmpty) return;
-    await Share.shareXFiles(
-      paths.map((path) => XFile(path)).toList(),
-      sharePositionOrigin: _shareOrigin(),
+    await SharePlus.instance.share(
+      ShareParams(
+        files: paths.map((path) => XFile(path)).toList(),
+        sharePositionOrigin: _shareOrigin(),
+      ),
     );
   }
 
   Future<void> _shareLink(String link) async {
     if (!mounted) return;
-    await Share.share(link, sharePositionOrigin: _shareOrigin());
+    await SharePlus.instance.share(
+      ShareParams(text: link, sharePositionOrigin: _shareOrigin()),
+    );
   }
 
   @override

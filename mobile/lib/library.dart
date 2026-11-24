@@ -169,13 +169,20 @@ class MobileLibrary {
   int _revision = 0;
   String get id => cloud.config.libraryId;
 
-  Future<void> initialize(String schema, List<String> journal) async {
+  Future<void> check() async {
     await (await cloud.object('HEAD')).drain<void>();
+    await cloud.query('SELECT 1 AS ready');
+  }
+
+  Future<void> initialize(String schema, List<String> journal) async {
     for (final statement in schema.split(';')) {
       if (statement.trim().isNotEmpty) await cloud.query(statement.trim());
     }
     await cloud.query(
       'CREATE INDEX IF NOT EXISTS jr_active_folder_date ON jr_files(library_id, folder_id, created_at DESC, id DESC) WHERE trashed_at IS NULL',
+    );
+    await cloud.query(
+      'CREATE INDEX IF NOT EXISTS jr_active_folder_name ON jr_files(library_id, folder_id, name, created_at DESC, id DESC) WHERE trashed_at IS NULL',
     );
     await cloud.query(
       'CREATE INDEX IF NOT EXISTS jr_media_date ON jr_files(library_id, created_at DESC, id DESC) WHERE trashed_at IS NULL AND $mobileTimelineMedia',
@@ -540,6 +547,20 @@ class MobileLibrary {
         [id, folder, name],
       )
       .then((rows) => rows.map(fileRow).toList());
+
+  Future<Set<String>> existingNames(String? folder, Set<String> names) async {
+    final entries = names.toList(growable: false);
+    final result = <String>{};
+    for (var i = 0; i < entries.length; i += 75) {
+      final chunk = entries.skip(i).take(75).toList(growable: false);
+      final rows = await cloud.query(
+        'SELECT DISTINCT name FROM jr_files WHERE library_id=? AND folder_id IS ? AND trashed_at IS NULL AND name IN (${chunk.map((_) => '?').join(',')})',
+        [id, folder, ...chunk],
+      );
+      result.addAll(rows.map((row) => row['name'] as String));
+    }
+    return result;
+  }
 
   Future<String> availableName(
     String? folder,

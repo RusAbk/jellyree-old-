@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data' show BytesBuilder;
 
 import 'package:crypto/crypto.dart';
 import 'package:flutter/services.dart';
@@ -59,6 +60,7 @@ class MobileHost {
   final void Function(String)? onLocale;
   final _profiles = <String, _Profile>{};
   final _media = <String, (MobileLibrary, Json)>{};
+  final _previewReads = <String, Completer<void>>{};
   final _events = <HttpResponse>{};
   final _conflicts = <String, Completer<Json>>{};
   final _failed = <String, (MobileLibrary, Picked, String?)>{};
@@ -118,6 +120,9 @@ class MobileHost {
   Future<void> close() async {
     if (_closing) return;
     _closing = true;
+    for (final request in _previewReads.keys.toList()) {
+      _cancelPreview(request);
+    }
     for (final conflict in _conflicts.values) {
       if (!conflict.isCompleted) conflict.complete({'action': 'cancel'});
     }
@@ -217,6 +222,8 @@ class MobileHost {
         final connection = Connection(values);
         final candidate = _make(connection);
         try {
+          await candidate.check();
+          if (test) return {'ok': true};
           await candidate.initialize(
             await assets.loadString('${_assetRoot}jr-schema.sql'),
             (jsonDecode(
@@ -226,7 +233,6 @@ class MobileHost {
         } finally {
           candidate.cloud.http.close(force: true);
         }
-        if (test) return {'ok': true};
         final name = cleanName(
           (input['name'] as String? ?? '').trim().isEmpty
               ? connection['bucket']
@@ -459,15 +465,59 @@ class MobileHost {
     String type,
     int limit, {
     String? kind,
+    String? requestId,
   }) async {
     if ((file['size_bytes'] as int) > limit) {
       throw const CloudError('Файл слишком большой.');
     }
-    final response = await lib.cloud.object(
-      'GET',
-      file['object_key'] as String,
-    );
-    return _Binary(await boundedBytes(response, limit), type, kind: kind);
+    final cancelled = Completer<void>();
+    if (requestId != null) {
+      _cancelPreview(requestId);
+      _previewReads[requestId] = cancelled;
+    }
+    try {
+      final response = await lib.cloud.object(
+        'GET',
+        file['object_key'] as String,
+      );
+      if (requestId == null) {
+        return _Binary(await boundedBytes(response, limit), type, kind: kind);
+      }
+      if (cancelled.isCompleted) {
+        await response.listen((_) {}).cancel();
+        throw const CloudError('Загрузка отменена.');
+      }
+      final input = StreamIterator(
+        response.timeout(const Duration(seconds: 60)),
+      );
+      final bytes = BytesBuilder(copy: false);
+      unawaited(
+        cancelled.future.then((_) => input.cancel()).catchError((Object _) {}),
+      );
+      try {
+        while (!cancelled.isCompleted && await input.moveNext()) {
+          if (bytes.length + input.current.length > limit) {
+            throw const CloudError('Файл слишком большой.');
+          }
+          bytes.add(input.current);
+        }
+        if (cancelled.isCompleted) {
+          throw const CloudError('Загрузка отменена.');
+        }
+        return _Binary(bytes.takeBytes(), type, kind: kind);
+      } finally {
+        await input.cancel();
+      }
+    } finally {
+      if (_previewReads[requestId] == cancelled) {
+        _previewReads.remove(requestId);
+      }
+    }
+  }
+
+  void _cancelPreview(String id) {
+    final pending = _previewReads.remove(id);
+    if (pending != null && !pending.isCompleted) pending.complete();
   }
 
   String _thumbKey(Json revision) => sha256
@@ -657,20 +707,72 @@ class MobileHost {
     MobileLibrary library,
     List<Picked> picked,
     String? root,
-    String job,
-  ) async {
-    final paths = <String, String?>{'': root};
+    String job, {
+    List<String?>? roots,
+  }) async {
+    final paths = <(String?, String), String>{};
+    String? target(int index) => roots == null ? root : roots[index];
+    List<Json>? folders;
+    Future<String?> resolveFolder(int index) async {
+      final item = picked[index];
+      final root = target(index);
+      var folder = root;
+      var partial = '';
+      for (final segment in item.folders) {
+        final next = '$partial/${cleanName(segment)}';
+        final key = (root, next);
+        final cached = paths[key];
+        if (cached != null) {
+          folder = cached;
+        } else {
+          folders ??= await library.folders();
+          final existing = folders!
+              .where(
+                (entry) =>
+                    entry['parent_id'] == folder && entry['name'] == segment,
+              )
+              .firstOrNull;
+          final entry = existing ?? await library.createFolder(segment, folder);
+          if (existing == null) folders!.add(entry);
+          paths[key] = folder = entry['id'] as String;
+        }
+        partial = next;
+      }
+      return folder;
+    }
+
+    Future<int> remainingConflicts(int index) async {
+      final unique = <String?, Set<String>>{};
+      final candidates = <(String?, String)>[];
+      for (var i = index; i < picked.length; i++) {
+        try {
+          final folder = await resolveFolder(i);
+          final name = cleanName(picked[i].name);
+          (unique[folder] ??= {}).add(name);
+          candidates.add((folder, name));
+        } on CloudError {
+          /* This entry will be reported separately. */
+        }
+      }
+      final known = {
+        for (final entry in unique.entries)
+          entry.key: await library.existingNames(entry.key, entry.value),
+      };
+      return candidates
+          .where((entry) => !known[entry.$1]!.add(entry.$2))
+          .length
+          .clamp(1, candidates.length.clamp(1, 1000000));
+    }
+
     final failures = <Json>[];
     final warnings = <Json>[];
-    final resolved = <String>[];
     var done = 0, skipped = 0;
     var canceled = false;
     String? applyToAll;
     for (var index = 0; index < picked.length; index++) {
       final item = picked[index];
-      final size = await item.file.length();
+      var size = 0;
       var name = item.name;
-      var folder = root;
       final targetPath = [...item.folders, name].join('/');
       void progress(String state, int loaded) => _emit('progress', {
         'kind': 'upload',
@@ -687,22 +789,8 @@ class MobileHost {
         'targetPath': targetPath,
       });
       try {
-        var partial = '';
-        for (final segment in item.folders) {
-          final next = '$partial/${cleanName(segment)}';
-          folder = paths[next] ??= await () async {
-            final folders = await library.folders();
-            for (final existing in folders) {
-              if (existing['parent_id'] == folder &&
-                  existing['name'] == segment) {
-                return existing['id'] as String;
-              }
-            }
-            return (await library.createFolder(segment, folder))['id']
-                as String;
-          }();
-          partial = next;
-        }
+        size = await item.file.length();
+        final folder = await resolveFolder(index);
         var matches = await library.named(folder, name);
         Json? replace;
         if (matches.isNotEmpty) {
@@ -710,6 +798,7 @@ class MobileHost {
           final Json answer;
           if (applyToAll == null) {
             final id = _uuid.v4();
+            final count = await remainingConflicts(index);
             final pending = Completer<Json>();
             _conflicts[id] = pending;
             _emit('conflict', {
@@ -718,7 +807,7 @@ class MobileHost {
               'name': name,
               'targetPath': targetPath,
               'suggestedName': suggested,
-              'remaining': picked.length - index,
+              'remaining': count,
               'total': picked.length,
               'incomingBytes': size,
               'existingCount': matches.length,
@@ -784,7 +873,7 @@ class MobileHost {
         progress('uploaded', size);
       } on Object catch (error) {
         final id = _uuid.v4();
-        _failed[id] = (library, item, root);
+        _failed[id] = (library, item, target(index));
         failures.add({
           'name': name,
           'retryId': id,
@@ -804,7 +893,6 @@ class MobileHost {
       'canceled': canceled,
       'failures': failures,
       'warnings': warnings,
-      'resolvedRetryIds': resolved,
     };
   }
 
@@ -834,7 +922,10 @@ class MobileHost {
           onLocale?.call(a[0] as String);
         }
         return null;
-      case 'setDocumentDraft' || 'cancelPreview':
+      case 'setDocumentDraft':
+        return null;
+      case 'cancelPreview':
+        _cancelPreview(a[0] as String);
         return null;
       case 'settings.get':
         return _settings();
@@ -937,6 +1028,7 @@ class MobileHost {
           file,
           mediaType(file),
           isPxz(file) ? 128 << 20 : 64 << 20,
+          requestId: a[1] as String?,
         );
       case 'documentSource':
         final file = await library.file(
@@ -1072,8 +1164,9 @@ class MobileHost {
           final result = await _upload(
             library,
             items.map((entry) => entry.$2.$2).toList(),
-            items.first.$2.$3,
+            null,
             a[1] as String,
+            roots: items.map((entry) => entry.$2.$3).toList(),
           );
           if (result['canceled'] != true) {
             for (final entry in items) {
