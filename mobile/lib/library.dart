@@ -6,15 +6,17 @@ import 'package:mime/mime.dart';
 import 'package:uuid/uuid.dart';
 import 'package:xml/xml.dart';
 
+import 'capture_date.dart';
 import 'cloudflare.dart';
 
 const mobilePageSize = 80;
-const mobileVisualMedia = '''
-(mime_type LIKE 'image/%' OR mime_type LIKE 'video/%' OR
- LOWER(name) LIKE '%.heic' OR LOWER(name) LIKE '%.heif' OR
- LOWER(name) LIKE '%.pxz' OR LOWER(mime_type) = 'application/pxz')
-''';
-const mobileTimelineMedia = "($mobileVisualMedia OR mime_type LIKE 'audio/%')";
+const _visualMedia =
+    "mime_type LIKE 'image/%' OR mime_type LIKE 'video/%' OR "
+    "LOWER(name) LIKE '%.heic' OR LOWER(name) LIKE '%.heif' OR "
+    "LOWER(name) LIKE '%.pxz' OR LOWER(mime_type) = 'application/pxz'";
+const mobileVisualMedia = '($_visualMedia)';
+const mobileTimelineMedia = "($_visualMedia OR mime_type LIKE 'audio/%')";
+const mediaDateColumn = 'COALESCE(captured_at, created_at)';
 final _uuid = Uuid();
 
 String cleanName(Object? value) {
@@ -85,7 +87,13 @@ class ListingQuery {
       params.add(input['folderId']);
     }
     if (section == 'favorites') where.add('favorite = 1');
-    if (section == 'photos') where.add(mobileVisualMedia);
+    usesCaptureDate =
+        section == 'timeline' ||
+        (section == 'photos' && !['name', 'size'].contains(input['sort']));
+    if (section == 'photos') {
+      if (usesCaptureDate) where.add(mobileTimelineMedia);
+      where.add(mobileVisualMedia);
+    }
     bool ascending = false;
     if (section == 'timeline') {
       where.add(mobileTimelineMedia);
@@ -95,7 +103,7 @@ class ListingQuery {
       final since = DateTime.tryParse(input['timelineSince'] as String? ?? '');
       if (before != null || since != null) {
         ascending = before == null;
-        where.add(ascending ? 'created_at >= ?' : 'created_at < ?');
+        where.add('$mediaDateColumn ${ascending ? '>=' : '<'} ?');
         params.add(
           ascending ? input['timelineSince'] : input['timelineBefore'],
         );
@@ -118,7 +126,7 @@ class ListingQuery {
       params.add(tag);
     }
     sortKey = 'created_at';
-    column = 'created_at';
+    column = usesCaptureDate ? mediaDateColumn : 'created_at';
     dir = ascending ? 'ASC' : 'DESC';
     if (section != 'timeline') {
       switch (input['sort']) {
@@ -135,6 +143,7 @@ class ListingQuery {
   late final List<String> where;
   late final List<Object?> params;
   late final String sortKey, column, dir, feedScope;
+  late final bool usesCaptureDate;
   String get base => 'FROM jr_files WHERE ${where.join(' AND ')}';
   String get cacheKey => jsonEncode([where, params, column, dir]);
 
@@ -144,15 +153,16 @@ class ListingQuery {
     int offset,
   ) {
     final op = dir == 'ASC' ? '>' : '<';
-    final cursor = after == null
-        ? ''
-        : ' AND ($column $op ? OR ($column = ? AND id $op ?))';
+    final cursor = after == null ? '' : ' AND ($column, id) $op (?, ?)';
     return (
       sql:
           'SELECT * $base$cursor ORDER BY $column $dir, id $dir LIMIT ? OFFSET ?',
       params: [
         ...params,
-        if (after != null) ...[after[sortKey], after[sortKey], after['id']],
+        if (after != null) ...[
+          (usesCaptureDate ? after['captured_at'] : null) ?? after[sortKey],
+          after['id'],
+        ],
         limit,
         offset,
       ],
@@ -166,6 +176,8 @@ class MobileLibrary {
   final Directory cache;
   final Map<String, (DateTime, Json)> _files = {};
   final Map<String, (DateTime, Future<String?>)> _heads = {};
+  Future<void>? _captureSchema;
+  Future<void>? _mediaDateIndex;
   int _revision = 0;
   String get id => cloud.config.libraryId;
 
@@ -178,14 +190,12 @@ class MobileLibrary {
     for (final statement in schema.split(';')) {
       if (statement.trim().isNotEmpty) await cloud.query(statement.trim());
     }
+    await _ensureCaptureSchema();
     await cloud.query(
       'CREATE INDEX IF NOT EXISTS jr_active_folder_date ON jr_files(library_id, folder_id, created_at DESC, id DESC) WHERE trashed_at IS NULL',
     );
     await cloud.query(
       'CREATE INDEX IF NOT EXISTS jr_active_folder_name ON jr_files(library_id, folder_id, name, created_at DESC, id DESC) WHERE trashed_at IS NULL',
-    );
-    await cloud.query(
-      'CREATE INDEX IF NOT EXISTS jr_media_date ON jr_files(library_id, created_at DESC, id DESC) WHERE trashed_at IS NULL AND $mobileTimelineMedia',
     );
     final installed = await cloud.query(
       "SELECT 1 AS ok FROM sqlite_schema WHERE type = 'trigger' AND name = 'jr_scope_folders_delete'",
@@ -195,6 +205,39 @@ class MobileLibrary {
         await cloud.query(statement);
       }
     }
+  }
+
+  Future<void> _ensureCaptureSchema() {
+    Future<bool> hasColumn() async =>
+        (await cloud.query('PRAGMA table_info(jr_files)'))
+            .any((column) => column['name'] == 'captured_at');
+    return _captureSchema ??=
+        (() async {
+          if (await hasColumn()) return;
+          try {
+            await cloud.query(
+              'ALTER TABLE jr_files ADD COLUMN captured_at TEXT',
+            );
+          } on Object {
+            if (!await hasColumn()) rethrow;
+          }
+        })().catchError((Object error, StackTrace stackTrace) {
+          _captureSchema = null;
+          Error.throwWithStackTrace(error, stackTrace);
+        });
+  }
+
+  Future<void> _ensureMediaDateIndex() async {
+    await _ensureCaptureSchema();
+    await (_mediaDateIndex ??= (() async {
+      try {
+        await cloud.query(
+          'CREATE INDEX IF NOT EXISTS jr_media_capture_date ON jr_files(library_id, $mediaDateColumn DESC, id DESC) WHERE trashed_at IS NULL AND $mobileTimelineMedia',
+        );
+      } on CloudError {
+        // The list remains usable if D1 limits delay the index build.
+      }
+    })());
   }
 
   void remember(Json file) {
@@ -334,6 +377,7 @@ class MobileLibrary {
       return result(stored, cached.last!['hasMore'] == true);
     }
     try {
+      if (query.usesCaptureDate) await _ensureMediaDateIndex();
       final previous = page > 1 ? await _readPage(scope, page - 1) : null;
       final priorItems = previous?['items'] as List?;
       final after =
@@ -372,11 +416,12 @@ class MobileLibrary {
   }
 
   Future<Json> timelineBounds() async {
+    await _ensureMediaDateIndex();
     final match =
         'FROM jr_files WHERE library_id = ? AND trashed_at IS NULL AND $mobileTimelineMedia';
     final rows = await cloud.query(
-      'SELECT (SELECT created_at $match ORDER BY created_at ASC LIMIT 1) AS oldest, '
-      '(SELECT created_at $match ORDER BY created_at DESC LIMIT 1) AS newest',
+      'SELECT (SELECT $mediaDateColumn $match ORDER BY $mediaDateColumn ASC LIMIT 1) AS oldest, '
+      '(SELECT $mediaDateColumn $match ORDER BY $mediaDateColumn DESC LIMIT 1) AS newest',
       [id, id],
     );
     return rows.single;
@@ -631,8 +676,10 @@ class MobileLibrary {
     String? folder, {
     String? mimeType,
     Json? replace,
+    bool preserveCaptureDate = false,
     void Function(int)? report,
   }) async {
+    await _ensureCaptureSchema();
     await requireFolder(folder);
     name = cleanName(name);
     final original = replace == null
@@ -654,6 +701,9 @@ class MobileLibrary {
     final key = _objectKey(null);
     final fileId = original?['id'] as String? ?? _uuid.v4();
     final type = mimeType ?? lookupMimeType(name) ?? 'application/octet-stream';
+    final capturedAt = preserveCaptureDate
+        ? (original?['captured_at'])
+        : await readCaptureDate(bytes, type);
     await cloud.put(key, bytes, size, type, report ?? (_) {});
     final now = timestamp();
     final rename = original != null && original['name'] != name;
@@ -662,16 +712,17 @@ class MobileLibrary {
       key,
       name,
       original == null
-          ? 'INSERT INTO jr_files (id,library_id,folder_id,object_key,name,mime_type,size_bytes,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?) RETURNING *'
-          : "UPDATE jr_files SET object_key=?,name=?,mime_type=?,size_bytes=?,adjustments='{}',updated_at=? WHERE id=? AND library_id=? AND object_key=? AND trashed_at IS NULL AND name=? AND folder_id IS ?"
+          ? 'INSERT INTO jr_files (id,library_id,folder_id,object_key,name,mime_type,size_bytes,captured_at,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?) RETURNING *'
+          : "UPDATE jr_files SET object_key=?,name=?,mime_type=?,size_bytes=?,adjustments='{}',captured_at=?,updated_at=? WHERE id=? AND library_id=? AND object_key=? AND trashed_at IS NULL AND name=? AND folder_id IS ?"
                 "${rename ? ' AND NOT EXISTS (SELECT 1 FROM jr_files AS other WHERE other.library_id=? AND other.folder_id IS ? AND other.name=? AND other.trashed_at IS NULL)' : ''} RETURNING *",
       original == null
-          ? [fileId, id, folder, key, name, type, size, now, now]
+          ? [fileId, id, folder, key, name, type, size, capturedAt, now, now]
           : [
               key,
               name,
               type,
               size,
+              capturedAt,
               now,
               fileId,
               id,
@@ -693,6 +744,7 @@ class MobileLibrary {
   }
 
   Future<Json> duplicate(String fileId, String expected) async {
+    await _ensureCaptureSchema();
     final source = await file(fileId, expected: expected, fresh: true);
     if (!(mediaType(source).startsWith('image/') || isPxz(source)) ||
         source['trashed_at'] != null) {
@@ -719,8 +771,8 @@ class MobileLibrary {
       newId,
       key,
       name,
-      'INSERT INTO jr_files (id,library_id,folder_id,object_key,name,mime_type,size_bytes,favorite,tags,adjustments,created_at,updated_at) '
-      'SELECT ?,library_id,folder_id,?,?,mime_type,size_bytes,favorite,tags,adjustments,?,? FROM jr_files '
+      'INSERT INTO jr_files (id,library_id,folder_id,object_key,name,mime_type,size_bytes,favorite,tags,adjustments,captured_at,created_at,updated_at) '
+      'SELECT ?,library_id,folder_id,?,?,mime_type,size_bytes,favorite,tags,adjustments,captured_at,?,? FROM jr_files '
       'WHERE library_id=? AND id=? AND object_key=? AND folder_id IS ? AND trashed_at IS NULL RETURNING *',
       [newId, key, name, now, now, id, fileId, expected, folder],
     );

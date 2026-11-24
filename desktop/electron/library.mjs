@@ -25,7 +25,12 @@ import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import mime from "mime";
 import { D1 } from "./d1.mjs";
 import { CatalogCache } from "./catalog-cache.mjs";
-import { catalogListing, timelineMedia } from "./catalog-query.mjs";
+import {
+  catalogListing,
+  mediaDateColumn,
+  timelineMedia,
+} from "./catalog-query.mjs";
+import { readCaptureDate } from "./capture-date.mjs";
 import { libraryId } from "./config.mjs";
 import { normalizeImageAdjustments } from "./image-adjustments.mjs";
 import { validateVideoFrame, videoFrameName } from "./video-frames.mjs";
@@ -42,7 +47,7 @@ import { PXZ_LIMIT, PxzRangeReader, readPxz } from "./pxz-archive.mjs";
 
 const schema = await readFile(new URL("./schema.sql", import.meta.url), "utf8");
 const catalogIndexes = {
-  timeline: `CREATE INDEX IF NOT EXISTS jr_media_date ON jr_files(library_id, created_at DESC, id DESC) WHERE trashed_at IS NULL AND ${timelineMedia}`,
+  timeline: `CREATE INDEX IF NOT EXISTS jr_media_capture_date ON jr_files(library_id, ${mediaDateColumn} DESC, id DESC) WHERE trashed_at IS NULL AND ${timelineMedia}`,
   folderDate:
     "CREATE INDEX IF NOT EXISTS jr_active_folder_date ON jr_files(library_id, folder_id, created_at DESC, id DESC) WHERE trashed_at IS NULL",
   date: "CREATE INDEX IF NOT EXISTS jr_active_date ON jr_files(library_id, created_at DESC, id DESC) WHERE trashed_at IS NULL",
@@ -83,6 +88,7 @@ export function fileRow(row) {
 export class Library {
   #failedUploads = new Map();
   #indexAttempts = new Map();
+  #captureSchema;
 
   constructor(config, { db, s3, createUpload } = {}) {
     this.createUpload = createUpload ?? ((options) => new Upload(options));
@@ -111,7 +117,26 @@ export class Library {
   }
   async initialize() {
     await this.db.query(schema);
+    await this.#ensureCaptureSchema();
     return { ok: true };
+  }
+  #ensureCaptureSchema() {
+    const hasColumn = async () =>
+      (await this.db.query("PRAGMA table_info(jr_files)")).some(
+        ({ name }) => name === "captured_at",
+      );
+    this.#captureSchema ??= (async () => {
+      if (await hasColumn()) return;
+      try {
+        await this.db.query("ALTER TABLE jr_files ADD COLUMN captured_at TEXT");
+      } catch (error) {
+        if (!(await hasColumn())) throw error;
+      }
+    })().catch((error) => {
+      this.#captureSchema = undefined;
+      throw error;
+    });
+    return this.#captureSchema;
   }
   #ensureIndex(key) {
     const previous = this.#indexAttempts.get(key);
@@ -210,11 +235,12 @@ export class Library {
   }
   timelineBounds() {
     const fetch = async () => {
+      await this.#ensureCaptureSchema();
       await this.#ensureIndex("timeline");
       const match = `FROM jr_files WHERE library_id = ? AND trashed_at IS NULL AND ${timelineMedia}`;
       const [bounds] = await this.db.query(
-        `SELECT (SELECT created_at ${match} ORDER BY created_at ASC LIMIT 1) AS oldest,
-                (SELECT created_at ${match} ORDER BY created_at DESC LIMIT 1) AS newest`,
+        `SELECT (SELECT ${mediaDateColumn} ${match} ORDER BY ${mediaDateColumn} ASC LIMIT 1) AS oldest,
+                (SELECT ${mediaDateColumn} ${match} ORDER BY ${mediaDateColumn} DESC LIMIT 1) AS newest`,
         [this.id, this.id],
       );
       return bounds;
@@ -225,8 +251,10 @@ export class Library {
     const query = catalogListing(input, this.id);
     if (input.refresh) this.catalog?.invalidate();
     const fetchRows = async (sql, params) => {
-      if (query.section === "timeline") await this.#ensureIndex("timeline");
-      else if (query.sortName === "date" && query.section !== "trash")
+      if (query.usesCaptureDate) {
+        await this.#ensureCaptureSchema();
+        await this.#ensureIndex("timeline");
+      } else if (query.sortName === "date" && query.section !== "trash")
         await this.#ensureIndex(
           query.section === "drive" ? "folderDate" : "date",
         );
@@ -459,6 +487,7 @@ export class Library {
         expectedObjectKey,
         mimeType: "image/" + format,
         replacementName,
+        preserveCaptureDate: true,
       });
       return { file: result.file, warning: result.warning };
     } finally {
@@ -639,6 +668,7 @@ export class Library {
     }
   }
   async duplicatePhoto(id, expectedObjectKey) {
+    await this.#ensureCaptureSchema();
     const source = await this.file(id);
     if (!isImageFile(source) && !isPxzFile(source))
       throw new Error(t("Выберите изображение."));
@@ -678,8 +708,8 @@ export class Library {
     try {
       const [copy] = await this.db.query(
         `INSERT INTO jr_files
-          (id, library_id, folder_id, object_key, name, mime_type, size_bytes, favorite, tags, adjustments, created_at, updated_at)
-         SELECT ?, library_id, folder_id, ?, ?, mime_type, size_bytes, favorite, tags, adjustments, ?, ?
+          (id, library_id, folder_id, object_key, name, mime_type, size_bytes, favorite, tags, adjustments, captured_at, created_at, updated_at)
+         SELECT ?, library_id, folder_id, ?, ?, mime_type, size_bytes, favorite, tags, adjustments, captured_at, ?, ?
          FROM jr_files WHERE id = ? AND library_id = ? AND object_key = ? AND folder_id IS ? AND trashed_at IS NULL
          RETURNING *`,
         [
@@ -717,6 +747,7 @@ export class Library {
     }
   }
   async uploadFile(source, folderId, report = () => {}, options = {}) {
+    await this.#ensureCaptureSchema();
     await this.folder(folderId);
     const info = await stat(source);
     if (!info.isFile()) throw new Error(t("Ожидался обычный файл."));
@@ -750,6 +781,9 @@ export class Library {
       options.mimeType ||
       mime.getType(path.basename(source)) ||
       "application/octet-stream";
+    const capturedAt = options.preserveCaptureDate
+      ? (previous?.captured_at ?? null)
+      : await readCaptureDate(source, mimeType);
     const upload = this.createUpload({
       client: this.s3,
       params: {
@@ -772,7 +806,7 @@ export class Library {
     try {
       if (previous) {
         const [saved] = await this.db.query(
-          `UPDATE jr_files SET object_key = ?, mime_type = ?, size_bytes = ?, adjustments = '{}', updated_at = ?${rename ? ", name = ?" : ""}
+          `UPDATE jr_files SET object_key = ?, mime_type = ?, size_bytes = ?, adjustments = '{}', captured_at = ?, updated_at = ?${rename ? ", name = ?" : ""}
            WHERE id = ? AND library_id = ? AND object_key = ? AND trashed_at IS NULL
            ${rename ? "AND name = ? AND folder_id IS ? AND NOT EXISTS (SELECT 1 FROM jr_files AS other WHERE other.library_id = ? AND other.folder_id IS ? AND other.name = ? AND other.trashed_at IS NULL)" : ""}
            RETURNING *`,
@@ -780,6 +814,7 @@ export class Library {
             key,
             mimeType,
             info.size,
+            capturedAt,
             now,
             ...(rename ? [newName] : []),
             id,
@@ -797,7 +832,7 @@ export class Library {
         replacement = fileRow(saved);
       } else {
         await this.db.query(
-          "INSERT INTO jr_files (id, library_id, folder_id, object_key, name, mime_type, size_bytes, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+          "INSERT INTO jr_files (id, library_id, folder_id, object_key, name, mime_type, size_bytes, captured_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
           [
             id,
             this.id,
@@ -806,6 +841,7 @@ export class Library {
             name,
             mimeType,
             info.size,
+            capturedAt,
             now,
             now,
           ],

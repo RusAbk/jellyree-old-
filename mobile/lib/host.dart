@@ -668,6 +668,7 @@ class MobileHost {
         folder,
         mimeType: type,
         replace: file,
+        preserveCaptureDate: !text,
       );
       return {
         'file': result.file,
@@ -854,6 +855,7 @@ class MobileHost {
           item.file,
           name,
           folder,
+          mimeType: lookupMimeType(item.name),
           replace: replace,
           report: (loaded) {
             final now = DateTime.now().millisecondsSinceEpoch;

@@ -25,3 +25,15 @@ rotated.save(output / "rotated.heic", quality=90)
 collection = pillow_heif.from_pillow(Image.new("RGB", (128, 96), (230, 30, 210)))
 collection.add_from_pillow(image)
 collection.save(output / "collection.heic", primary_index=1, quality=90, save_all=True)
+
+capture = Image.new("RGB", (16, 16), (35, 75, 215))
+capture_exif = capture.getexif()
+capture_exif[0x8769] = {
+    0x9003: "2012:05:02 03:26:00",
+    0x9011: "+02:00",
+    0x9291: "125",
+}
+capture.save(output / "capture-date.jpg", exif=capture_exif)
+pillow_heif.from_pillow(capture).save(
+    output / "capture-date.heic", exif=capture_exif.tobytes()
+)

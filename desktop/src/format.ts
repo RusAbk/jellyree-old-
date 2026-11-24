@@ -1,5 +1,5 @@
 import { t } from "./i18n";
-import type { Adjustments } from "./types";
+import type { Adjustments, DriveFile } from "./types";
 import { localeCode } from "./i18n";
 import { isHeicFile, isPxzFile } from "../electron/image-formats.mjs";
 export function bytes(value: number) {
@@ -16,6 +16,13 @@ export const date = (value: string) =>
     month: "short",
     year: "numeric",
   });
+export const dateTime = (value: string) =>
+  new Date(value).toLocaleString(localeCode(), {
+    dateStyle: "medium",
+    timeStyle: "short",
+  });
+export const mediaDate = (file: DriveFile) =>
+  file.captured_at ?? file.created_at;
 export function icon(mime: string, name = "") {
   if (isPxzFile({ name, mime_type: mime })) return "ri-image-2-line";
   if (mime.startsWith("image/") || isHeicFile({ name, mime_type: mime }))

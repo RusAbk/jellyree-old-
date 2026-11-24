@@ -1,4 +1,7 @@
+import 'dart:io';
+
 import 'package:flutter_test/flutter_test.dart';
+import 'package:jellyree_mobile/capture_date.dart';
 import 'package:jellyree_mobile/cloudflare.dart';
 import 'package:jellyree_mobile/library.dart';
 
@@ -53,11 +56,16 @@ void main() {
       'tag': 'зима',
     };
     final query = ListingQuery(input, profile().libraryId);
-    final cursor = {'id': 'previous-id', 'created_at': '2021-09-17'};
+    final cursor = {
+      'id': 'previous-id',
+      'captured_at': '2021-09-17',
+      'created_at': '2026-11-25',
+    };
     final result = query.select(81, cursor, 0);
     expect(result.sql, contains('mime_type LIKE \'audio/%\''));
-    expect(result.sql, contains('created_at > ?'));
-    expect(result.sql, contains('ORDER BY created_at ASC, id ASC'));
+    expect(result.sql, contains('$mediaDateColumn >= ?'));
+    expect(result.sql, contains('($mediaDateColumn, id) > (?, ?)'));
+    expect(result.sql, contains('ORDER BY $mediaDateColumn ASC, id ASC'));
     expect(result.params, [
       'be62739bdc2cae3180afc54636a3ca5358d9f737cbe582d444e0172bec2183e3',
       input['timelineSince'],
@@ -65,10 +73,36 @@ void main() {
       r'%\%a\_b%',
       'зима',
       '2021-09-17',
-      '2021-09-17',
       'previous-id',
       81,
       0,
     ]);
+    expect(
+      query.select(81, {...cursor, 'captured_at': null}, 0).params[5],
+      '2026-11-25',
+    );
+    expect(ListingQuery({'section': 'drive'}, 'library').column, 'created_at');
+    expect(
+      ListingQuery({'section': 'photos'}, 'library').column,
+      mediaDateColumn,
+    );
+  });
+
+  test('reads the EXIF capture time and offset from JPG and HEIC', () async {
+    const fixtures = '../desktop/test/fixtures';
+    for (final (name, type) in [
+      ('capture-date.jpg', 'image/jpeg'),
+      ('capture-date.heic', 'image/heic'),
+    ]) {
+      expect(
+        await readCaptureDate(File('$fixtures/$name'), type),
+        '2012-05-02T01:26:00.125Z',
+        reason: name,
+      );
+    }
+    expect(
+      await readCaptureDate(File('$fixtures/editor.png'), 'image/png'),
+      isNull,
+    );
   });
 }

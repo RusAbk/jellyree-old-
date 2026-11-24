@@ -25,6 +25,7 @@ const fileColumns = [
   "trashed_at",
   "tags",
   "adjustments",
+  "captured_at",
   "created_at",
   "updated_at",
 ];
@@ -48,6 +49,9 @@ export class CatalogCache {
     });
     try {
       this.local.exec(schema);
+      const columns = this.local.prepare("PRAGMA table_info(jr_files)").all();
+      if (!columns.some(({ name }) => name === "captured_at"))
+        this.local.exec("ALTER TABLE jr_files ADD COLUMN captured_at TEXT");
       this.local.exec(`
         CREATE TABLE IF NOT EXISTS jr_catalog_state (key TEXT PRIMARY KEY, value TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS jr_catalog_members (
@@ -166,7 +170,7 @@ export class CatalogCache {
   }
   #putMember(query, index, row) {
     this.removePreviousOwner.run(row.library_id, row.object_key, row.id);
-    this.putFile.run(...fileColumns.map((column) => row[column]));
+    this.putFile.run(...fileColumns.map((column) => row[column] ?? null));
     this.addMember.run(query.key, index, row.id);
   }
   #readSegment(query, segments, index, limit) {
@@ -387,12 +391,12 @@ export class CatalogCache {
   }
   timelineBounds(fetchBounds) {
     return this.#queue.run(async () => {
-      const snapshot = this.#state("timeline-bounds");
+      const snapshot = this.#state("capture-timeline-bounds");
       try {
         const head = await this.#head("active");
         if (snapshot && unchanged(head, snapshot.head)) return snapshot.bounds;
         const bounds = await fetchBounds();
-        this.#setState("timeline-bounds", { head, bounds });
+        this.#setState("capture-timeline-bounds", { head, bounds });
         return bounds;
       } catch (error) {
         if (snapshot) return snapshot.bounds;

@@ -19,6 +19,7 @@ CREATE TABLE IF NOT EXISTS jr_files (
   trashed_at TEXT,
   tags TEXT NOT NULL DEFAULT '[]',
   adjustments TEXT NOT NULL DEFAULT '{}',
+  captured_at TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
   UNIQUE(library_id, object_key)

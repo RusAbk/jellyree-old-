@@ -50,6 +50,7 @@ export type DriveFile = {
   trashed_at: string | null;
   tags: string[];
   adjustments: Adjustments;
+  captured_at?: string | null;
   created_at: string;
   updated_at: string;
 };

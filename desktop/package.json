@@ -38,6 +38,7 @@
     "@zip.js/zip.js": "^2.25.0",
     "codemirror": "^6.0.2",
     "dompurify": "^3.5.0",
+    "exifreader": "^4.55.1",
     "libheif-js": "^1.23.5",
     "marked": "^18.2.1",
     "mime": "^4.1.0",

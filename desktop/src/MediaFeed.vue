@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, watch } from "vue";
 import FileThumb from "./FileThumb.vue";
+import { mediaDate } from "./format";
 import { localeCode, t } from "./i18n";
 import { localDay, monthIndex } from "./timeline-dates";
 import type { DriveFile } from "./types";
@@ -27,7 +28,7 @@ const formatter = computed(
 const days = computed(() => {
   const groups = new Map<number, DriveFile[]>();
   for (const file of props.files) {
-    const time = localDay(new Date(file.created_at)).getTime();
+    const time = localDay(new Date(mediaDate(file))).getTime();
     const day = Number.isFinite(time) ? time : -1;
     const group = groups.get(day);
     if (group) group.push(file);

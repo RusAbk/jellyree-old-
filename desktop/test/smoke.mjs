@@ -2378,7 +2378,8 @@ try {
       },
       {
         id: "timeline-archive",
-        created_at: "2019-04-14T12:00:00.000Z",
+        created_at: "2026-11-25T12:00:00.000Z",
+        captured_at: "2019-04-14T12:00:00.000Z",
         mime_type: "image/jpeg",
       },
       {
@@ -2421,13 +2422,14 @@ try {
       if (input.section !== "timeline") return list(input);
       queries.push(input);
       let matches = rows.filter((row) => row.mime_type !== "application/pdf");
+      const mediaDate = (row) => row.captured_at ?? row.created_at;
       if (input.timelineBefore)
         matches = matches.filter(
-          (row) => row.created_at < input.timelineBefore,
+          (row) => mediaDate(row) < input.timelineBefore,
         );
       if (input.timelineSince)
         matches = matches
-          .filter((row) => row.created_at >= input.timelineSince)
+          .filter((row) => mediaDate(row) >= input.timelineSince)
           .reverse();
       const end = (input.throughPage || input.page) * 16;
       return {
@@ -2487,6 +2489,14 @@ try {
     .click();
   const historical = media.locator('[data-file-id="timeline-archive"]');
   await historical.waitFor();
+  assert.match(
+    await media
+      .locator(".media-day")
+      .filter({ has: page.locator('[data-file-id="timeline-archive"]') })
+      .locator("h2")
+      .innerText(),
+    /2019/,
+  );
   assert.equal(
     await media.locator('[data-file-id="timeline-document"]').count(),
     0,
@@ -2504,6 +2514,7 @@ try {
   await viewer
     .locator(".preview-header")
     .filter({ hasText: "timeline-archive.jpg" })
+    .filter({ hasText: "2019" })
     .waitFor();
   await viewer
     .getByRole("button", { name: "Закрыть просмотр", exact: true })

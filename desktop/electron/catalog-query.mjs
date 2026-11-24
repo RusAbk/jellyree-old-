@@ -28,11 +28,12 @@ const visualMedia = [
   "LOWER(mime_type) = 'application/pxz'",
 ];
 export const timelineMedia = `(${[...visualMedia, "mime_type LIKE 'audio/%'"].join(" OR ")})`;
+export const mediaDateColumn = "COALESCE(captured_at, created_at)";
+const captureDate = { ...sorts.date, column: mediaDateColumn };
 const ascendingDate = {
-  column: "created_at",
+  ...captureDate,
   direction: "ASC",
   operator: ">",
-  key: "created_at",
 };
 const isoDate = (value) =>
   typeof value === "string" &&
@@ -60,7 +61,13 @@ export function catalogListing(input, libraryId) {
     section !== "timeline" && Object.hasOwn(sorts, input.sort)
       ? input.sort
       : "date";
-  const sort = since ? ascendingDate : sorts[sortName];
+  const usesCaptureDate =
+    sortName === "date" && (section === "photos" || section === "timeline");
+  const sort = since
+    ? ascendingDate
+    : usesCaptureDate
+      ? captureDate
+      : sorts[sortName];
   const where = [
     "library_id = ?",
     section === "trash" ? "trashed_at IS NOT NULL" : "trashed_at IS NULL",
@@ -71,11 +78,14 @@ export function catalogListing(input, libraryId) {
     params.push(folderId);
   }
   if (section === "favorites") where.push("favorite = 1");
-  if (section === "photos") where.push(`(${visualMedia.join(" OR ")})`);
+  if (section === "photos") {
+    if (usesCaptureDate) where.push(timelineMedia);
+    where.push(`(${visualMedia.join(" OR ")})`);
+  }
   if (section === "timeline") {
     where.push(timelineMedia);
     if (before || since) {
-      where.push(before ? "created_at < ?" : "created_at >= ?");
+      where.push(`${mediaDateColumn} ${before ? "<" : ">="} ?`);
       params.push(before ?? since);
     }
   }
@@ -115,7 +125,7 @@ export function catalogListing(input, libraryId) {
     folderId,
     search,
     tag,
-    sortName,
+    usesCaptureDate ? "capture-date" : sortName,
     ...(before || since ? [before, since] : []),
   ]);
   const conditions = (after, through) => {
@@ -140,10 +150,11 @@ export function catalogListing(input, libraryId) {
       folderId,
       "",
       "",
-      "date",
+      section === "timeline" ? "capture-date" : "date",
     ]),
     section,
     sortName,
+    usesCaptureDate,
     page,
     throughPage,
     limit,
@@ -153,7 +164,10 @@ export function catalogListing(input, libraryId) {
     conditions,
     count: [`SELECT COUNT(*) AS total FROM jr_files WHERE ${clause}`, params],
     cursor(row) {
-      return { value: row[sort.key], id: row.id };
+      return {
+        value: (usesCaptureDate ? row.captured_at : null) ?? row[sort.key],
+        id: row.id,
+      };
     },
     select({ after, through, limit, offset = 0, membership, resume }) {
       const [filter, values] = conditions(after, through);

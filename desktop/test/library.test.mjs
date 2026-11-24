@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { DatabaseSync } from "node:sqlite";
+import { fileURLToPath } from "node:url";
 import {
   mkdir,
   mkdtemp,
@@ -20,6 +21,7 @@ import {
 import { setLanguage } from "../electron/locales.mjs";
 setLanguage("ru");
 import { Library } from "../electron/library.mjs";
+import { catalogListing } from "../electron/catalog-query.mjs";
 import { D1 } from "../electron/d1.mjs";
 import {
   ConfigStore,
@@ -36,6 +38,7 @@ const config = normalizeConfig({
   accessKeyId: "r2-access",
   secretAccessKey: "r2-secret",
 });
+const captureDate = "2012-05-02T01:26:00.125Z";
 function fixture(t, overrides = {}) {
   const sqlite = new DatabaseSync(":memory:");
   t.after(() => sqlite.close());
@@ -81,12 +84,13 @@ function fixture(t, overrides = {}) {
       mime: "image/jpeg",
       size: 1024,
       trash: null,
+      captured: null,
       scope: library.id,
       ...options,
     };
     sqlite
       .prepare(
-        "INSERT INTO jr_files (id, library_id, folder_id, object_key, name, mime_type, size_bytes, tags, favorite, trashed_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO jr_files (id, library_id, folder_id, object_key, name, mime_type, size_bytes, tags, favorite, trashed_at, captured_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
       )
       .run(
         id,
@@ -99,6 +103,7 @@ function fixture(t, overrides = {}) {
         JSON.stringify(row.tags),
         row.favorite,
         row.trash,
+        row.captured,
         "2026-01-01",
         "2026-01-01",
       );
@@ -289,6 +294,58 @@ test("text editor saves a new R2 version in place, preserves metadata and cleans
   for (const source of paths)
     await assert.rejects(stat(source), { code: "ENOENT" });
 });
+test("uploads retain JPG and HEIC capture times separately from catalog dates after migrating an existing database and cache", async (t) => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "jr-capture-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const cache = path.join(directory, "catalog.sqlite");
+  const { library, db, sqlite, insert, requests } = fixture(t, {
+    createUpload: ({ params }) => ({
+      on() {},
+      async done() {
+        for await (const chunk of params.Body) assert.ok(chunk.length);
+      },
+    }),
+  });
+  await library.initialize();
+  insert("legacy");
+  sqlite.exec("ALTER TABLE jr_files DROP COLUMN captured_at");
+  library.enableCatalogCache(cache);
+  library.catalog.local.exec("ALTER TABLE jr_files DROP COLUMN captured_at");
+  library.catalog.close();
+
+  const reopened = new Library(config, {
+    db,
+    s3: library.s3,
+    createUpload: library.createUpload,
+  });
+  reopened.enableCatalogCache(cache);
+  t.after(() => reopened.catalog.close());
+  assert.equal((await reopened.list()).items[0].id, "legacy");
+  await Promise.all(
+    ["jpg", "heic"].map((extension) =>
+      reopened.uploadFile(
+        fileURLToPath(
+          new URL(`fixtures/capture-date.${extension}`, import.meta.url),
+        ),
+        null,
+      ),
+    ),
+  );
+  const { items } = await reopened.list({ section: "timeline" });
+  assert.equal(items[0].id, "legacy");
+  assert.equal(items[0].captured_at, null);
+  assert.equal(items.length, 3);
+  for (const item of items.slice(1)) {
+    assert.equal(item.captured_at, captureDate);
+    assert.notEqual(item.created_at, item.captured_at);
+    assert.equal(item.updated_at, item.created_at);
+  }
+  assert.equal(
+    requests.filter(({ sql }) => sql?.startsWith("ALTER TABLE")).length,
+    1,
+  );
+});
+
 test("saving photo edits replaces the bytes and resets adjustments while keeping library metadata", async (t) => {
   const uploads = [];
   const { library, insert, deleted } = fixture(t, {
@@ -309,6 +366,7 @@ test("saving photo edits replaces the bytes and resets adjustments while keeping
     folder: folder.id,
     tags: ["kept"],
     favorite: 1,
+    captured: captureDate,
   });
   await library.updateFiles(["photo"], { adjustments: { rotate: 90 } });
   const bytes = await readFile(new URL("fixtures/editor.png", import.meta.url));
@@ -323,6 +381,7 @@ test("saving photo edits replaces the bytes and resets adjustments while keeping
   assert.equal(file.folder_id, folder.id);
   assert.equal(file.favorite, true);
   assert.equal(file.created_at, "2026-01-01");
+  assert.equal(file.captured_at, captureDate);
   assert.deepEqual(file.tags, ["kept"]);
   assert.equal(file.mime_type, "image/png");
   assert.equal(file.size_bytes, bytes.length);
@@ -649,6 +708,7 @@ test("media timeline seeks both ways by date and indexes only active media", asy
     ["heic", "application/octet-stream", "2019-03-08", { name: "import.HEIC" }],
     ["video", "video/mp4", "2021-04-08", {}],
     ["photo", "image/png", "2026-02-01", {}],
+    ["archive", "image/jpeg", "2026-02-02", { captured: captureDate }],
     ["document", "text/plain", "2001-01-01", {}],
     ["trashed", "image/jpeg", "2027-02-20", { trash: "2027-03-02" }],
   ]) {
@@ -658,7 +718,7 @@ test("media timeline seeks both ways by date and indexes only active media", asy
       .run(`${added}T12:00:00.000Z`, id);
   }
   assert.deepEqual(await library.timelineBounds(), {
-    oldest: "2016-02-03T12:00:00.000Z",
+    oldest: captureDate,
     newest: "2026-02-01T12:00:00.000Z",
   });
   const boundary = "2020-01-01T00:00:00.000Z";
@@ -674,7 +734,7 @@ test("media timeline seeks both ways by date and indexes only active media", asy
   });
   assert.deepEqual(
     older.items.map(({ id }) => id),
-    ["heic", "audio"],
+    ["heic", "audio", "archive"],
   );
   assert.deepEqual(
     newer.items.map(({ id }) => id),
@@ -685,8 +745,26 @@ test("media timeline seeks both ways by date and indexes only active media", asy
   const plan = sqlite
     .prepare(`EXPLAIN QUERY PLAN ${lookup.sql}`)
     .all(...lookup.params);
-  assert.ok(plan.some(({ detail }) => detail.includes("jr_media_date")));
+  assert.ok(
+    plan.some(({ detail }) => detail.includes("jr_media_capture_date")),
+  );
   assert.ok(plan.every(({ detail }) => !detail.includes("TEMP B-TREE")));
+  const photos = await library.list({ section: "photos", includeTotal: false });
+  assert.deepEqual(
+    photos.items.map(({ id }) => id),
+    ["photo", "video", "heic", "archive"],
+  );
+  assert.deepEqual(
+    catalogListing({ section: "photos" }, library.id).cursor(
+      photos.items.at(-1),
+    ),
+    {
+      id: "archive",
+      value: captureDate,
+    },
+  );
+  const all = await library.list({ section: "all", includeTotal: false });
+  assert.equal(all.items[0].id, "archive");
 });
 
 test("catalog cache persists pages and reconciles updates, moves and deletions by revision", async (t) => {
@@ -968,6 +1046,7 @@ test("photo duplication copies the object, tags and edits to an independent file
     name: "Море.jpg",
     tags: ["отпуск"],
     favorite: 1,
+    captured: captureDate,
   });
   insert("existing", { folder: folder.id, name: "Море (1).jpg" });
   const original = await library.file("sea # день");
@@ -989,6 +1068,7 @@ test("photo duplication copies the object, tags and edits to an independent file
   assert.equal(copy.size_bytes, original.size_bytes);
   assert.deepEqual(copy.tags, original.tags);
   assert.equal(copy.favorite, original.favorite);
+  assert.equal(copy.captured_at, captureDate);
   assert.equal(copy.adjustments.temperature, 25);
   assert.notEqual(copy.id, original.id);
   assert.notEqual(copy.object_key, original.object_key);
@@ -1526,7 +1606,7 @@ test("upload replacement preserves metadata and deletes old bytes only after D1 
     }),
   });
   await library.initialize();
-  insert("one", { favorite: 1, tags: ["keep"] });
+  insert("one", { favorite: 1, tags: ["keep"], captured: captureDate });
   sqlite
     .prepare("UPDATE jr_files SET adjustments = ? WHERE id = ?")
     .run(JSON.stringify({ rotate: 90 }), "one");
@@ -1543,6 +1623,7 @@ test("upload replacement preserves metadata and deletes old bytes only after D1 
   assert.deepEqual(current.tags, ["keep"]);
   assert.deepEqual(current.adjustments, {});
   assert.equal(current.created_at, "2026-01-01");
+  assert.equal(current.captured_at, null);
   assert.equal(current.size_bytes, 11);
   assert.notEqual(current.object_key, "objects/one");
   assert.deepEqual(deleted, ["objects/one"]);

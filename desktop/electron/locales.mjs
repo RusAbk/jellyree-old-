@@ -515,6 +515,15 @@ export const messages = {
     en: "Size",
     es: "Tamaño",
   },
+  Дата: { en: "Date", es: "Fecha" },
+  "Дата съёмки": {
+    en: "Date taken",
+    es: "Fecha de captura",
+  },
+  "Дата изменения": {
+    en: "Date modified",
+    es: "Fecha de modificación",
+  },
   "Дата добавления": {
     en: "Date added",
     es: "Fecha de incorporación",

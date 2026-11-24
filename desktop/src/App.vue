@@ -30,7 +30,7 @@ import { useUploadJobs, uploadPercent } from "./use-upload-jobs";
 import { useSelectionBox } from "./use-selection-box";
 import LanguageSelect from "./LanguageSelect.vue";
 import { syncLanguage } from "./i18n";
-import { bytes, date, icon } from "./format";
+import { bytes, date, dateTime, icon, mediaDate } from "./format";
 import { api } from "./api";
 import { useGalleryLayout } from "./use-gallery-layout";
 import { galleryGap } from "./gallery-layout";
@@ -143,7 +143,7 @@ const knownTimelineBounds = computed(() => {
   }
   include(timelineBounds.value?.oldest);
   include(timelineBounds.value?.newest);
-  for (const file of files.value) include(file.created_at);
+  for (const file of files.value) include(mediaDate(file));
   return oldest && newest ? { oldest, newest } : null;
 });
 const listing = computed(() => ({
@@ -2646,7 +2646,9 @@ onBeforeUnmount(() => {
               class="list-heading"
             >
               <span>{{ t("Название") }}</span><span>{{ t("Размер") }}</span
-              ><span>{{ t("Дата добавления") }}</span
+              ><span>{{
+                t(section === "photos" ? "Дата" : "Дата добавления")
+              }}</span
               ><span></span>
             </div>
             <template v-if="isTimeline">
@@ -2779,7 +2781,13 @@ onBeforeUnmount(() => {
                     </div>
                     <small v-if="view !== 'list'"
                       >{{ bytes(file.size_bytes) }}<span>·</span
-                      >{{ date(file.created_at) }}</small
+                      >{{
+                        date(
+                          section === "photos"
+                            ? mediaDate(file)
+                            : file.created_at,
+                        )
+                      }}</small
                     >
                     <div
                       v-if="file.tags.length && view !== 'list'"
@@ -2793,7 +2801,9 @@ onBeforeUnmount(() => {
                   <span v-if="view === 'list'" class="list-meta">{{
                     bytes(file.size_bytes)
                   }}</span><span v-if="view === 'list'" class="list-meta">{{
-                    date(file.created_at)
+                    date(
+                      section === "photos" ? mediaDate(file) : file.created_at,
+                    )
                   }}</span
                   ><button
                     class="file-open icon-button small"
@@ -2971,8 +2981,14 @@ onBeforeUnmount(() => {
         <dd>{{ selectedFile.mime_type }}</dd>
         <dt>{{ t("Размер") }}</dt>
         <dd>{{ bytes(selectedFile.size_bytes) }}</dd>
-        <dt>{{ t("Добавлен") }}</dt>
-        <dd>{{ date(selectedFile.created_at) }}</dd>
+        <template v-if="selectedFile.captured_at">
+          <dt>{{ t("Дата съёмки") }}</dt>
+          <dd>{{ dateTime(selectedFile.captured_at) }}</dd>
+        </template>
+        <dt>{{ t("Дата добавления") }}</dt>
+        <dd>{{ dateTime(selectedFile.created_at) }}</dd>
+        <dt>{{ t("Дата изменения") }}</dt>
+        <dd>{{ dateTime(selectedFile.updated_at) }}</dd>
         <dt>{{ t("Расположение") }}</dt>
         <dd>
           {{
@@ -3207,8 +3223,11 @@ onBeforeUnmount(() => {
         ><span
           >{{ preview.name
           }}<small
+            :title="
+              preview.captured_at ? t('Дата съёмки') : t('Дата добавления')
+            "
             >{{ bytes(preview.size_bytes) }} ·
-            {{ date(preview.created_at) }}</small
+            {{ dateTime(mediaDate(preview)) }}</small
           ></span
         >
       </div>
