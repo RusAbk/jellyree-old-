@@ -8,15 +8,20 @@ import { runThumbnailPreview, videoDuration } from "./video-preview";
 import ProcessedImage from "./ProcessedImage.vue";
 import { needsImageProcessing } from "../electron/image-adjustments.mjs";
 import { thumbnailRevision, thumbnailBytes } from "./thumbnail";
+import { isImageFile, isHeicFile } from "../electron/image-formats.mjs";
 const props = defineProps<{
   file: DriveFile;
   compact?: boolean;
   natural?: boolean;
 }>();
-const isVideo = computed(() => props.file.mime_type.startsWith("video/"));
-const isImage = computed(() => props.file.mime_type.startsWith("image/"));
+const isVideo = computed(
+  () => !isHeicFile(props.file) && props.file.mime_type.startsWith("video/"),
+);
+const isImage = computed(() => isImageFile(props.file));
 const processed = computed(
-  () => isImage.value && needsImageProcessing(props.file.adjustments),
+  () =>
+    isImage.value &&
+    (isHeicFile(props.file) || needsImageProcessing(props.file.adjustments)),
 );
 const dimensions = ref({ width: 0, height: 0 });
 const revision = computed(() => thumbnailRevision(props.file));
@@ -490,7 +495,9 @@ onBeforeUnmount(() => {
     <i
       v-if="isVideo ? !videoReady : !url || failed"
       aria-hidden="true"
-      :class="pending ? 'ri-loader-4-line spinning' : icon(file.mime_type)"
+      :class="
+        pending ? 'ri-loader-4-line spinning' : icon(file.mime_type, file.name)
+      "
     ></i>
     <video
       v-if="decoding"

@@ -4,6 +4,7 @@ import {
 } from "../electron/image-adjustments.mjs";
 import { adjustPixels, warpPixels, imageHistogram } from "./image-pixels.mjs";
 import type { ImageRenderRequest } from "./image-service";
+import { isHeicFile, HEIC_MAX_PIXELS } from "../electron/image-formats.mjs";
 const images = new Map<string, ImageBitmap>();
 const channel = self as unknown as {
   onmessage: (event: MessageEvent) => void;
@@ -17,21 +18,28 @@ channel.onmessage = async ({
     key: string;
     source?: ArrayBuffer;
     mimeType?: string;
+    fileName?: string;
   }
 >) => {
   try {
     let image = images.get(data.key);
     if (!image) {
       if (!data.source) throw new Error("image-source-missing");
-      image = await createImageBitmap(
-        new Blob([data.source], { type: data.mimeType }),
-      );
+      const heic = isHeicFile({
+        name: data.fileName || "",
+        mime_type: data.mimeType || "",
+      });
+      image = heic
+        ? await (await import("./heic-decoder")).decodeHeicImage(data.source)
+        : await createImageBitmap(
+            new Blob([data.source], { type: data.mimeType }),
+          );
       if (
-        image.width * image.height > 48_000_000 ||
+        image.width * image.height > (heic ? HEIC_MAX_PIXELS : 48_000_000) ||
         Math.max(image.width, image.height) > 20000
       ) {
         image.close();
-        throw new Error("image-too-large");
+        throw new Error(heic ? "heic-too-large" : "image-too-large");
       }
       images.set(data.key, image);
       if (images.size > 2) {

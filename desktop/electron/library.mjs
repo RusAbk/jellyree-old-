@@ -27,6 +27,7 @@ import { libraryId } from "./config.mjs";
 import { normalizeImageAdjustments } from "./image-adjustments.mjs";
 import { validateVideoFrame, videoFrameName } from "./video-frames.mjs";
 import { documentKind, documentLimits } from "./document-preview.mjs";
+import { isImageFile, imageMimeType } from "./image-formats.mjs";
 
 const schema = await readFile(new URL("./schema.sql", import.meta.url), "utf8");
 export function cleanName(value) {
@@ -178,7 +179,9 @@ export class Library {
     }
     if (section === "favorites") where.push("favorite = 1");
     if (section === "photos")
-      where.push("(mime_type LIKE 'image/%' OR mime_type LIKE 'video/%')");
+      where.push(
+        "(mime_type LIKE 'image/%' OR mime_type LIKE 'video/%' OR LOWER(name) LIKE '%.heic' OR LOWER(name) LIKE '%.heif')",
+      );
     if (input.search) {
       where.push(
         "(name LIKE ? ESCAPE '\\' OR EXISTS (SELECT 1 FROM json_each(jr_files.tags) WHERE value LIKE ? ESCAPE '\\'))",
@@ -387,8 +390,7 @@ export class Library {
   async imageSource(id, { signal } = {}) {
     const file = await this.file(id, { signal }),
       limit = 64 * 1024 * 1024;
-    if (!file.mime_type.startsWith("image/"))
-      throw new Error(t("Выберите изображение."));
+    if (!isImageFile(file)) throw new Error(t("Выберите изображение."));
     if (file.size_bytes > limit)
       throw new Error(t("Для редактирования доступны изображения до 64 МБ."));
     const result = await this.s3.send(
@@ -414,7 +416,7 @@ export class Library {
       }
       return {
         data: new Uint8Array(Buffer.concat(chunks)),
-        mimeType: file.mime_type,
+        mimeType: imageMimeType(file),
       };
     } finally {
       result.Body?.destroy?.();

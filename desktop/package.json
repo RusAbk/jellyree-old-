@@ -22,7 +22,8 @@
     "test:thumbnails": "node test/thumbnail-smoke.mjs",
     "test:thumbnail-stress": "node test/thumbnail-stress.mjs",
     "test:video": "node test/video-smoke.mjs",
-    "test:documents": "node test/document-smoke.mjs"
+    "test:documents": "node test/document-smoke.mjs",
+    "test:heic": "node test/heic-smoke.mjs"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.998.0",
@@ -35,6 +36,7 @@
     "@codemirror/view": "^6.43.15",
     "codemirror": "^6.0.2",
     "dompurify": "^3.5.0",
+    "libheif-js": "^1.23.5",
     "marked": "^18.2.1",
     "mime": "^4.1.0",
     "pdfjs-dist": "^6.5.438",

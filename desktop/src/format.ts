@@ -1,6 +1,7 @@
 import { t } from "./i18n";
 import type { Adjustments } from "./types";
 import { localeCode } from "./i18n";
+import { isHeicFile } from "../electron/image-formats.mjs";
 export function bytes(value: number) {
   if (value === 0) return t("0 Б");
   const i = Math.min(
@@ -15,8 +16,9 @@ export const date = (value: string) =>
     month: "short",
     year: "numeric",
   });
-export function icon(mime: string) {
-  if (mime.startsWith("image/")) return "ri-image-line";
+export function icon(mime: string, name = "") {
+  if (mime.startsWith("image/") || isHeicFile({ name, mime_type: mime }))
+    return "ri-image-line";
   if (mime.startsWith("video/")) return "ri-film-line";
   if (mime.startsWith("audio/")) return "ri-music-2-line";
   if (mime === "application/pdf") return "ri-file-pdf-2-line";

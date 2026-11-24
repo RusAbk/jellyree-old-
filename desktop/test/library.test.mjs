@@ -350,6 +350,46 @@ test("preview cancellation reaches D1 fetch and the R2 image stream", async (t) 
   assert.equal(r2Signal, imageController.signal);
   assert.equal(destroyed, true);
 });
+test("legacy HEIC objects appear in photos and allow scoped original reads without changing their stored bytes", async (t) => {
+  const { library, insert } = fixture(t);
+  await library.initialize();
+  insert("heic", { name: "IMG.HEIC", mime: "application/octet-stream" });
+  insert("heif", { name: "IMG.HeIf", mime: "application/octet-stream" });
+  insert("foreign-heic", {
+    name: "Foreign.heic",
+    mime: "image/heic",
+    scope: "other",
+  });
+  insert("text", { name: "notes.txt", mime: "text/plain" });
+  const bytes = await readFile(
+    new URL("fixtures/preview.heic", import.meta.url),
+  );
+  let reads = 0;
+  library.s3.send = async () => {
+    reads++;
+    return {
+      ContentLength: bytes.length,
+      Body: (async function* () {
+        yield bytes;
+      })(),
+    };
+  };
+  assert.deepEqual(
+    (await library.list({ section: "photos" })).items.map((f) => f.id).sort(),
+    ["heic", "heif"],
+  );
+  const result = await library.imageSource("heic");
+  assert.equal(result.mimeType, "image/heic");
+  assert.deepEqual(Buffer.from(result.data), bytes);
+  await assert.rejects(library.imageSource("foreign-heic"));
+  await assert.rejects(library.imageSource("text"));
+  assert.equal(reads, 1);
+  assert.equal(
+    (await library.file("heic")).mime_type,
+    "application/octet-stream",
+  );
+  assert.equal((await library.file("heic")).object_key, "objects/heic");
+});
 test("D1 checks HTTP, envelope and individual query errors without leaking the token", async () => {
   for (const response of [
     Response.json(

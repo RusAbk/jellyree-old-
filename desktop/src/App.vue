@@ -9,6 +9,7 @@ import { thumbnailRevision } from "./thumbnail";
 import PhotoEditor from "./PhotoEditor.vue";
 import ProcessedImage from "./ProcessedImage.vue";
 import { needsImageProcessing } from "../electron/image-adjustments.mjs";
+import { isImageFile, isHeicFile } from "../electron/image-formats.mjs";
 import SettingsPanel from "./SettingsPanel.vue";
 import ContextMenu, { type MenuItem } from "./ContextMenu.vue";
 import UploadConflictDialog from "./UploadConflictDialog.vue";
@@ -243,9 +244,7 @@ const contextItems = computed<MenuItem[]>(() => {
         ? [
             item("open", t("Открыть"), "ri-eye-line"),
             item("info", t("Информация"), "ri-information-line"),
-            ...(files.value
-              .find((f) => f.id === menu.ids[0])
-              ?.mime_type.startsWith("image/")
+            ...(isImageFile(files.value.find((f) => f.id === menu.ids[0]))
               ? [item("editPhoto", t("Коррекция фото"), "ri-equalizer-line")]
               : []),
           ]
@@ -812,6 +811,10 @@ async function openPreview(file: DriveFile) {
   previewLoading.value = true;
   editing.value = false;
   try {
+    if (isHeicFile(file)) {
+      previewUrl.value = "processed";
+      return;
+    }
     if (documentKind(file)) return;
     if (
       file.mime_type.startsWith("video/") &&
@@ -1709,7 +1712,10 @@ onBeforeUnmount(() => {
               </div>
               <div class="file-info">
                 <div class="file-name" :title="file.name">
-                  <i aria-hidden="true" :class="icon(file.mime_type)"></i
+                  <i
+                    aria-hidden="true"
+                    :class="icon(file.mime_type, file.name)"
+                  ></i
                   ><span>{{ file.name }}</span>
                 </div>
                 <small v-if="view !== 'list'"
@@ -2066,7 +2072,7 @@ onBeforeUnmount(() => {
   >
     <header class="preview-header">
       <div>
-        <i aria-hidden="true" :class="icon(preview.mime_type)"></i
+        <i aria-hidden="true" :class="icon(preview.mime_type, preview.name)"></i
         ><span
           >{{ preview.name
           }}<small
@@ -2087,7 +2093,7 @@ onBeforeUnmount(() => {
             :class="preview.favorite ? 'ri-star-fill' : 'ri-star-line'"
           ></i></button
         ><button
-          v-if="preview.mime_type.startsWith('image/')"
+          v-if="isImageFile(preview)"
           class="button"
           @click="editing = !editing"
         >
@@ -2137,7 +2143,7 @@ onBeforeUnmount(() => {
           </button>
         </div>
         <DocumentViewer
-          v-else-if="documentKind(preview)"
+          v-else-if="!isHeicFile(preview) && documentKind(preview)"
           ref="documentViewer"
           :key="`${preview.id}:${documentVersion}`"
           :file="preview"
@@ -2148,14 +2154,14 @@ onBeforeUnmount(() => {
         <template v-else-if="previewUrl"
           ><ProcessedImage
             v-if="
-              preview.mime_type.startsWith('image/') &&
-              needsImageProcessing(preview.adjustments)
+              isImageFile(preview) &&
+              (isHeicFile(preview) || needsImageProcessing(preview.adjustments))
             "
             :file="preview"
             @error="previewError = $event.message"
           />
           <img
-            v-else-if="preview.mime_type.startsWith('image/')"
+            v-else-if="isImageFile(preview)"
             :src="previewUrl"
             :alt="preview.name"
             :style="imageStyle(preview.adjustments)"

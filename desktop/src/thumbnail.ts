@@ -1,12 +1,13 @@
 import type { DriveFile, ThumbnailRevision } from "./types";
 import { normalizeImageAdjustments } from "../electron/image-adjustments.mjs";
+import { isImageFile, imageMimeType } from "../electron/image-formats.mjs";
 export function thumbnailRevision(file: DriveFile): ThumbnailRevision {
   return {
     id: file.id,
     objectKey: file.object_key || "",
     sizeBytes: file.size_bytes,
-    mimeType: file.mime_type,
-    adjustments: file.mime_type.startsWith("image/")
+    mimeType: imageMimeType(file),
+    adjustments: isImageFile(file)
       ? normalizeImageAdjustments(file.adjustments)
       : {},
   };

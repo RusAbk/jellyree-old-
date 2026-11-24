@@ -14,6 +14,7 @@ import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { ConfigStore } from "./config.mjs";
 import { Library } from "./library.mjs";
+import { isImageFile } from "./image-formats.mjs";
 import { UploadConflictBroker } from "./upload-conflicts.mjs";
 import { OperationQueue } from "./operation-queue.mjs";
 import { ThumbnailCache, thumbnailKey } from "./thumbnail-cache.mjs";
@@ -409,7 +410,7 @@ function registerHandlers() {
   handle("files:export-image", async (id, data, format) => {
     const file = await library.file(id);
     if (
-      !file.mime_type.startsWith("image/") ||
+      !isImageFile(file) ||
       !["png", "jpeg", "webp"].includes(format) ||
       !(data instanceof Uint8Array) ||
       !data.length ||

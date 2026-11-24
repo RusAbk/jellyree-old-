@@ -11,3 +11,5 @@ ffmpeg -f lavfi -i testsrc2=size=600x400:rate=1 -frames:v 1 -y editor.png
 ```
 
 Smoke tests serve the fixtures from a mocked cross-origin R2 URL without CORS headers. FFmpeg is only used to regenerate these fixtures; the application and tests do not require it.
+
+`preview.heic` is a synthetic 960×640 image with four colored quadrants and a white marker. `rotated.heic` stores the same pattern with a 90° clockwise orientation. `collection.heic` has a small magenta first frame and the pattern as its primary second frame. They contain no user photos. Run `generate-heic.py` with Pillow and pillow-heif to regenerate them; neither Python nor these tools is needed to run the application or tests.

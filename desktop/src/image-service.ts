@@ -1,4 +1,4 @@
-import ImageWorker from "./image-worker?worker&inline";
+import ImageWorker from "./image-worker?worker";
 import { api } from "./api";
 import { t } from "./i18n";
 import { normalizeImageAdjustments } from "../electron/image-adjustments.mjs";
@@ -43,6 +43,14 @@ const queue: Job[] = [],
 const keyFor = (file: DriveFile) => `${file.id}:${file.object_key}`;
 const abort = () => new DOMException("Superseded image render", "AbortError");
 function failure(code: string) {
+  if (code === "heic-too-large")
+    return new Error(
+      t("Для просмотра HEIC доступны изображения до 50 мегапикселей."),
+    );
+  if (code === "heic-decode-failed")
+    return new Error(
+      t("Не удалось открыть HEIC/HEIF. Проверьте файл или скачайте оригинал."),
+    );
   if (code === "image-too-large")
     return new Error(
       t("Для редактирования доступны изображения до 48 мегапикселей."),
@@ -167,7 +175,14 @@ async function pump() {
     }
     job.posted = true;
     worker!.postMessage(
-      { ...job.options, id: job.id, key, source, mimeType },
+      {
+        ...job.options,
+        id: job.id,
+        key,
+        source,
+        mimeType,
+        fileName: job.file.name,
+      },
       source ? [source] : [],
     );
   } catch (error) {

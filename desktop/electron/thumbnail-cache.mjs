@@ -11,6 +11,7 @@ import {
 } from "node:fs/promises";
 import path from "node:path";
 import { normalizeImageAdjustments } from "./image-adjustments.mjs";
+import { isHeicFile } from "./image-formats.mjs";
 export const THUMBNAIL_LIMIT = 256 * 1024 * 1024;
 const ENTRY_LIMIT = 2 * 1024 * 1024;
 const filenamePattern = /^[a-f0-9]{64}\.thumb$/;
@@ -31,7 +32,8 @@ export function thumbnailKey(namespace, revision) {
   return createHash("sha256")
     .update(
       JSON.stringify({
-        version: 1,
+        // HEIC previews now bake in orientation and edits in the decoder worker.
+        version: isHeicFile({ name: "", mime_type: revision.mimeType }) ? 2 : 1,
         namespace,
         id: revision.id,
         objectKey: revision.objectKey,

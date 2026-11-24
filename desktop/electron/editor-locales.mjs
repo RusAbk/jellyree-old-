@@ -1,4 +1,12 @@
 export const editorMessages = {
+  "Для просмотра HEIC доступны изображения до 50 мегапикселей.": {
+    en: "HEIC preview supports images up to 50 megapixels.",
+    es: "La vista previa HEIC admite imágenes de hasta 50 megapíxeles.",
+  },
+  "Не удалось открыть HEIC/HEIF. Проверьте файл или скачайте оригинал.": {
+    en: "Unable to open HEIC/HEIF. Check the file or download the original.",
+    es: "No se pudo abrir HEIC/HEIF. Comprueba el archivo o descarga el original.",
+  },
   "Пробел: пауза · ← →: перемотка · Shift+S: кадр · Esc: выход": {
     en: "Space: play/pause · ← →: seek · Shift+S: frame · Esc: close",
     es: "Espacio: reproducir/pausa · ← →: buscar · Shift+S: fotograma · Esc: cerrar",
