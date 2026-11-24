@@ -26,6 +26,34 @@ export function icon(mime: string, name = "") {
   if (/text|json|javascript/.test(mime)) return "ri-file-text-line";
   return "ri-file-line";
 }
+const extensionHue = new Map([
+  ["PXZ", 282],
+  ["PSD", 220],
+  ["JPG", 177],
+  ["JPEG", 193],
+  ["PNG", 237],
+  ["WEBP", 143],
+  ["HEIC", 30],
+  ["HEIF", 19],
+  ["GIF", 325],
+  ["SVG", 43],
+  ["PDF", 357],
+  ["MP4", 260],
+  ["MOV", 205],
+  ["TXT", 212],
+  ["MD", 162],
+  ["ZIP", 54],
+]);
+export function fileExtensionBadge(name: string) {
+  const lastDot = name.lastIndexOf(".");
+  if (lastDot <= 0 || lastDot === name.length - 1) return;
+  const label = name.slice(lastDot + 1).toUpperCase();
+  if (!/^[\p{L}\p{N}_+-]+$/u.test(label)) return;
+  let hash = 0;
+  for (const letter of label) hash = (hash * 41 + letter.codePointAt(0)!) % 360;
+  const hue = extensionHue.get(label) ?? hash;
+  return { label, color: `hsl(${hue} 58% 34%)` };
+}
 export const imageStyle = (a: Adjustments = {}) => ({
   filter: `brightness(${a.brightness ?? 100}%) contrast(${a.contrast ?? 100}%) saturate(${a.saturation ?? 100}%)`,
   transform: `rotate(${a.rotate ?? 0}deg)`,

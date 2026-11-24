@@ -2,7 +2,7 @@
 import { t } from "./i18n";
 import { computed, ref, onMounted, onBeforeUnmount, watch } from "vue";
 import type { DriveFile, ThumbnailEntry, ThumbnailRevision } from "./types";
-import { icon, imageStyle } from "./format";
+import { fileExtensionBadge, icon, imageStyle } from "./format";
 import { api } from "./api";
 import { runThumbnailPreview, videoDuration } from "./video-preview";
 import ProcessedImage from "./ProcessedImage.vue";
@@ -18,6 +18,7 @@ const isVideo = computed(
   () => !isHeicFile(props.file) && props.file.mime_type.startsWith("video/"),
 );
 const isImage = computed(() => isImageFile(props.file));
+const extension = computed(() => fileExtensionBadge(props.file.name));
 const processed = computed(
   () =>
     isImage.value &&
@@ -526,6 +527,13 @@ onBeforeUnmount(() => {
     >
       <i aria-hidden="true" class="ri-refresh-line"></i>
     </button>
+    <span
+      v-if="extension"
+      class="file-extension-badge"
+      :style="{ backgroundColor: extension.color }"
+      :title="extension.label"
+      >{{ extension.label }}</span
+    >
     <span v-if="isVideo && videoReady" class="video-badge"
       ><i aria-hidden="true" class="ri-play-fill"></i
       ><span v-if="!compact">{{ durationLabel }}</span></span
@@ -534,13 +542,9 @@ onBeforeUnmount(() => {
       t("Превью недоступно")
     }}</span>
     <span
-      v-else-if="!compact && (isVideo ? !videoReady && !pending : !url)"
+      v-else-if="!extension && !compact && !url && !pending"
       class="extension"
-      >{{
-        file.name.includes(".")
-          ? file.name.split(".").pop()?.toUpperCase()
-          : t("ФАЙЛ")
-      }}</span
+      >{{ t("ФАЙЛ") }}</span
     >
   </div>
 </template>
