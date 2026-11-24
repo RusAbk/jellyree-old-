@@ -454,6 +454,17 @@ button {
   padding: 34px 38px;
   flex: 1;
 }
+.content.selecting-files {
+  cursor: crosshair;
+  user-select: none;
+}
+.selection-box {
+  position: fixed;
+  z-index: 20;
+  border: 1px solid var(--accent);
+  background: #7362df26;
+  pointer-events: none;
+}
 .eyebrow {
   font-size: 9px;
   letter-spacing: 2px;

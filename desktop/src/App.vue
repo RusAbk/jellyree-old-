@@ -21,6 +21,7 @@ import ContextMenu, { type MenuItem } from "./ContextMenu.vue";
 import UploadConflictDialog from "./UploadConflictDialog.vue";
 import UploadPanel from "./UploadPanel.vue";
 import { useUploadJobs, uploadPercent } from "./use-upload-jobs";
+import { useSelectionBox } from "./use-selection-box";
 import LanguageSelect from "./LanguageSelect.vue";
 import { syncLanguage } from "./i18n";
 import { bytes, date, icon } from "./format";
@@ -256,6 +257,35 @@ const scope = computed(
   () =>
     `${settings.value.accountId}/${settings.value.bucket}/${settings.value.prefix}`,
 );
+const selectedIds = computed(() => new Set(selection.value));
+let selectionAnchor: string | undefined;
+const {
+  box: selectionBox,
+  draft: selectionDraft,
+  start: startSelectionBox,
+  move: moveSelectionBox,
+  end: endSelectionBox,
+  interrupted: interruptSelectionBox,
+  cancel: cancelSelectionBox,
+} = useSelectionBox(
+  selection,
+  () =>
+    currentListing.value &&
+    files.value.length > 0 &&
+    !busy.value &&
+    !settingsOpen.value &&
+    !modal.value &&
+    !preview.value &&
+    !uploadConflictOpen.value,
+  () => {
+    if (!selectionAnchor || !selectedIds.value.has(selectionAnchor))
+      selectionAnchor = selection.value[0];
+  },
+);
+// Keep the inspector and toolbar stable until the mouse gesture commits.
+const highlightedIds = computed(
+  () => selectionDraft.value ?? selectedIds.value,
+);
 
 const contextItems = computed<MenuItem[]>(() => {
   const menu = contextMenu.value;
@@ -386,7 +416,7 @@ function showContext(
   };
 }
 function fileContext(event: MouseEvent, file: DriveFile) {
-  if (!selection.value.includes(file.id)) selection.value = [file.id];
+  if (!selectedIds.value.has(file.id)) selectOnly(file.id);
   showContext(event, "files", selection.value);
 }
 function folderContext(event: MouseEvent, folder: Folder) {
@@ -619,7 +649,7 @@ function fileDragStart(event: DragEvent, file: DriveFile) {
     return;
   }
   closeContextMenu();
-  if (!selection.value.includes(file.id)) selection.value = [file.id];
+  if (!selectedIds.value.has(file.id)) selectOnly(file.id);
   draggedItems.value = { kind: "files", ids: [...selection.value] };
   event.dataTransfer.effectAllowed = "move";
   event.dataTransfer.setData(INTERNAL_DRAG_TYPE, dragSession);
@@ -721,17 +751,37 @@ async function folderDrop(event: DragEvent, target: string | null) {
     await upload(false, files, target);
   }
 }
-function select(file: DriveFile, event?: MouseEvent) {
-  if (event?.metaKey || event?.ctrlKey || event?.shiftKey) {
-    selection.value = selection.value.includes(file.id)
+function selectOnly(id: string) {
+  selection.value = [id];
+  selectionAnchor = id;
+}
+function select(
+  file: DriveFile,
+  event: MouseEvent | KeyboardEvent,
+  toggle = false,
+) {
+  const additive = event.metaKey || event.ctrlKey;
+  if (event.shiftKey) {
+    const anchor = selection.value.length
+      ? files.value.findIndex(({ id }) => id === selectionAnchor)
+      : -1;
+    const target = files.value.findIndex(({ id }) => id === file.id);
+    if (anchor >= 0 && target >= 0) {
+      const start = Math.min(anchor, target);
+      const end = Math.max(anchor, target);
+      const range = files.value.slice(start, end + 1).map(({ id }) => id);
+      selection.value = additive
+        ? [...new Set([...selection.value, ...range])]
+        : range;
+      return;
+    }
+    selectOnly(file.id);
+  } else if (toggle || additive) {
+    selection.value = selectedIds.value.has(file.id)
       ? selection.value.filter((id) => id !== file.id)
       : [...selection.value, file.id];
-  } else selection.value = [file.id];
-}
-function toggleSelect(id: string) {
-  selection.value = selection.value.includes(id)
-    ? selection.value.filter((i) => i !== id)
-    : [...selection.value, id];
+    selectionAnchor = file.id;
+  } else selectOnly(file.id);
 }
 function patch(ids: string[], input: FilePatch, message = "") {
   return action(() => api.update(ids, input), message);
@@ -992,6 +1042,10 @@ function disconnected() {
   notice.value = t("Подключение удалено с устройства.");
 }
 function keydown(event: KeyboardEvent) {
+  if (event.key === "Escape" && cancelSelectionBox()) {
+    event.preventDefault();
+    return;
+  }
   if (contextMenu.value) {
     if (event.key === "Escape") {
       event.preventDefault();
@@ -1074,7 +1128,19 @@ watch(
 watch(sort, () => {
   void reload();
 });
-watch(listing, () => window.scrollTo(0, 0), { flush: "post" });
+watch(
+  listing,
+  () => {
+    selectionAnchor = undefined;
+    cancelSelectionBox();
+    window.scrollTo(0, 0);
+  },
+  { flush: "post" },
+);
+watch(scope, () => {
+  selectionAnchor = undefined;
+  cancelSelectionBox();
+});
 const autoLoadMore = computed(
   () =>
     canLoadMore.value &&
@@ -1107,7 +1173,10 @@ watch(
   },
   { flush: "post" },
 );
-watch(view, (value) => localStorage.setItem("jellyree-desktop-view", value));
+watch(view, (value) => {
+  cancelSelectionBox();
+  localStorage.setItem("jellyree-desktop-view", value);
+});
 watch(previewSize, (value) =>
   localStorage.setItem("jellyree-desktop-preview-size", String(value)),
 );
@@ -1416,7 +1485,27 @@ onBeforeUnmount(() => {
         </div>
         <progress v-if="progress" :value="progressPercent" max="100"></progress>
       </div>
-      <section class="content" @contextmenu="emptyContext">
+      <section
+        class="content"
+        :class="{ 'selecting-files': !!selectionBox }"
+        @contextmenu="emptyContext"
+        @pointerdown="startSelectionBox"
+        @pointermove="moveSelectionBox"
+        @pointerup="endSelectionBox"
+        @pointercancel="interruptSelectionBox"
+        @lostpointercapture="interruptSelectionBox"
+      >
+        <div
+          v-if="selectionBox"
+          class="selection-box"
+          aria-hidden="true"
+          :style="{
+            left: `${selectionBox.left}px`,
+            top: `${selectionBox.top}px`,
+            width: `${selectionBox.width}px`,
+            height: `${selectionBox.height}px`,
+          }"
+        ></div>
         <div v-if="section === 'drive' && folderId" class="breadcrumbs">
           <button
             @click="navigate('drive')"
@@ -1747,8 +1836,9 @@ onBeforeUnmount(() => {
               v-for="file in files"
               :key="file.id"
               class="file-card"
+              :data-file-id="file.id"
               :class="{
-                selected: selection.includes(file.id),
+                selected: highlightedIds.has(file.id),
                 'drag-source':
                   draggedItems?.kind === 'files' &&
                   draggedItems.ids.includes(file.id),
@@ -1760,7 +1850,7 @@ onBeforeUnmount(() => {
               @dblclick="openPreview(file)"
               @contextmenu="fileContext($event, file)"
               @keydown.enter="openPreview(file)"
-              @keydown.space.prevent="toggleSelect(file.id)"
+              @keydown.space.self.prevent="select(file, $event, true)"
             >
               <div class="thumb-wrap">
                 <FileThumb
@@ -1769,14 +1859,15 @@ onBeforeUnmount(() => {
                   :natural="view === 'gallery'"
                 /><button
                   class="file-checkbox"
-                  :class="{ checked: selection.includes(file.id) }"
+                  :class="{ checked: highlightedIds.has(file.id) }"
                   :aria-label="t('Выбрать {0}', { '0': file.name })"
-                  @click.stop="toggleSelect(file.id)"
+                  :aria-pressed="selectedIds.has(file.id)"
+                  @click.stop="select(file, $event, true)"
                 >
                   <i
                     aria-hidden="true"
                     :class="
-                      selection.includes(file.id)
+                      highlightedIds.has(file.id)
                         ? 'ri-checkbox-fill'
                         : 'ri-checkbox-blank-line'
                     "

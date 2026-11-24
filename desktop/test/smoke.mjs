@@ -1474,6 +1474,52 @@ try {
   console.log(
     "PASS: uncropped portrait/panorama/rotation gallery, persistent preview size, file/folder/empty-space menus, multiselection, keyboard and edge placement",
   );
+  const fileNames = page.locator(".files .file-name > span");
+  const namesInOrder = await fileNames.allTextContents();
+  const selectedNames = () =>
+    page.locator(".file-card.selected .file-name > span").allTextContents();
+  await fileNames.nth(1).click();
+  await fileNames.nth(4).click({ modifiers: ["Shift"] });
+  assert.deepEqual(await selectedNames(), namesInOrder.slice(1, 5));
+  await fileNames.nth(0).click({ modifiers: ["Shift"] });
+  assert.deepEqual(await selectedNames(), namesInOrder.slice(0, 2));
+  await fileNames.nth(5).click({ modifiers: ["Control"] });
+  assert.deepEqual(await selectedNames(), [
+    ...namesInOrder.slice(0, 2),
+    namesInOrder[5],
+  ]);
+
+  const fileCards = page.locator(".files .file-card");
+  await fileCards.first().scrollIntoViewIfNeeded();
+  const firstCard = await fileCards.nth(0).boundingBox();
+  const thirdCard = await fileCards.nth(2).boundingBox();
+  const gutter = firstCard.x - 10;
+  const firstY = firstCard.y + firstCard.height / 2;
+  const thirdY = thirdCard.y + thirdCard.height / 2;
+  await page.mouse.move(gutter, thirdY);
+  await page.mouse.down();
+  await page.mouse.move(firstCard.x + 90, firstY, { steps: 8 });
+  await page.locator(".selection-box").waitFor();
+  await page.waitForFunction(
+    () => document.querySelectorAll(".file-card.selected").length === 3,
+  );
+  assert.deepEqual(await selectedNames(), namesInOrder.slice(0, 3));
+  await page.mouse.up();
+  await page.locator(".selection-box").waitFor({ state: "detached" });
+  assert.deepEqual(await selectedNames(), namesInOrder.slice(0, 3));
+
+  const fifthCard = await fileCards.nth(4).boundingBox();
+  await page.mouse.move(gutter, firstY);
+  await page.mouse.down();
+  await page.mouse.move(fifthCard.x + 90, fifthCard.y + 10, { steps: 8 });
+  await page.locator(".selection-box").waitFor();
+  await page.keyboard.press("Escape");
+  await page.mouse.up();
+  await page.locator(".selection-box").waitFor({ state: "detached" });
+  assert.deepEqual(await selectedNames(), namesInOrder.slice(0, 3));
+  console.log(
+    "PASS: Shift ranges in both directions, Ctrl toggle, reverse box drag and Escape restoration",
+  );
   const replacedPreview = page
     .locator(".file-card")
     .filter({ hasText: "Море.jpg" })
