@@ -1,0 +1,56 @@
+name: Build Jellyree for iPhone
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  iphone:
+    if: github.ref == 'refs/heads/main'
+    runs-on: macos-latest
+    environment: ios-device
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v7
+      - name: Check signing configuration
+        working-directory: mobile
+        env:
+          IOS_BUILD_CERTIFICATE_BASE64: ${{ secrets.IOS_BUILD_CERTIFICATE_BASE64 }}
+          IOS_BUILD_CERTIFICATE_PASSWORD: ${{ secrets.IOS_BUILD_CERTIFICATE_PASSWORD }}
+          IOS_PROVISIONING_PROFILE_BASE64: ${{ secrets.IOS_PROVISIONING_PROFILE_BASE64 }}
+          IOS_IPA_RECIPIENT: ${{ vars.IOS_IPA_RECIPIENT }}
+        run: bash tool/build-ios-device.sh --check
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.50.0'
+          channel: stable
+          cache: true
+      - run: npm ci --prefix desktop
+      - run: node mobile/tool/build-ui.mjs
+      - run: flutter pub get --enforce-lockfile
+        working-directory: mobile
+      - run: flutter analyze --no-pub && flutter test --no-pub
+        working-directory: mobile
+      - run: brew install age
+      - name: Build and encrypt the signed IPA
+        working-directory: mobile
+        env:
+          IOS_BUILD_CERTIFICATE_BASE64: ${{ secrets.IOS_BUILD_CERTIFICATE_BASE64 }}
+          IOS_BUILD_CERTIFICATE_PASSWORD: ${{ secrets.IOS_BUILD_CERTIFICATE_PASSWORD }}
+          IOS_PROVISIONING_PROFILE_BASE64: ${{ secrets.IOS_PROVISIONING_PROFILE_BASE64 }}
+          IOS_IPA_RECIPIENT: ${{ vars.IOS_IPA_RECIPIENT }}
+        run: bash tool/build-ios-device.sh
+      - uses: actions/upload-artifact@v7
+        with:
+          name: jellyree-iphone-encrypted
+          path: mobile/build/iphone/Jellyree.ipa.age
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
