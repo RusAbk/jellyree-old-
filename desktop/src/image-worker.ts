@@ -5,7 +5,11 @@ import {
 } from "../electron/image-adjustments.mjs";
 import { adjustPixels, warpPixels, imageHistogram } from "./image-pixels.mjs";
 import type { ImageRenderRequest } from "./image-service";
-import { isHeicFile, HEIC_MAX_PIXELS } from "../electron/image-formats.mjs";
+import {
+  isHeicFile,
+  HEIC_MAX_PIXELS,
+  IMAGE_EXPORT_MAX_PIXELS,
+} from "../electron/image-formats.mjs";
 const images = new Map<string, ImageBitmap>();
 const channel = self as unknown as {
   onmessage: (event: MessageEvent) => void;
@@ -59,7 +63,7 @@ channel.onmessage = async ({
     if (
       data.export &&
       !data.maxSize &&
-      nativeBounds.fullWidth * nativeBounds.fullHeight > 24_000_000
+      nativeBounds.fullWidth * nativeBounds.fullHeight > IMAGE_EXPORT_MAX_PIXELS
     )
       throw new Error("export-too-large");
     const scale = data.export
@@ -68,7 +72,8 @@ channel.onmessage = async ({
             1,
             data.maxSize / Math.max(nativeBounds.width, nativeBounds.height),
             Math.sqrt(
-              24_000_000 / (nativeBounds.fullWidth * nativeBounds.fullHeight),
+              IMAGE_EXPORT_MAX_PIXELS /
+                (nativeBounds.fullWidth * nativeBounds.fullHeight),
             ),
           )
         : 1

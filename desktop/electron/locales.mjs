@@ -22,6 +22,9 @@ export const messages = {
   "Уменьшить фото": { en: "Zoom out photo", es: "Alejar foto" },
   "Увеличить фото": { en: "Zoom in photo", es: "Acercar foto" },
   "Добавить тег": { en: "Add tag", es: "Añadir etiqueta" },
+  "Скопировать теги": { en: "Copy tags", es: "Copiar etiquetas" },
+  "Вставить теги": { en: "Paste tags", es: "Pegar etiquetas" },
+  "Теги скопированы.": { en: "Tags copied.", es: "Etiquetas copiadas." },
   "Существующие теги": { en: "Existing tags", es: "Etiquetas existentes" },
   Подсказки: { en: "Suggestions", es: "Sugerencias" },
   "Этот набор заменит теги всех выбранных файлов.": {

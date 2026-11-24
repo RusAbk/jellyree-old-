@@ -43,6 +43,8 @@ export function createApi(bridge: Jellyree): Jellyree {
       bridge.documentSource(id, expectedObjectKey),
     saveTextDocument: (id, expectedObjectKey, data) =>
       bridge.saveTextDocument(id, expectedObjectKey, data),
+    saveEditedImage: (id, expectedObjectKey, data) =>
+      bridge.saveEditedImage(id, expectedObjectKey, data),
     setDocumentDraft: (owner, dirty) => bridge.setDocumentDraft(owner, dirty),
     videoSource: (revision) => bridge.videoSource(toIpcData(revision)),
     duplicatePhoto: (id, key) => bridge.duplicatePhoto(id, key),

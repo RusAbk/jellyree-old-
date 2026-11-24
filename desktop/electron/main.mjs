@@ -57,6 +57,7 @@ const catalogMutations = new Set([
   "files:update",
   "files:delete",
   "files:save-text-document",
+  "files:save-edited-image",
   "files:save-video-frame",
   "files:duplicate-photo",
   "files:pick-upload",
@@ -69,7 +70,7 @@ const catalogMutations = new Set([
 ]);
 const uploadConflicts = new UploadConflictBroker();
 const uploads = new OperationQueue();
-const documentWrites = new OperationQueue();
+const fileWrites = new OperationQueue();
 let documentDraftOwner = "";
 import { setLanguage } from "./locales.mjs";
 
@@ -392,9 +393,10 @@ function registerHandlers() {
     library.documentSource(id, expectedObjectKey),
   );
   handle("files:save-text-document", (id, expectedObjectKey, data) =>
-    documentWrites.run(() =>
-      library.saveTextDocument(id, expectedObjectKey, data),
-    ),
+    fileWrites.run(() => library.saveTextDocument(id, expectedObjectKey, data)),
+  );
+  handle("files:save-edited-image", (id, expectedObjectKey, data) =>
+    fileWrites.run(() => library.saveEditedImage(id, expectedObjectKey, data)),
   );
   handle(
     "documents:draft",

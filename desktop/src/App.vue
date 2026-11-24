@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { t } from "./i18n";
+import { localeCode, t } from "./i18n";
 import {
   computed,
   nextTick,
@@ -64,6 +64,14 @@ const settingsOpen = ref(false),
 const files = ref<DriveFile[]>([]),
   folders = ref<Folder[]>([]),
   stats = ref<Stats>({ files: 0, bytes: 0, trashed: 0, tags: [] });
+const tagsAlphabetical = computed(() => {
+  const collator = new Intl.Collator(localeCode(), {
+    sensitivity: "base",
+    numeric: true,
+  });
+  return [...stats.value.tags].sort(collator.compare);
+});
+const tagClipboard = shallowRef<string[]>([]);
 const search = ref(""),
   tag = ref(""),
   sort = ref("date"),
@@ -1371,9 +1379,12 @@ function releasePreviewMedia(url: string) {
   )
     void api.releaseMedia(url).catch(() => {});
 }
-function documentSaved(file: DriveFile) {
+function fileSaved(file: DriveFile) {
   if (preview.value?.id === file.id) preview.value = file;
   files.value = files.value.map((current) =>
+    current.id === file.id ? file : current,
+  );
+  timelineNewer.value = timelineNewer.value.map((current) =>
     current.id === file.id ? file : current,
   );
   requestUploadRefresh("usage");
@@ -1571,6 +1582,11 @@ async function saveImageEdits(adjustments: Adjustments) {
   notice.value = t("Коррекция сохранена. Оригинал сохранён в R2.");
   requestUploadRefresh();
   return true;
+}
+async function saveEditedImage(source: DriveFile, data: Uint8Array) {
+  const result = await api.saveEditedImage(source.id, source.object_key, data);
+  fileSaved(result.file);
+  return result;
 }
 async function download(ids = selection.value) {
   await action(
@@ -1990,11 +2006,11 @@ onBeforeUnmount(() => {
           </button>
         </div>
       </div>
-      <template v-if="stats.tags.length"
+      <template v-if="tagsAlphabetical.length"
         ><div class="sidebar-label">{{ t("ТЕГИ") }}</div>
         <div class="sidebar-tags">
           <button
-            v-for="name in stats.tags"
+            v-for="name in tagsAlphabetical"
             :key="name"
             :class="{ active: tag === name }"
             @click="navigate('all', null, name)"
@@ -2959,8 +2975,9 @@ onBeforeUnmount(() => {
       <TagEditor
         v-if="modal.kind === 'tags'"
         ref="tagEditor"
+        v-model:clipboard="tagClipboard"
         :tags="modal.tags"
-        :known="stats.tags"
+        :known="tagsAlphabetical"
         :busy="busy"
         :save="updateDraftTags"
         comma-separated
@@ -3200,7 +3217,7 @@ onBeforeUnmount(() => {
           :file="preview"
           @error="previewError = $event"
           @close="closePreview"
-          @saved="documentSaved"
+          @saved="fileSaved"
         />
         <template v-else-if="previewUrl">
           <VideoPlayer
@@ -3272,8 +3289,9 @@ onBeforeUnmount(() => {
         </header>
         <TagEditor
           :key="preview.id"
+          v-model:clipboard="tagClipboard"
           :tags="preview.tags"
-          :known="stats.tags"
+          :known="tagsAlphabetical"
           :busy="busy || previewPageLoading"
           :save="savePreviewTags"
         />
@@ -3335,6 +3353,7 @@ onBeforeUnmount(() => {
     v-if="editing && preview"
     :file="preview"
     :save="saveImageEdits"
+    :replace="saveEditedImage"
     @close="editing = false"
   />
 </template>

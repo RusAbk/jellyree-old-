@@ -1,4 +1,36 @@
 export const editorMessages = {
+  "Все правки": { en: "All adjustments", es: "Todos los ajustes" },
+  "Сохранить в файл": { en: "Save to file", es: "Guardar en el archivo" },
+  "Заменить на PNG": { en: "Replace with PNG", es: "Sustituir por PNG" },
+  "Применить правки к файлу и сбросить настройки": {
+    en: "Apply edits to the file and reset adjustments",
+    es: "Aplicar los cambios al archivo y restablecer los ajustes",
+  },
+  "Изображение сохранено. Настройки сброшены.": {
+    en: "Image saved. Adjustments reset.",
+    es: "Imagen guardada. Ajustes restablecidos.",
+  },
+  "Сохранение изображения…": {
+    en: "Saving image…",
+    es: "Guardando imagen…",
+  },
+  "Для сохранения в файл доступны изображения до 24 мегапикселей.": {
+    en: "Saving to the file supports images up to 24 megapixels.",
+    es: "El guardado en el archivo admite imágenes de hasta 24 megapíxeles.",
+  },
+  "Для сохранения доступны изображения до 64 МБ.": {
+    en: "Images up to 64 MB can be saved.",
+    es: "Se pueden guardar imágenes de hasta 64 MB.",
+  },
+  "Не удалось закодировать изображение для сохранения.": {
+    en: "Unable to encode the image for saving.",
+    es: "No se pudo codificar la imagen para guardarla.",
+  },
+  "Сохранение в файл применяет правки к изображению в R2. Экспорт сохраняет отдельную копию на компьютере.":
+    {
+      en: "Saving to the file applies edits to the image in R2. Export saves a separate copy to your computer.",
+      es: "Guardar en el archivo aplica los cambios a la imagen en R2. Exportar guarda una copia independiente en tu equipo.",
+    },
   "Для просмотра PXZ доступны проекты до 128 МБ и 48 мегапикселей.": {
     en: "PXZ preview supports projects up to 128 MB and 48 megapixels.",
     es: "La vista previa de PXZ admite proyectos de hasta 128 MB y 48 megapíxeles.",

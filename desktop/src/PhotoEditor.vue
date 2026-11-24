@@ -20,6 +20,10 @@ import {
   cropRectangle,
   type ImageAdjustments,
 } from "../electron/image-adjustments.mjs";
+import {
+  IMAGE_EXPORT_MAX_PIXELS,
+  imageSaveFormat,
+} from "../electron/image-formats.mjs";
 import { renderImage, cancelImageWork } from "./image-service";
 import { stretchMapping, type Histogram } from "./image-pixels.mjs";
 import {
@@ -43,11 +47,15 @@ import {
 const props = defineProps<{
   file: DriveFile;
   save: (adjustments: Adjustments) => Promise<boolean>;
+  replace: (
+    file: DriveFile,
+    data: Uint8Array,
+  ) => Promise<{ file: DriveFile; warning?: string }>;
 }>();
 const emit = defineEmits<{ close: [] }>();
-const initial = normalizeImageAdjustments(props.file.adjustments),
-  draft = reactive<ImageAdjustments>(normalizeImageAdjustments(initial));
-const history = ref<ImageAdjustments[]>([normalizeImageAdjustments(initial)]),
+const initial = shallowRef(normalizeImageAdjustments(props.file.adjustments)),
+  draft = reactive<ImageAdjustments>(normalizeImageAdjustments(initial.value));
+const history = ref<ImageAdjustments[]>([initial.value]),
   historyIndex = ref(0);
 const section = ref("quick"),
   tool = ref("crop"),
@@ -56,6 +64,7 @@ const section = ref("quick"),
 const comparing = ref(false),
   clipping = ref(false),
   busy = ref(false),
+  savingFile = ref(false),
   rendering = ref(false),
   error = ref(""),
   message = ref(""),
@@ -101,9 +110,18 @@ type Drag = {
 };
 let drag: Drag | undefined;
 const dirty = computed(
+  () => JSON.stringify(snapshot()) !== JSON.stringify(initial.value),
+);
+const hasAdjustments = computed(
+  () => JSON.stringify(snapshot()) !== JSON.stringify(defaultImageAdjustments),
+);
+const saveFormat = computed(() => imageSaveFormat(props.file));
+const canSaveToFile = computed(
   () =>
-    JSON.stringify(normalizeImageAdjustments(draft)) !==
-    JSON.stringify(initial),
+    !busy.value &&
+    !!sourceSize.value.width &&
+    hasAdjustments.value &&
+    !props.file.trashed_at,
 );
 const geometry = computed(
   () => section.value === "geometry" && !comparing.value,
@@ -543,6 +561,61 @@ async function save() {
     busy.value = false;
   }
 }
+async function saveToFile() {
+  if (!canSaveToFile.value) return;
+  finishDrag(false);
+  const file = props.file;
+  const adjustments = snapshot();
+  const { format } = saveFormat.value;
+  const { fullWidth, fullHeight } = imageBounds(
+    sourceSize.value.width,
+    sourceSize.value.height,
+    adjustments,
+  );
+  if (fullWidth * fullHeight > IMAGE_EXPORT_MAX_PIXELS) {
+    error.value = t(
+      "Для сохранения в файл доступны изображения до 24 мегапикселей.",
+    );
+    return;
+  }
+  clearTimeout(timer);
+  request++;
+  cancelImageWork(owner);
+  rendering.value = false;
+  busy.value = savingFile.value = true;
+  error.value = message.value = "";
+  try {
+    const result = await renderImage(
+      exportOwner,
+      file,
+      {
+        adjustments,
+        maxSize: 0,
+        export: format,
+        quality: 98,
+      },
+      true,
+    );
+    const saved = await props.replace(file, new Uint8Array(result.bytes!));
+    initial.value = normalizeImageAdjustments(saved.file.adjustments);
+    Object.assign(draft, initial.value);
+    history.value = [initial.value];
+    historyIndex.value = 0;
+    ratio.value = "free";
+    comparing.value = false;
+    clipping.value = false;
+    await nextTick();
+    clearTimeout(timer);
+    savingFile.value = false;
+    await render();
+    message.value =
+      saved.warning || t("Изображение сохранено. Настройки сброшены.");
+  } catch (e) {
+    error.value = (e as Error).message;
+  } finally {
+    busy.value = savingFile.value = false;
+  }
+}
 async function exportImage() {
   if (busy.value || !sourceSize.value.width) return;
   busy.value = true;
@@ -615,7 +688,7 @@ function keydown(event: KeyboardEvent) {
   }
   if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "s") {
     event.preventDefault();
-    void save();
+    void saveToFile();
   }
 }
 watch(discard, async (value) => {
@@ -704,11 +777,21 @@ onBeforeUnmount(() => {
           {{ t("Удерживать для сравнения") }}
         </button>
         <button
-          class="button primary"
+          class="button"
           :disabled="busy || !sourceSize.width"
           @click="save"
         >
           {{ t("Сохранить коррекцию") }}
+        </button>
+        <button
+          class="button primary"
+          :disabled="!canSaveToFile"
+          :title="t('Применить правки к файлу и сбросить настройки')"
+          @click="saveToFile"
+        >
+          {{
+            t(saveFormat.convertsToPng ? "Заменить на PNG" : "Сохранить в файл")
+          }}
         </button>
         <button
           class="icon-button"
@@ -815,7 +898,10 @@ onBeforeUnmount(() => {
           </div>
         </div>
         <div class="editor-render-status" role="status">
-          <span v-if="rendering"
+          <span v-if="savingFile"
+            ><i aria-hidden="true" class="ri-loader-4-line spinning"></i>
+            {{ t("Сохранение изображения…") }}</span
+          ><span v-else-if="rendering"
             ><i aria-hidden="true" class="ri-loader-4-line spinning"></i>
             {{ t("Обновление превью…") }}</span
           ><span v-else-if="sourceSize.width">{{
@@ -826,26 +912,61 @@ onBeforeUnmount(() => {
           }}</span
           ><span v-if="comparing">{{ t("Оригинал") }}</span
           ><span v-else-if="dirty">{{ t("Есть несохранённые правки") }}</span>
+          <span v-if="message" class="editor-message">{{ message }}</span>
         </div>
       </div>
       <aside class="photo-editor-controls">
-        <nav class="editor-tabs" :aria-label="t('Инструменты редактора')">
-          <button
-            v-for="tab in [
-              { id: 'quick', label: t('Быстрые настройки') },
-              ...editGroups.map((group) => ({
-                id: group.id,
-                label: t(group.label),
-              })),
-              { id: 'geometry', label: t('Геометрия') },
-            ]"
-            :key="tab.id"
-            :aria-pressed="section === tab.id"
-            @click="section = tab.id"
+        <div class="editor-controls-header">
+          <div
+            class="editor-clipboard-actions"
+            role="group"
+            :aria-label="t('Все правки')"
           >
-            {{ tab.label }}
-          </button>
-        </nav>
+            <button
+              class="button"
+              :disabled="busy"
+              @click="
+                copiedImageEdits = snapshot();
+                message = t('Правки скопированы.');
+              "
+            >
+              <i class="ri-file-copy-line" aria-hidden="true"></i>
+              {{ t("Копировать правки") }}
+            </button>
+            <button
+              class="button"
+              :disabled="busy || !copiedImageEdits"
+              @click="
+                mutate(() =>
+                  Object.assign(
+                    draft,
+                    normalizeImageAdjustments(copiedImageEdits!),
+                  ),
+                )
+              "
+            >
+              <i class="ri-clipboard-line" aria-hidden="true"></i>
+              {{ t("Вставить правки") }}
+            </button>
+          </div>
+          <nav class="editor-tabs" :aria-label="t('Инструменты редактора')">
+            <button
+              v-for="tab in [
+                { id: 'quick', label: t('Быстрые настройки') },
+                ...editGroups.map((group) => ({
+                  id: group.id,
+                  label: t(group.label),
+                })),
+                { id: 'geometry', label: t('Геометрия') },
+              ]"
+              :key="tab.id"
+              :aria-pressed="section === tab.id"
+              @click="section = tab.id"
+            >
+              {{ tab.label }}
+            </button>
+          </nav>
+        </div>
         <fieldset :disabled="busy">
           <template v-if="section === 'quick'">
             <div class="editor-quick-actions">
@@ -874,29 +995,6 @@ onBeforeUnmount(() => {
                 @click="preset(item.values)"
               >
                 {{ t(item.label) }}
-              </button>
-            </div>
-            <div class="editor-quick-actions">
-              <button
-                class="button"
-                @click="
-                  copiedImageEdits = snapshot();
-                  message = t('Правки скопированы.');
-                "
-              >
-                {{ t("Копировать правки") }}</button><button
-                class="button"
-                :disabled="!copiedImageEdits"
-                @click="
-                  mutate(() =>
-                    Object.assign(
-                      draft,
-                      normalizeImageAdjustments(copiedImageEdits!),
-                    ),
-                  )
-                "
-              >
-                {{ t("Вставить правки") }}
               </button>
             </div>
           </template>
@@ -1168,7 +1266,6 @@ onBeforeUnmount(() => {
             {{ t("Повторить") }}
           </button>
         </p>
-        <p v-if="message" class="editor-message" role="status">{{ message }}</p>
         <footer class="editor-controls-footer">
           <button
             class="button"
@@ -1182,7 +1279,7 @@ onBeforeUnmount(() => {
           <p class="editor-hint">
             {{
               t(
-                "Оригинал остаётся в R2. Правки сохраняются отдельно; экспорт создаёт обработанную копию.",
+                "Сохранение в файл применяет правки к изображению в R2. Экспорт сохраняет отдельную копию на компьютере.",
               )
             }}
           </p>

@@ -50,7 +50,15 @@ try {
         created_at: "2026-11-24",
         updated_at: "2026-11-24",
       };
-      const state = { file, exports: [], updates: [], reads: 0 };
+      const state = {
+        file,
+        bytes: Buffer.from(input.bytes),
+        exports: [],
+        updates: [],
+        replacements: [],
+        reads: 0,
+        failNext: true,
+      };
       globalThis.__editorFixture = state;
       const replace = (name, fn) => {
         ipcMain.removeHandler(`jellyree:${name}`);
@@ -82,18 +90,34 @@ try {
       }));
       replace(
         "files:url",
-        () =>
-          `data:image/png;base64,${Buffer.from(input.bytes).toString("base64")}`,
+        () => `data:image/png;base64,${state.bytes.toString("base64")}`,
       );
       replace("files:image-source", () => {
         state.reads++;
-        return { data: new Uint8Array(input.bytes), mimeType: "image/png" };
+        return { data: new Uint8Array(state.bytes), mimeType: "image/png" };
       });
       replace("files:update", (ids, patch) => {
         if (patch.expectedObjectKey !== file.object_key)
           throw new Error("Source changed");
         file.adjustments = normalizeImageAdjustments(patch.adjustments);
         state.updates.push({ ids, patch });
+      });
+      replace("files:save-edited-image", (id, expectedObjectKey, bytes) => {
+        if (id !== file.id || expectedObjectKey !== file.object_key)
+          throw new Error("Source changed");
+        if (state.failNext) {
+          state.failNext = false;
+          throw new Error("Не удалось отправить изображение.");
+        }
+        const encoded = Buffer.from(bytes);
+        const image = nativeImage.createFromBuffer(encoded);
+        if (image.isEmpty()) throw new Error("Invalid replacement");
+        state.replacements.push({ expectedObjectKey, size: image.getSize() });
+        state.bytes = encoded;
+        file.object_key = `edited-${state.replacements.length}.png`;
+        file.size_bytes = bytes.length;
+        file.adjustments = {};
+        return { file };
       });
       replace("files:export-image", (id, bytes, format) => {
         const buffer = Buffer.from(bytes),
@@ -290,11 +314,18 @@ try {
   await editor
     .getByRole("button", { name: "Показать клиппинг", exact: true })
     .click();
+  const allEdits = editor.getByRole("group", { name: "Все правки" });
+  await allEdits
+    .getByRole("button", { name: "Копировать правки", exact: true })
+    .click();
+  await editor.getByRole("button", { name: "Геометрия", exact: true }).click();
+  assert.ok(
+    await allEdits
+      .getByRole("button", { name: "Вставить правки", exact: true })
+      .isEnabled(),
+  );
   await editor
     .getByRole("button", { name: "Быстрые настройки", exact: true })
-    .click();
-  await editor
-    .getByRole("button", { name: "Копировать правки", exact: true })
     .click();
   await editor
     .getByRole("button", { name: "Удерживать для сравнения", exact: true })
@@ -416,9 +447,53 @@ try {
     await electron.evaluate(() => globalThis.__editorFixture.updates.length),
     1,
   );
+  await page.getByRole("button", { name: "Коррекция", exact: true }).click();
+  const replaceFile = editor.getByRole("button", {
+    name: "Сохранить в файл",
+    exact: true,
+  });
+  await replaceFile.click();
+  await editor
+    .getByRole("alert")
+    .getByText("Не удалось отправить изображение.")
+    .waitFor();
+  assert.equal(
+    await electron.evaluate(() => globalThis.__editorFixture.file.object_key),
+    "original.png",
+  );
+  const renderedBefore = await pixels();
+  await replaceFile.click();
+  const savedMessage = editor.getByText(
+    "Изображение сохранено. Настройки сброшены.",
+    { exact: true },
+  );
+  await savedMessage.waitFor();
+  assert.ok(await editor.isVisible());
+  assert.ok(await replaceFile.isDisabled());
+  assert.ok(
+    await editor
+      .getByRole("button", { name: "Отменить шаг", exact: true })
+      .isDisabled(),
+  );
+  assert.deepEqual(await pixels(), renderedBefore);
+  await editor.getByRole("button", { name: "Свет и тон", exact: true }).click();
+  await slider("Яркость", 35);
+  await replaceFile.click();
+  await savedMessage.waitFor();
+  const overwritten = await electron.evaluate(() => globalThis.__editorFixture);
+  assert.deepEqual(
+    overwritten.replacements.map((entry) => entry.expectedObjectKey),
+    ["original.png", "edited-1.png"],
+  );
+  assert.deepEqual(
+    overwritten.replacements[1].size,
+    overwritten.replacements[0].size,
+  );
+  assert.deepEqual(overwritten.file.adjustments, {});
+  assert.notDeepEqual(await pixels(), renderedBefore);
   assert.deepEqual(errors, []);
   console.log(
-    "PASS: production Electron image worker, color pixels, history, crop/flip/liquify/stretch, compare, PNG/JPEG/WebP export, nondestructive IPC save, saved preview/thumbnail and discard",
+    "PASS: Electron image pipeline, history, PNG/JPEG/WebP export, adjustment save and discard, in-place replacement, failure recovery, and continued editing",
   );
 } finally {
   await electron?.close();

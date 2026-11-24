@@ -30,7 +30,14 @@ import { libraryId } from "./config.mjs";
 import { normalizeImageAdjustments } from "./image-adjustments.mjs";
 import { validateVideoFrame, videoFrameName } from "./video-frames.mjs";
 import { documentKind, documentLimits } from "./document-preview.mjs";
-import { isImageFile, isPxzFile, imageMimeType } from "./image-formats.mjs";
+import {
+  isImageFile,
+  isPxzFile,
+  imageMimeType,
+  imageSaveFormat,
+  matchesEncodedImage,
+  IMAGE_EDIT_MAX_BYTES,
+} from "./image-formats.mjs";
 import { PXZ_LIMIT, PxzRangeReader, readPxz } from "./pxz-archive.mjs";
 
 const schema = await readFile(new URL("./schema.sql", import.meta.url), "utf8");
@@ -416,7 +423,44 @@ export class Library {
         expectedObjectKey,
         mimeType: kind === "markdown" ? "text/markdown" : "text/plain",
       });
-      return { file: await this.file(id), warning: result.warning };
+      return { file: result.file, warning: result.warning };
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  }
+  async saveEditedImage(id, expectedObjectKey, data) {
+    if (
+      !(data instanceof Uint8Array) ||
+      !data.length ||
+      data.length > IMAGE_EDIT_MAX_BYTES
+    )
+      throw new Error(t("Для сохранения доступны изображения до 64 МБ."));
+    const file = await this.file(id);
+    if (!isImageFile(file)) throw new Error(t("Выберите изображение."));
+    if (file.trashed_at || file.object_key !== expectedObjectKey)
+      throw new Error(t("Изображение изменилось. Откройте его заново."));
+    const { format, convertsToPng } = imageSaveFormat(file);
+    if (!matchesEncodedImage(data, format))
+      throw new Error(t("Не удалось закодировать изображение для сохранения."));
+    const replacementName = convertsToPng
+      ? await this.#availableFileName(
+          file.folder_id,
+          path.basename(file.name, path.extname(file.name)) + ".png",
+          0,
+        )
+      : undefined;
+    const directory = await mkdtemp(path.join(os.tmpdir(), "jellyree-image-"));
+    try {
+      const source = path.join(directory, "edited." + format);
+      await writeFile(source, data, { flag: "wx", mode: 0o600 });
+      const result = await this.uploadFile(source, file.folder_id, () => {}, {
+        name: file.name,
+        replaceId: id,
+        expectedObjectKey,
+        mimeType: "image/" + format,
+        replacementName,
+      });
+      return { file: result.file, warning: result.warning };
     } finally {
       await rm(directory, { recursive: true, force: true });
     }
@@ -483,7 +527,7 @@ export class Library {
         // A missing or unreadable embedded image can be rendered from the layers.
       }
     }
-    const limit = pxz ? PXZ_LIMIT : 64 * 1024 * 1024;
+    const limit = pxz ? PXZ_LIMIT : IMAGE_EDIT_MAX_BYTES;
     const tooLarge = () =>
       new Error(
         t(
@@ -603,20 +647,11 @@ export class Library {
     if (source.trashed_at || source.object_key !== expectedObjectKey)
       throw changed();
 
-    await this.#ensureIndex("folderName");
-    const extension = path.extname(source.name);
-    let suffix = 0;
-    let name;
-    do {
-      const number = ` (${++suffix})`;
-      const keepExtension = extension.length + number.length < 255;
-      const tail = number + (keepExtension ? extension : "");
-      const stem = keepExtension
-        ? path.basename(source.name, extension)
-        : source.name;
-      name =
-        stem.slice(0, 255 - tail.length).replace(/[\uD800-\uDBFF]$/, "") + tail;
-    } while ((await this.#filesNamed(source.folder_id, name)).length);
+    const name = await this.#availableFileName(
+      source.folder_id,
+      source.name,
+      1,
+    );
     const copyId = randomUUID();
     const key = [this.config.prefix, "objects", copyId]
       .filter(Boolean)
@@ -701,9 +736,14 @@ export class Library {
         t("Файл изменился во время загрузки. Повторите операцию."),
       );
     const id = previous?.id || randomUUID();
+    const newName =
+      previous && options.replacementName
+        ? cleanName(options.replacementName)
+        : name;
+    const rename = previous && newName !== name;
     // Always upload to a new object, including replacement. The previous bytes
     // remain available until D1 has committed and the result has been verified.
-    const key = [this.config.prefix, "objects", randomUUID(), name]
+    const key = [this.config.prefix, "objects", randomUUID(), newName]
       .filter(Boolean)
       .join("/");
     const mimeType =
@@ -728,20 +768,33 @@ export class Library {
     );
     await upload.done();
     const now = new Date().toISOString();
+    let replacement;
     try {
       if (previous) {
-        await this.db.query(
-          "UPDATE jr_files SET object_key = ?, mime_type = ?, size_bytes = ?, adjustments = '{}', updated_at = ? WHERE id = ? AND library_id = ? AND object_key = ? AND trashed_at IS NULL",
-          [key, mimeType, info.size, now, id, this.id, previous.object_key],
+        const [saved] = await this.db.query(
+          `UPDATE jr_files SET object_key = ?, mime_type = ?, size_bytes = ?, adjustments = '{}', updated_at = ?${rename ? ", name = ?" : ""}
+           WHERE id = ? AND library_id = ? AND object_key = ? AND trashed_at IS NULL
+           ${rename ? "AND name = ? AND folder_id IS ? AND NOT EXISTS (SELECT 1 FROM jr_files AS other WHERE other.library_id = ? AND other.folder_id IS ? AND other.name = ? AND other.trashed_at IS NULL)" : ""}
+           RETURNING *`,
+          [
+            key,
+            mimeType,
+            info.size,
+            now,
+            ...(rename ? [newName] : []),
+            id,
+            this.id,
+            previous.object_key,
+            ...(rename
+              ? [name, previous.folder_id, this.id, previous.folder_id, newName]
+              : []),
+          ],
         );
-        const [verified] = await this.db.query(
-          "SELECT id, object_key FROM jr_files WHERE id = ? AND library_id = ?",
-          [id, this.id],
-        );
-        if (verified?.object_key !== key)
+        if (saved?.object_key !== key)
           throw new Error(
             t("Файл изменился во время загрузки. Повторите операцию."),
           );
+        replacement = fileRow(saved);
       } else {
         await this.db.query(
           "INSERT INTO jr_files (id, library_id, folder_id, object_key, name, mime_type, size_bytes, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -762,7 +815,7 @@ export class Library {
       let saved;
       try {
         [saved] = await this.db.query(
-          "SELECT id, object_key FROM jr_files WHERE id = ? AND library_id = ?",
+          "SELECT * FROM jr_files WHERE id = ? AND library_id = ?",
           [id, this.id],
         );
       } catch {
@@ -779,6 +832,7 @@ export class Library {
         );
         throw error;
       }
+      if (previous) replacement = fileRow(saved);
     }
     let warning;
     if (previous) {
@@ -792,11 +846,11 @@ export class Library {
       } catch {
         warning = t(
           "Файл {0} заменён, но предыдущий объект не удалось удалить из R2.",
-          { 0: name },
+          { 0: newName },
         );
       }
     }
-    return { id, name, warning };
+    return { id, name: newName, warning, file: replacement };
   }
   async uploadPaths(paths, folderId, report = () => {}, resolveConflict) {
     if (!Array.isArray(paths) || paths.length > 10000)
@@ -1071,6 +1125,23 @@ export class Library {
       warnings,
       ...(resolvedRetryIds.length ? { resolvedRetryIds } : {}),
     };
+  }
+  async #availableFileName(folderId, filename, suffix) {
+    await this.#ensureIndex("folderName");
+    const extension = path.extname(filename);
+    let name;
+    do {
+      const number = suffix ? ` (${suffix})` : "";
+      const keepExtension = extension.length + number.length < 255;
+      const tail = number + (keepExtension ? extension : "");
+      const stem = keepExtension
+        ? path.basename(filename, extension)
+        : filename;
+      name =
+        stem.slice(0, 255 - tail.length).replace(/[\uD800-\uDBFF]$/, "") + tail;
+      suffix++;
+    } while ((await this.#filesNamed(folderId, name)).length);
+    return name;
   }
   #filesNamed(parent, name) {
     return this.db.query(

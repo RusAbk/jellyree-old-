@@ -26,6 +26,8 @@ contextBridge.exposeInMainWorld("jellyree", {
     invoke("files:document-source", id, expectedObjectKey),
   saveTextDocument: (id, expectedObjectKey, data) =>
     invoke("files:save-text-document", id, expectedObjectKey, data),
+  saveEditedImage: (id, expectedObjectKey, data) =>
+    invoke("files:save-edited-image", id, expectedObjectKey, data),
   setDocumentDraft: (owner, dirty) => invoke("documents:draft", owner, dirty),
   videoSource: (revision) => invoke("files:video-source", revision),
   duplicatePhoto: (id, expectedObjectKey) =>

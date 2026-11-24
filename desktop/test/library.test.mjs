@@ -289,6 +289,78 @@ test("text editor saves a new R2 version in place, preserves metadata and cleans
   for (const source of paths)
     await assert.rejects(stat(source), { code: "ENOENT" });
 });
+test("saving photo edits replaces the bytes and resets adjustments while keeping library metadata", async (t) => {
+  const uploads = [];
+  const { library, insert, deleted } = fixture(t, {
+    createUpload: ({ params }) => ({
+      on() {},
+      async done() {
+        const chunks = [];
+        for await (const chunk of params.Body) chunks.push(chunk);
+        uploads.push({ ...params, bytes: Buffer.concat(chunks) });
+      },
+    }),
+  });
+  await library.initialize();
+  const folder = await library.createFolder("Photos");
+  insert("photo", {
+    name: "Photo.PNG",
+    mime: "image/png",
+    folder: folder.id,
+    tags: ["kept"],
+    favorite: 1,
+  });
+  await library.updateFiles(["photo"], { adjustments: { rotate: 90 } });
+  const bytes = await readFile(new URL("fixtures/editor.png", import.meta.url));
+  const { file } = await library.saveEditedImage(
+    "photo",
+    "objects/photo",
+    bytes,
+  );
+  assert.deepEqual(file.adjustments, {});
+  assert.equal(file.id, "photo");
+  assert.equal(file.name, "Photo.PNG");
+  assert.equal(file.folder_id, folder.id);
+  assert.equal(file.favorite, true);
+  assert.equal(file.created_at, "2026-01-01");
+  assert.deepEqual(file.tags, ["kept"]);
+  assert.equal(file.mime_type, "image/png");
+  assert.equal(file.size_bytes, bytes.length);
+  assert.equal(file.object_key, uploads[0].Key);
+  assert.deepEqual(uploads[0].bytes, bytes);
+  assert.equal(uploads[0].ContentType, "image/png");
+  assert.deepEqual(deleted, ["objects/photo"]);
+  await assert.rejects(
+    library.saveEditedImage("photo", "objects/photo", bytes),
+    /Изображение изменилось/,
+  );
+  await assert.rejects(
+    library.saveEditedImage(
+      "photo",
+      file.object_key,
+      Uint8Array.of(255, 216, 1, 255, 217),
+    ),
+    /закодировать изображение/,
+  );
+  assert.equal(uploads.length, 1);
+
+  insert("heic", {
+    name: "Photo.heic",
+    mime: "image/heic",
+    folder: folder.id,
+    tags: ["heic"],
+  });
+  insert("other", { name: "Photo.png", mime: "image/png", folder: folder.id });
+  const converted = (
+    await library.saveEditedImage("heic", "objects/heic", bytes)
+  ).file;
+  assert.equal(converted.name, "Photo (1).png");
+  assert.equal(converted.id, "heic");
+  assert.equal(converted.mime_type, "image/png");
+  assert.deepEqual(converted.tags, ["heic"]);
+  assert.equal(uploads[1].ContentType, "image/png");
+  assert.equal((await library.file("other")).object_key, "objects/other");
+});
 test("text editor refuses stale, foreign, unsupported or invalid content without uploading", async (t) => {
   let count = 0;
   const { library, insert } = fixture(t, {

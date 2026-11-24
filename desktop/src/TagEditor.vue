@@ -9,6 +9,7 @@ const props = defineProps<{
   commaSeparated?: boolean;
   save: (tags: string[]) => boolean | Promise<boolean | undefined>;
 }>();
+const clipboard = defineModel<string[]>("clipboard", { required: true });
 const input = ref<HTMLInputElement>();
 const draft = ref("");
 const fragments = computed(() =>
@@ -19,6 +20,13 @@ const fragments = computed(() =>
 const query = computed(() => fragments.value.at(-1) || "");
 const selected = computed(() => new Set(props.tags));
 const existing = computed(() => [...new Set(props.known)]);
+const assigned = computed(() => {
+  const collator = new Intl.Collator(localeCode(), {
+    sensitivity: "base",
+    numeric: true,
+  });
+  return [...selected.value].sort(collator.compare);
+});
 const suggestions = computed(() => {
   const locale = localeCode();
   const term = query.value.toLocaleLowerCase(locale);
@@ -34,6 +42,8 @@ const withTags = (additions: string[]) => [
   ...new Set([...props.tags, ...additions.filter(Boolean)]),
 ];
 const pendingTags = () => withTags(fragments.value);
+const pastedTags = computed(() => withTags(clipboard.value));
+const message = ref("");
 const completed = computed(
   () => new Set(withTags(fragments.value.slice(0, -1))),
 );
@@ -45,10 +55,22 @@ onMounted(() => input.value?.focus());
 defineExpose({ pendingTags });
 
 async function apply(tags: string[], clearDraft = false) {
+  message.value = "";
   if (props.busy || !(await props.save(tags))) return;
   if (clearDraft) draft.value = "";
   await nextTick();
   input.value?.focus();
+}
+function copyTags() {
+  clipboard.value = [...selected.value];
+  message.value = t("Теги скопированы.");
+}
+function pasteTags() {
+  if (pastedTags.value.length > maxTags) {
+    message.value = t("Не более 50 тегов.");
+    return;
+  }
+  void apply(pastedTags.value);
 }
 function addDraft(event?: KeyboardEvent) {
   if (event?.isComposing) return;
@@ -68,7 +90,7 @@ function choose(tag: string) {
 <template>
   <div class="tag-editor">
     <div v-if="tags.length" class="tag-editor-list">
-      <span v-for="tag in tags" :key="tag" class="tag-editor-chip">
+      <span v-for="tag in assigned" :key="tag" class="tag-editor-chip">
         {{ tag }}
         <button
           type="button"
@@ -102,6 +124,27 @@ function choose(tag: string) {
         <i class="ri-add-line" aria-hidden="true"></i>
       </button>
     </div>
+    <div class="tag-editor-actions">
+      <button
+        type="button"
+        class="text-button"
+        :disabled="busy || !tags.length"
+        @click="copyTags"
+      >
+        <i class="ri-file-copy-line" aria-hidden="true"></i>
+        {{ t("Скопировать теги") }}
+      </button>
+      <button
+        type="button"
+        class="text-button"
+        :disabled="busy || pastedTags.length === selected.size"
+        @click="pasteTags"
+      >
+        <i class="ri-clipboard-line" aria-hidden="true"></i>
+        {{ t("Вставить теги") }}
+      </button>
+    </div>
+    <p v-if="message" class="tag-editor-muted" role="status">{{ message }}</p>
     <p v-if="full || overLimit" class="tag-editor-muted">
       {{ t("Не более 50 тегов.") }}
     </p>

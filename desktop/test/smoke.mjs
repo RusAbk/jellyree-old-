@@ -1654,6 +1654,14 @@ try {
   const catalogExistingTags = tagDialog.getByRole("group", {
     name: "Существующие теги",
   });
+  const visibleTags = (
+    await catalogExistingTags.getByRole("button").allTextContents()
+  ).map((tag) => tag.trim());
+  const byTagName = new Intl.Collator("ru", {
+    sensitivity: "base",
+    numeric: true,
+  });
+  assert.deepEqual(visibleTags, [...visibleTags].sort(byTagName.compare));
   await catalogTagInput.fill("ПРОЕКТ 1");
   await catalogExistingTags
     .getByRole("button", { name: "проект 12", exact: true })
@@ -1997,6 +2005,36 @@ try {
   await previewTags
     .getByRole("button", { name: "Удалить тег «проект 12»" })
     .waitFor();
+  await previewTags
+    .getByRole("button", { name: "Скопировать теги", exact: true })
+    .click();
+  await photoViewer
+    .getByRole("button", { name: "Следующий файл", exact: true })
+    .click();
+  await panoramaFrame.waitFor();
+  await tagInput.fill("панорама");
+  await tagInput.press("Enter");
+  const pasteTags = previewTags.getByRole("button", {
+    name: "Вставить теги",
+    exact: true,
+  });
+  await pasteTags.click();
+  await previewTags
+    .getByRole("button", { name: "Удалить тег «из просмотра»" })
+    .waitFor();
+  await previewTags
+    .getByRole("button", { name: "Удалить тег «проект 12»" })
+    .waitFor();
+  assert.ok(
+    await previewTags
+      .getByRole("button", { name: "Удалить тег «панорама»" })
+      .isVisible(),
+  );
+  assert.ok(await pasteTags.isDisabled());
+  await photoViewer
+    .getByRole("button", { name: "Предыдущий файл", exact: true })
+    .click();
+  await portraitFrame.waitFor();
   await tagInput.press("Escape");
   await previewTags.waitFor({ state: "hidden" });
   await photoViewer.getByRole("button", { name: "Создать дубликат" }).click();

@@ -198,6 +198,11 @@ export interface Jellyree {
     expectedObjectKey: string,
     data: Uint8Array,
   ): Promise<{ file: DriveFile; warning?: string }>;
+  saveEditedImage(
+    id: string,
+    expectedObjectKey: string,
+    data: Uint8Array,
+  ): Promise<{ file: DriveFile; warning?: string }>;
   setDocumentDraft(owner: string, dirty: boolean): Promise<void>;
   videoSource(revision: ThumbnailRevision): Promise<string>;
   duplicatePhoto(id: string, expectedObjectKey: string): Promise<DriveFile>;

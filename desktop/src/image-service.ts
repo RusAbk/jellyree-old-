@@ -144,7 +144,10 @@ async function pump() {
         };
         job.controller.signal.addEventListener("abort", cancel, { once: true });
         try {
-          entry = await api.imageSource(job.file.id, requestId);
+          entry = await api.imageSource(job.file.id, requestId, {
+            objectKey: job.file.object_key,
+            thumbnail: false,
+          });
         } finally {
           job.controller.signal.removeEventListener("abort", cancel);
         }
