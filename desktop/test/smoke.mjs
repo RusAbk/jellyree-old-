@@ -954,9 +954,9 @@ try {
     }
     const calls = [];
     window.__jellyreeBrowserCalls = calls;
-    window.__jellyreeReplacePreview = () => {
-      files = files.map((file, index) =>
-        index === 0 ? { ...file, object_key: "new-object-key" } : file,
+    window.__jellyreeReplacePreview = (id = "photo") => {
+      files = files.map((file) =>
+        file.id === id ? { ...file, object_key: "new-object-key" } : file,
       );
     };
     window.jellyree = {
@@ -1473,6 +1473,88 @@ try {
     return image?.getAttribute("src") && image.getAttribute("src") !== previous;
   }, previousSrc);
   console.log("PASS: replaced file refreshes its cached thumbnail");
+
+  const portraitCard = page
+    .locator(".file-card")
+    .filter({ hasText: "Портрет.jpg" });
+  const panoramaCard = page
+    .locator(".file-card")
+    .filter({ hasText: "Панорама.jpg" });
+  for (const photo of [portraitCard, panoramaCard]) {
+    await photo.scrollIntoViewIfNeeded();
+    await photo.locator("img").evaluate((image) => image.decode());
+  }
+  await page.evaluate(() => {
+    const gate = new Promise((resolve) => {
+      window.__jellyreeFinishPrefetch = resolve;
+    });
+    const url = window.jellyree.url;
+    window.__jellyreePhotoLoads = { portrait: 0, panorama: 0 };
+    window.jellyree.url = async (id) => {
+      if (id === "portrait" || id === "panorama")
+        window.__jellyreePhotoLoads[id]++;
+      if (id === "panorama") await gate;
+      return url(id);
+    };
+  });
+  const fullPhoto = (name) => page.locator(`.photo-frame img[alt="${name}"]`);
+  const portraitFrame = fullPhoto("Портрет.jpg");
+  const panoramaFrame = fullPhoto("Панорама.jpg");
+  const closePhoto = () =>
+    page.getByRole("button", { name: "Закрыть просмотр", exact: true }).click();
+  await portraitCard.dblclick();
+  await portraitFrame.waitFor();
+  await portraitFrame.evaluate((image) => {
+    window.__jellyreePortrait = image;
+  });
+  // The next photo has already started loading before navigation.
+  await page.waitForFunction(() => window.__jellyreePhotoLoads.panorama === 1);
+  await page.keyboard.press("ArrowRight");
+  await page.locator(".photo-loading").waitFor();
+  assert.equal(await portraitFrame.isVisible(), true);
+  assert.equal(await panoramaFrame.count(), 0);
+  await page.evaluate(() => window.__jellyreeFinishPrefetch());
+  await panoramaFrame.waitFor();
+  await page.keyboard.press("ArrowLeft");
+  await portraitFrame.waitFor();
+  assert.ok(
+    await portraitFrame.evaluate(
+      (image) => image === window.__jellyreePortrait,
+    ),
+  );
+  assert.equal(await page.locator(".preview-stage .loading-state").count(), 0);
+  await closePhoto();
+  await portraitCard.dblclick();
+  await portraitFrame.waitFor();
+  assert.ok(
+    await portraitFrame.evaluate(
+      (image) => image === window.__jellyreePortrait,
+    ),
+  );
+  assert.deepEqual(await page.evaluate(() => window.__jellyreePhotoLoads), {
+    portrait: 1,
+    panorama: 1,
+  });
+  await closePhoto();
+  await page.evaluate(() => window.__jellyreeReplacePreview("portrait"));
+  await page
+    .locator(".topbar")
+    .getByRole("button", { name: "Обновить", exact: true })
+    .click();
+  await page.waitForFunction(() =>
+    document
+      .querySelector('.file-card img[alt="Портрет.jpg"]')
+      ?.src.includes("new-object-key"),
+  );
+  await portraitCard.dblclick();
+  await portraitFrame.waitFor();
+  assert.ok(
+    (await portraitFrame.getAttribute("src")).includes("new-object-key"),
+  );
+  await closePhoto();
+  console.log(
+    "PASS: photo prefetch, seamless navigation, decoded preview reuse, and replacement",
+  );
 
   // Folder destinations support external uploads, internal folders and cycle rejection.
   const trip = page.locator(".folder-card").filter({ hasText: "Поездки" });

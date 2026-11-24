@@ -7,9 +7,8 @@ import DocumentViewer from "./DocumentViewer.vue";
 import { documentKind } from "../electron/document-preview.mjs";
 import { thumbnailRevision } from "./thumbnail";
 import PhotoEditor from "./PhotoEditor.vue";
-import ProcessedImage from "./ProcessedImage.vue";
-import { needsImageProcessing } from "../electron/image-adjustments.mjs";
-import { isImageFile, isHeicFile } from "../electron/image-formats.mjs";
+import { isImageFile } from "../electron/image-formats.mjs";
+import { isPhotoPreview, usePhotoPreview } from "./use-photo-preview";
 import SettingsPanel from "./SettingsPanel.vue";
 import ContextMenu, { type MenuItem } from "./ContextMenu.vue";
 import UploadConflictDialog from "./UploadConflictDialog.vue";
@@ -17,7 +16,7 @@ import UploadPanel from "./UploadPanel.vue";
 import { useUploadJobs, uploadPercent } from "./use-upload-jobs";
 import LanguageSelect from "./LanguageSelect.vue";
 import { syncLanguage } from "./i18n";
-import { bytes, date, icon, imageStyle } from "./format";
+import { bytes, date, icon } from "./format";
 import { api } from "./api";
 import {
   INTERNAL_DRAG_TYPE,
@@ -107,6 +106,17 @@ const preview = ref<DriveFile | null>(null),
   previewError = ref(""),
   previewLoading = ref(false),
   editing = ref(false);
+const photo = computed(() =>
+  preview.value && isPhotoPreview(preview.value) ? preview.value : null,
+);
+const {
+  stage: photoStage,
+  displayed: photoFrame,
+  loading: photoLoading,
+  error: photoError,
+  retry: retryPhoto,
+  clear: clearPhotos,
+} = usePhotoPreview(photo, files, editing, releasePreviewMedia);
 const expanded = ref(new Set<string>());
 const modal = ref<{
   kind: string;
@@ -811,11 +821,7 @@ async function openPreview(file: DriveFile) {
   previewLoading.value = true;
   editing.value = false;
   try {
-    if (isHeicFile(file)) {
-      previewUrl.value = "processed";
-      return;
-    }
-    if (documentKind(file)) return;
+    if (isPhotoPreview(file) || documentKind(file)) return;
     if (
       file.mime_type.startsWith("video/") &&
       typeof window.jellyree.videoSource !== "function"
@@ -910,6 +916,7 @@ async function share(id: string) {
 async function saved(value: Settings) {
   ++generation;
   closePreview();
+  clearPhotos();
   settings.value = value;
   settingsOpen.value = false;
   files.value = [];
@@ -929,6 +936,7 @@ async function saved(value: Settings) {
 function disconnected() {
   ++generation;
   closePreview();
+  clearPhotos();
   settings.value = { configured: false, persisted: false };
   settingsOpen.value = false;
   files.value = [];
@@ -2131,19 +2139,40 @@ onBeforeUnmount(() => {
         <i aria-hidden="true" class="ri-arrow-left-s-line"></i>
       </button>
       <div class="preview-stage">
-        <div v-if="previewLoading" class="loading-state">
+        <div
+          v-if="previewLoading || (photoLoading && !photoFrame)"
+          class="loading-state"
+        >
           <i aria-hidden="true" class="ri-loader-4-line spinning"></i
           >{{ t("Получение файла…") }}
         </div>
-        <div v-else-if="previewError" class="preview-fallback">
+        <div v-else-if="previewError || photoError" class="preview-fallback">
           <i aria-hidden="true" class="ri-error-warning-line"></i>
-          <p>{{ previewError }}</p>
-          <button class="button" @click="openPreview(preview)">
+          <p>{{ previewError || photoError }}</p>
+          <button
+            class="button"
+            @click="photo ? retryPhoto() : openPreview(preview)"
+          >
             {{ t("Повторить") }}
           </button>
         </div>
+        <template v-else-if="photo">
+          <div
+            ref="photoStage"
+            class="photo-frame"
+            :aria-hidden="photoLoading || undefined"
+          ></div>
+          <div
+            v-if="photoLoading"
+            class="loading-state photo-loading"
+            role="status"
+          >
+            <i aria-hidden="true" class="ri-loader-4-line spinning"></i
+            >{{ t("Получение файла…") }}
+          </div>
+        </template>
         <DocumentViewer
-          v-else-if="!isHeicFile(preview) && documentKind(preview)"
+          v-else-if="documentKind(preview)"
           ref="documentViewer"
           :key="`${preview.id}:${documentVersion}`"
           :file="preview"
@@ -2151,27 +2180,9 @@ onBeforeUnmount(() => {
           @close="closePreview"
           @saved="documentSaved"
         />
-        <template v-else-if="previewUrl"
-          ><ProcessedImage
-            v-if="
-              isImageFile(preview) &&
-              (isHeicFile(preview) || needsImageProcessing(preview.adjustments))
-            "
-            :file="preview"
-            @error="previewError = $event.message"
-          />
-          <img
-            v-else-if="isImageFile(preview)"
-            :src="previewUrl"
-            :alt="preview.name"
-            :style="imageStyle(preview.adjustments)"
-            @error="
-              previewError = t(
-                'Формат не поддерживается встроенным просмотром. Скачайте оригинал.',
-              )
-            "
-          /><VideoPlayer
-            v-else-if="preview.mime_type.startsWith('video/')"
+        <template v-else-if="previewUrl">
+          <VideoPlayer
+            v-if="preview.mime_type.startsWith('video/')"
             :key="`${preview.id}:${preview.object_key}`"
             :file="preview"
             :src="previewUrl"

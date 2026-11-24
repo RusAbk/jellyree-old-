@@ -274,6 +274,10 @@ try {
     assert.ok(red[0] > 180 && red[1] < 100 && red[2] < 100);
     assert.ok(green[1] > 140 && green[0] < 110);
     assert.ok(blue[2] > 140 && blue[0] < 110);
+    if (id === "normal")
+      await canvas.evaluate((node) => {
+        window.__heicFirstFrame = node;
+      });
     await close();
   }
   await open("Rotated.heic");
@@ -302,9 +306,21 @@ try {
       document.querySelector('.preview-stage canvas[data-image-id="normal"]')
         ?.width === 960,
   );
+  assert.ok(
+    await page
+      .locator('.preview-stage canvas[data-image-id="normal"]')
+      .evaluate((node) => node === window.__heicFirstFrame),
+    "reopening HEIC reuses the rendered frame",
+  );
   await close();
   // The same HEIC decoder also supplies the existing editor and PNG export.
   await open("IMG.HEIC");
+  const viewerCanvas = page.locator(
+    '.preview-stage canvas[data-image-id="generic"]',
+  );
+  await viewerCanvas.evaluate((node) => {
+    window.__heicBeforeAdjustment = node;
+  });
   await page.getByRole("button", { name: "Adjustments", exact: true }).click();
   const editor = page.getByRole("dialog", {
     name: "Image editor",
@@ -350,6 +366,12 @@ try {
     .getByRole("button", { name: "Save adjustments", exact: true })
     .click();
   await editor.waitFor({ state: "hidden" });
+  await page.waitForFunction(() => {
+    const canvas = document.querySelector(
+      '.preview-stage canvas[data-image-id="generic"]',
+    );
+    return canvas && canvas !== window.__heicBeforeAdjustment;
+  });
   await close();
   for (let i = 0; i < 100; i++) {
     if ((await app.evaluate(() => globalThis.__heicFixture.stats())).count >= 7)
