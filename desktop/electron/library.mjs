@@ -16,6 +16,7 @@ import {
   S3Client,
   HeadBucketCommand,
   GetObjectCommand,
+  CopyObjectCommand,
   DeleteObjectCommand,
   ListObjectsV2Command,
 } from "@aws-sdk/client-s3";
@@ -591,6 +592,93 @@ export class Library {
       return this.file(result.id);
     } finally {
       await rm(directory, { recursive: true, force: true });
+    }
+  }
+  async duplicatePhoto(id, expectedObjectKey) {
+    const source = await this.file(id);
+    if (!isImageFile(source) && !isPxzFile(source))
+      throw new Error(t("Выберите изображение."));
+    const changed = () =>
+      new Error(t("Изображение изменилось. Откройте его заново."));
+    if (source.trashed_at || source.object_key !== expectedObjectKey)
+      throw changed();
+
+    await this.#ensureIndex("folderName");
+    const extension = path.extname(source.name);
+    let suffix = 0;
+    let name;
+    do {
+      const number = ` (${++suffix})`;
+      const keepExtension = extension.length + number.length < 255;
+      const tail = number + (keepExtension ? extension : "");
+      const stem = keepExtension
+        ? path.basename(source.name, extension)
+        : source.name;
+      name =
+        stem.slice(0, 255 - tail.length).replace(/[\uD800-\uDBFF]$/, "") + tail;
+    } while ((await this.#filesNamed(source.folder_id, name)).length);
+    const copyId = randomUUID();
+    const key = [this.config.prefix, "objects", copyId]
+      .filter(Boolean)
+      .join("/");
+    const bucket = this.config.bucket;
+    const discardCopy = () =>
+      this.s3.send(new DeleteObjectCommand({ Bucket: bucket, Key: key }));
+    try {
+      await this.s3.send(
+        new CopyObjectCommand({
+          Bucket: bucket,
+          Key: key,
+          CopySource: [bucket, ...source.object_key.split("/")]
+            .map(encodeURIComponent)
+            .join("/"),
+        }),
+      );
+    } catch (error) {
+      await discardCopy().catch(() => {});
+      throw error;
+    }
+
+    const now = new Date().toISOString();
+    try {
+      const [copy] = await this.db.query(
+        `INSERT INTO jr_files
+          (id, library_id, folder_id, object_key, name, mime_type, size_bytes, favorite, tags, adjustments, created_at, updated_at)
+         SELECT ?, library_id, folder_id, ?, ?, mime_type, size_bytes, favorite, tags, adjustments, ?, ?
+         FROM jr_files WHERE id = ? AND library_id = ? AND object_key = ? AND folder_id IS ? AND trashed_at IS NULL
+         RETURNING *`,
+        [
+          copyId,
+          key,
+          name,
+          now,
+          now,
+          id,
+          this.id,
+          expectedObjectKey,
+          source.folder_id,
+        ],
+      );
+      if (!copy) throw changed();
+      return fileRow(copy);
+    } catch (error) {
+      let saved;
+      try {
+        [saved] = await this.db.query(
+          "SELECT * FROM jr_files WHERE id = ? AND library_id = ?",
+          [copyId, this.id],
+        );
+      } catch {
+        throw new Error(
+          t(
+            "Не удалось подтвердить запись D1 для {0}. Объект сохранён в R2; проверьте подключение. Ключ: {1}",
+            { 0: name, 1: key },
+          ),
+        );
+      }
+      if (saved?.object_key === key) return fileRow(saved);
+      await discardCopy();
+      throw error;
     }
   }
   async uploadFile(source, folderId, report = () => {}, options = {}) {

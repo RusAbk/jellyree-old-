@@ -5,6 +5,8 @@ export function createApi(bridge: Jellyree): Jellyree {
   return {
     thumbnails: {
       get: (revision) => bridge.thumbnails.get(toIpcData(revision)),
+      dimensions: (revisions) =>
+        bridge.thumbnails.dimensions(toIpcData(revisions)),
       put: (revision, entry, epoch) =>
         bridge.thumbnails.put(
           toIpcData(revision),
@@ -26,7 +28,8 @@ export function createApi(bridge: Jellyree): Jellyree {
       get: () => bridge.settings.get(),
       test: (input) => bridge.settings.test(toIpcData(input)),
       save: (input) => bridge.settings.save(toIpcData(input)),
-      clear: () => bridge.settings.clear(),
+      select: (id) => bridge.settings.select(id),
+      clear: (id) => bridge.settings.clear(id),
     },
     list: (input) => bridge.list(toIpcData(input)),
     timelineBounds: () => bridge.timelineBounds(),
@@ -42,6 +45,7 @@ export function createApi(bridge: Jellyree): Jellyree {
       bridge.saveTextDocument(id, expectedObjectKey, data),
     setDocumentDraft: (owner, dirty) => bridge.setDocumentDraft(owner, dirty),
     videoSource: (revision) => bridge.videoSource(toIpcData(revision)),
+    duplicatePhoto: (id, key) => bridge.duplicatePhoto(id, key),
     saveVideoFrame: (id, key, timestamp, data) =>
       bridge.saveVideoFrame(id, key, timestamp, data),
     downloadVideoFrame: (id, key, timestamp, data) =>

@@ -58,6 +58,10 @@ test("thumbnail bytes and natural dimensions survive a fresh cache instance", as
   assert.equal(miss.entry, null);
   assert.equal(await cache.put(key, entry, miss.epoch), true);
   const fresh = new ThumbnailCache(directory);
+  assert.deepEqual(
+    await fresh.dimensions([key, thumbnailKey("other", revision)]),
+    [{ width: entry.width, height: entry.height }, null],
+  );
   assert.deepEqual((await fresh.get(key)).entry, entry);
   assert.equal((await fresh.stats()).count, 1);
   assert.ok((await fresh.stats()).bytes > entry.data.length);

@@ -85,6 +85,207 @@ try {
   });
   assert.deepEqual(errors, []);
 
+  // Leave the production profile store and IPC intact, and fake Cloudflare.
+  await electron.evaluate(async ({ app }) => {
+    const path = process.getBuiltinModule("node:path");
+    const { pathToFileURL } = process.getBuiltinModule("node:url");
+    const vm = process.getBuiltinModule("node:vm");
+    const load = vm.runInThisContext("(url) => import(url)", {
+      importModuleDynamically: vm.constants.USE_MAIN_CONTEXT_DEFAULT_LOADER,
+    });
+    const { Library } = await load(
+      pathToFileURL(path.join(app.getAppPath(), "electron/library.mjs")).href,
+    );
+    const fixture = { holdNextList: false, release: null, original: {} };
+    globalThis.__jellyreeProfilesFixture = fixture;
+    const cloud = {
+      async check() {
+        return { ok: true };
+      },
+      async initialize() {},
+      async list() {
+        if (fixture.holdNextList) {
+          fixture.holdNextList = false;
+          await new Promise((resolve) => {
+            fixture.release = resolve;
+          });
+          fixture.release = null;
+        }
+        const name = this.config.databaseId.startsWith("b")
+          ? "profile-first.txt"
+          : "profile-second.txt";
+        return {
+          page: 1,
+          hasMore: false,
+          items: [
+            {
+              id: "same-file-id",
+              object_key: "same-object-key",
+              name,
+              folder_id: null,
+              mime_type: "text/plain",
+              size_bytes: 50,
+              favorite: false,
+              trashed_at: null,
+              tags: [],
+              adjustments: {},
+              created_at: "2026-11-25",
+              updated_at: "2026-11-25",
+            },
+          ],
+        };
+      },
+      async cachedFolders() {
+        return [];
+      },
+      async cachedStats() {
+        return { files: 1, bytes: 50, trashed: 0, tags: [] };
+      },
+    };
+    for (const [name, method] of Object.entries(cloud)) {
+      fixture.original[name] = Library.prototype[name];
+      Library.prototype[name] = method;
+    }
+    fixture.restore = () => Object.assign(Library.prototype, fixture.original);
+  });
+  const profileDialog = window.getByRole("dialog", {
+    name: "Подключение Cloudflare",
+    exact: true,
+  });
+  const openProfileSettings = () => window.locator(".avatar").click();
+  const fillProfile = async (name, databaseId) => {
+    await profileDialog
+      .getByLabel("Название подключения", { exact: true })
+      .fill(name);
+    await profileDialog
+      .getByLabel("ID аккаунта Cloudflare", { exact: true })
+      .fill("a".repeat(32));
+    await profileDialog
+      .getByLabel("ID базы данных", { exact: true })
+      .fill(databaseId);
+    await profileDialog
+      .getByLabel("Имя bucket", { exact: true })
+      .fill("shared-vault");
+    await profileDialog
+      .getByLabel(/API-токен Cloudflare/)
+      .fill("fake-d1-token-for-" + name);
+    await profileDialog
+      .getByLabel("ID ключа доступа R2", { exact: true })
+      .fill("fake-r2-key-for-" + name);
+    await profileDialog
+      .getByLabel(/Секретный ключ R2/)
+      .fill("fake-r2-secret-for-" + name);
+    await profileDialog
+      .getByRole("button", { name: "Сохранить и открыть", exact: true })
+      .click();
+    await profileDialog.waitFor({ state: "hidden" });
+  };
+  await openProfileSettings();
+  await fillProfile("Первый", "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb");
+  await window.getByText("profile-first.txt", { exact: true }).waitFor();
+  await openProfileSettings();
+  await profileDialog
+    .getByRole("button", { name: "Новое подключение", exact: true })
+    .click();
+  assert.equal(
+    await profileDialog
+      .getByLabel("ID базы данных", { exact: true })
+      .inputValue(),
+    "",
+  );
+  assert.equal(
+    await profileDialog
+      .getByLabel(/API-токен Cloudflare/)
+      .getAttribute("required"),
+    "",
+  );
+  await fillProfile("Второй", "cccccccc-cccc-cccc-cccc-cccccccccccc");
+  await window.getByText("profile-second.txt", { exact: true }).waitFor();
+  const switcher = window.getByRole("combobox", {
+    name: "Активное подключение",
+    exact: true,
+  });
+  const profileState = await window.evaluate(() =>
+    window.jellyree.settings.get(),
+  );
+  assert.equal(profileState.profiles.length, 2);
+  assert.ok(!JSON.stringify(profileState).includes("fake-d1-token"));
+  assert.ok(!JSON.stringify(profileState).includes("fake-r2-secret"));
+  const oldRevision = {
+    id: "same-file-id",
+    objectKey: "same-object-key",
+    mimeType: "image/jpeg",
+    sizeBytes: 50,
+    adjustments: {},
+  };
+  const { epoch } = await window.evaluate(
+    (revision) => window.jellyree.thumbnails.get(revision),
+    oldRevision,
+  );
+  await electron.evaluate(() => {
+    globalThis.__jellyreeProfilesFixture.holdNextList = true;
+  });
+  await window.getByRole("button", { name: "Обновить", exact: true }).click();
+  await switcher.selectOption({ label: "Первый" });
+  await window.waitForFunction(
+    () => document.querySelector(".app-shell").inert,
+  );
+  await electron.evaluate(() => globalThis.__jellyreeProfilesFixture.release());
+  await window.getByText("profile-first.txt", { exact: true }).waitFor();
+  assert.equal(
+    await window.getByText("profile-second.txt", { exact: true }).count(),
+    0,
+  );
+  assert.equal(
+    await window.evaluate(
+      ({ revision, epoch }) =>
+        window.jellyree.thumbnails.put(
+          revision,
+          { width: 2, height: 2, duration: 0, data: new Uint8Array(16) },
+          epoch,
+        ),
+      { revision: oldRevision, epoch },
+    ),
+    false,
+  );
+  const secondId = profileState.activeProfileId;
+  await openProfileSettings();
+  await profileDialog
+    .getByRole("combobox", { name: "Подключения", exact: true })
+    .selectOption(secondId);
+  await profileDialog
+    .getByRole("button", { name: "Открыть подключение", exact: true })
+    .click();
+  await window.getByText("profile-second.txt", { exact: true }).waitFor();
+  const forgetProfile = async () => {
+    await openProfileSettings();
+    await profileDialog
+      .getByRole("button", {
+        name: "Забыть подключение на этом устройстве",
+        exact: true,
+      })
+      .click();
+    await profileDialog
+      .getByRole("button", { name: "Отключить", exact: true })
+      .click();
+    await profileDialog.waitFor({ state: "hidden" });
+  };
+  await forgetProfile();
+  await window.getByText("profile-first.txt", { exact: true }).waitFor();
+  assert.equal(
+    (await window.evaluate(() => window.jellyree.settings.get())).profiles
+      .length,
+    1,
+  );
+  await forgetProfile();
+  await window
+    .getByRole("heading", { name: "Ваши файлы. Ваше облако." })
+    .waitFor();
+  await electron.evaluate(() => globalThis.__jellyreeProfilesFixture.restore());
+  console.log(
+    "PASS: real IPC creates and switches named profiles, waits for old readers, isolates thumbnail writes and removes one profile at a time",
+  );
+
   // Keep the real Vue renderer, preload and IPC. Replace only the cloud-facing
   // main-process handlers so destructive workflows cannot touch real storage.
   await electron.evaluate(({ ipcMain }) => {
@@ -1096,6 +1297,24 @@ try {
             : f,
         );
       },
+      duplicatePhoto: async (id, objectKey) => {
+        const index = files.findIndex(
+          (file) => file.id === id && file.object_key === objectKey,
+        );
+        if (index < 0) throw new Error("Invalid source revision");
+        const file = files[index];
+        const copy = {
+          ...file,
+          id: id + "-copy",
+          object_key: objectKey + "-copy",
+          name: file.name.replace(".jpg", " (1).jpg"),
+        };
+        files.splice(index + 1, 0, copy);
+        return copy;
+      },
+      remove: async (ids) => {
+        files = files.filter((file) => !ids.includes(file.id));
+      },
       createFolder: async (name, parent_id) => {
         const folder = { id: String(folders.length), name, parent_id };
         folders.push(folder);
@@ -1345,7 +1564,7 @@ try {
       const frame = image.parentElement.getBoundingClientRect(),
         bounds = image.getBoundingClientRect();
       return {
-        ratio: frame.width / frame.height,
+        ratio: bounds.width / bounds.height,
         contained:
           bounds.left >= frame.left - 1 &&
           bounds.right <= frame.right + 1 &&
@@ -1685,9 +1904,90 @@ try {
   assert.ok(
     (await portraitFrame.getAttribute("src")).includes("new-object-key"),
   );
+  const viewport = page.locator(".photo-viewport");
+  const zoom = page.locator(".photo-zoom-reset");
+  await viewport.hover();
+  await page.mouse.wheel(0, -480);
+  await page.waitForFunction(() =>
+    document.querySelector(".photo-viewport.photo-zoomed"),
+  );
+  await page
+    .getByRole("button", { name: "Увеличить фото", exact: true })
+    .click();
+  const bounds = await viewport.boundingBox();
+  const center = {
+    x: bounds.x + bounds.width / 2,
+    y: bounds.y + bounds.height / 2,
+  };
+  const frame = page.locator(".photo-frame");
+  const beforePan = await frame.evaluate((element) => element.style.transform);
+  await page.mouse.move(center.x, center.y);
+  await page.mouse.down();
+  await page.mouse.move(center.x, center.y + 75);
+  await page.mouse.up();
+  assert.notEqual(
+    await frame.evaluate((element) => element.style.transform),
+    beforePan,
+  );
+  await page.keyboard.press("ArrowRight");
+  await panoramaFrame.waitFor();
+  assert.equal(await zoom.innerText(), "100%");
+  await page.keyboard.press("ArrowLeft");
+  await portraitFrame.waitFor();
+  const photoViewer = page.locator(".preview-overlay");
+  assert.ok(
+    (await photoViewer.locator(".preview-header").boundingBox()).height <= 52,
+  );
+  await photoViewer.getByRole("button", { name: "Теги", exact: true }).click();
+  const previewTags = photoViewer.locator(".preview-tags");
+  const tagInput = previewTags.getByRole("textbox", { name: "Добавить тег" });
+  await tagInput.fill("из просмотра");
+  await tagInput.press("Enter");
+  await previewTags
+    .getByRole("button", { name: "Удалить тег «из просмотра»" })
+    .waitFor();
+  await previewTags
+    .getByRole("button", { name: "отпуск", exact: true })
+    .click();
+  await previewTags
+    .getByRole("button", { name: "Удалить тег «отпуск»" })
+    .click();
+  await previewTags
+    .getByRole("button", { name: "отпуск", exact: true })
+    .waitFor();
+  await tagInput.press("Escape");
+  await previewTags.waitFor({ state: "hidden" });
+  await photoViewer.getByRole("button", { name: "Создать дубликат" }).click();
+  await fullPhoto("Портрет (1).jpg").waitFor();
+  await photoViewer.getByRole("button", { name: "Теги", exact: true }).click();
+  await previewTags
+    .getByRole("button", { name: "Удалить тег «из просмотра»" })
+    .waitFor();
+  await tagInput.press("Escape");
+  await photoViewer
+    .getByRole("button", { name: "В корзину", exact: true })
+    .click();
+  await portraitFrame.waitFor();
   await closePhoto();
+  await page.getByRole("button", { name: "Корзина", exact: true }).click();
+  await page
+    .locator(".file-card")
+    .filter({ hasText: "Портрет (1).jpg" })
+    .dblclick();
+  await photoViewer
+    .getByRole("button", { name: "Удалить навсегда", exact: true })
+    .click();
+  await page
+    .locator(".action-dialog")
+    .getByRole("button", { name: "Удалить", exact: true })
+    .click();
+  await photoViewer.waitFor({ state: "hidden" });
+  await page
+    .locator(".main-nav")
+    .getByRole("button", { name: "Мой диск", exact: true })
+    .click();
   console.log(
-    "PASS: photo prefetch, seamless navigation, decoded preview reuse, and replacement",
+    "PASS: photo prefetch, decoded preview reuse, zoom and pan, tags, duplication, and deletion inside the viewer",
   );
 
   // Folder destinations support external uploads, internal folders and cycle rejection.
@@ -1820,6 +2120,8 @@ try {
       ),
     );
   const beforeScroll = await fixedPositions();
+  assert.ok((await page.locator(".topbar").boundingBox()).height <= 56);
+  assert.ok((await page.locator(".file-controls").boundingBox()).height <= 81);
   const filesPane = page.locator(".files-scroll");
   const pane = await filesPane.boundingBox();
   const firstRow = await fileCards.first().boundingBox();
@@ -1969,10 +2271,20 @@ try {
     }));
     const queries = [];
     window.__timelineFixture = queries;
-    window.jellyree.timelineBounds = async () => ({
-      oldest: "2015-03-07T12:00:00.000Z",
-      newest: "2026-11-25T12:00:00.000Z",
+    const bounds = new Promise((resolve) => {
+      window.__finishTimelineBounds = resolve;
     });
+    let attempts = 0;
+    window.jellyree.timelineBounds = async () => {
+      if (attempts++ === 0) {
+        await bounds;
+        throw new Error("Timeline bounds unavailable");
+      }
+      return {
+        oldest: "2015-03-07T12:00:00.000Z",
+        newest: "2026-11-25T12:00:00.000Z",
+      };
+    };
     window.jellyree.list = async (input) => {
       if (input.section !== "timeline") return list(input);
       queries.push(input);
@@ -2001,6 +2313,20 @@ try {
   await rail.waitFor();
   const media = page.locator(".media-feed");
   await media.locator('[data-file-id="timeline-recent-00"]').waitFor();
+  const railBox = await rail.boundingBox();
+  const mediaBox = await page.locator(".timeline-scroll").boundingBox();
+  assert.ok(
+    railBox.height > 200 && railBox.x >= mediaBox.x + mediaBox.width - 1,
+  );
+  assert.equal(
+    await rail.getByRole("button", { name: "Перейти к 2015" }).count(),
+    0,
+  );
+  await page.evaluate(() => window.__finishTimelineBounds());
+  await rail.getByRole("button", { name: "Повторить", exact: true }).click();
+  await rail
+    .getByRole("button", { name: "Перейти к 2015", exact: true })
+    .waitFor();
   const yearCount = await rail.locator(".year-mark").count();
   for (let count = 0; count < 3; count++)
     await rail.getByRole("button", { name: "Увеличить масштаб шкалы" }).click();
@@ -2085,6 +2411,144 @@ try {
   await media.locator('[data-file-id="timeline-oldest"]').waitFor();
   console.log(
     "PASS: media timeline groups days across pages, seeks historical dates, zooms and loads in both directions",
+  );
+
+  await page.evaluate(() => {
+    const list = window.jellyree.list;
+    const url = window.jellyree.url;
+    const state = { pages: [] };
+    window.__stableGalleryFixture = state;
+    const preview = new Promise((resolve) => {
+      state.finishPreview = resolve;
+    });
+    const next = new Promise((resolve) => {
+      state.finishPage = resolve;
+    });
+    window.jellyree.thumbnails = {
+      ...window.jellyree.thumbnails,
+      dimensions: async (items) =>
+        items.map(({ id }) => {
+          if (id === "stable-gallery-01") return { width: 480, height: 960 };
+          if (id === "stable-gallery-02") return { width: 1200, height: 480 };
+          return null;
+        }),
+    };
+    window.jellyree.url = async (id) => {
+      if (!id.startsWith("stable-gallery-")) return url(id);
+      if (id === "stable-gallery-00") await preview;
+      const [width, height] =
+        id === "stable-gallery-00"
+          ? [280, 1100]
+          : id === "stable-gallery-01"
+            ? [480, 960]
+            : id === "stable-gallery-02"
+              ? [1200, 480]
+              : [600, 440];
+      return (
+        "data:image/svg+xml," +
+        encodeURIComponent(
+          `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}"><rect width="100%" height="100%" fill="#87a1bc"/></svg>`,
+        )
+      );
+    };
+    window.jellyree.list = async (input) => {
+      if (input.search !== "stable-gallery") return list(input);
+      state.pages.push(input.page);
+      if (input.page === 2) await next;
+      const items = Array.from(
+        { length: input.page === 1 ? 22 : 10 },
+        (_, i) => {
+          const id =
+            "stable-gallery-" +
+            String(i + (input.page - 1) * 22).padStart(2, "0");
+          return {
+            id,
+            name: id + ".jpg",
+            object_key: id,
+            folder_id: null,
+            mime_type: "image/jpeg",
+            size_bytes: 1234,
+            favorite: false,
+            tags: [],
+            adjustments: {},
+            updated_at: "2026-11-20",
+            created_at: "2026-11-20",
+          };
+        },
+      );
+      return { items, page: input.page, hasMore: input.page === 1 };
+    };
+  });
+  await page
+    .locator(".main-nav")
+    .getByRole("button", { name: "Мой диск", exact: true })
+    .click();
+  await page.getByRole("button", { name: "Галерея", exact: true }).click();
+  const gallery = page.locator(".files.gallery");
+  await page
+    .getByRole("textbox", { name: "Поиск файлов и тегов" })
+    .fill("stable-gallery");
+  const tile = (id) => gallery.locator(`[data-file-id="stable-gallery-${id}"]`);
+  await tile("00").waitFor();
+  const positions = (limit = 22) =>
+    gallery.evaluate((root, limit) => {
+      const anchor = root.getBoundingClientRect();
+      return [...root.querySelectorAll(".file-card")]
+        .slice(0, limit)
+        .map((card) => {
+          const bounds = card.getBoundingClientRect();
+          return {
+            id: card.dataset.fileId,
+            left: bounds.left - anchor.left,
+            top: bounds.top - anchor.top,
+            width: bounds.width,
+            height: bounds.height,
+          };
+        });
+    }, limit);
+  const frozen = await positions();
+  assert.equal(frozen.length, 22);
+  assert.equal(frozen[0].top, frozen[1].top);
+  assert.ok(frozen[0].left < frozen[1].left && frozen[1].left < frozen[2].left);
+  assert.ok(frozen[1].width < frozen[2].width);
+  const stablePoint = await tile("00").locator(".file-thumb").boundingBox();
+  await page.evaluate(() => window.__stableGalleryFixture.finishPreview());
+  await tile("00").locator(".natural-loaded img").waitFor();
+  assert.deepEqual(
+    await positions(),
+    frozen,
+    "a delayed portrait must not resize or shift the cards",
+  );
+  await page.mouse.click(
+    stablePoint.x + stablePoint.width / 2,
+    stablePoint.y + stablePoint.height / 2,
+  );
+  assert.ok(
+    await tile("00").evaluate((card) => card.classList.contains("selected")),
+  );
+  // Put the sentinel close enough for automatic loading and keep that scroll position.
+  await page.locator(".load-more").scrollIntoViewIfNeeded();
+  await page.waitForFunction(() =>
+    window.__stableGalleryFixture.pages.includes(2),
+  );
+  const scrollBefore = await page
+    .locator(".files-scroll")
+    .evaluate((root) => root.scrollTop);
+  await page.evaluate(() => window.__stableGalleryFixture.finishPage());
+  await tile("31").waitFor();
+  assert.deepEqual(
+    await positions(),
+    frozen,
+    "appended pages must not rebalance earlier rows",
+  );
+  assert.ok(
+    Math.abs(
+      (await page.locator(".files-scroll").evaluate((root) => root.scrollTop)) -
+        scrollBefore,
+    ) < 2,
+  );
+  console.log(
+    "PASS: justified gallery order, fixed geometry after cold thumbnails and append, stable clicks and scroll",
   );
   assert.deepEqual(rendererErrors, []);
   console.log(

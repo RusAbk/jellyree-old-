@@ -887,6 +887,80 @@ test("image edits round-trip all controls and reject saves against a replaced or
   assert.equal(file.object_key, "replacement");
 });
 
+test("photo duplication copies the object, tags and edits to an independent file in the same folder", async (t) => {
+  const { library, insert, deleted } = fixture(t);
+  await library.initialize();
+  const folder = await library.createFolder("Photos");
+  insert("sea # день", {
+    folder: folder.id,
+    name: "Море.jpg",
+    tags: ["отпуск"],
+    favorite: 1,
+  });
+  insert("existing", { folder: folder.id, name: "Море (1).jpg" });
+  const original = await library.file("sea # день");
+  await library.updateFiles([original.id], {
+    adjustments: { temperature: 25 },
+  });
+  const uploads = [];
+  library.s3.send = async (command) => {
+    if (command.constructor.name === "CopyObjectCommand")
+      uploads.push(command.input);
+    if (command.constructor.name === "DeleteObjectCommand")
+      deleted.push(command.input.Key);
+    return {};
+  };
+  const copy = await library.duplicatePhoto(original.id, original.object_key);
+  assert.equal(copy.name, "Море (2).jpg");
+  assert.equal(copy.folder_id, folder.id);
+  assert.equal(copy.mime_type, original.mime_type);
+  assert.equal(copy.size_bytes, original.size_bytes);
+  assert.deepEqual(copy.tags, original.tags);
+  assert.equal(copy.favorite, original.favorite);
+  assert.equal(copy.adjustments.temperature, 25);
+  assert.notEqual(copy.id, original.id);
+  assert.notEqual(copy.object_key, original.object_key);
+  assert.deepEqual(uploads, [
+    {
+      Bucket: config.bucket,
+      Key: copy.object_key,
+      CopySource: "test-drive/objects/sea%20%23%20%D0%B4%D0%B5%D0%BD%D1%8C",
+    },
+  ]);
+  await library.updateFiles([copy.id], {
+    adjustments: { temperature: -10 },
+    tags: [],
+  });
+  assert.equal((await library.file(original.id)).adjustments.temperature, 25);
+  assert.deepEqual((await library.file(original.id)).tags, ["отпуск"]);
+  assert.deepEqual(deleted, []);
+});
+
+test("photo duplication discards only the copied object if the source changes before the catalog write", async (t) => {
+  const { library, insert, sqlite, deleted } = fixture(t);
+  await library.initialize();
+  insert("photo");
+  let copied;
+  library.s3.send = async (command) => {
+    if (command.constructor.name === "CopyObjectCommand") {
+      copied = command.input.Key;
+      sqlite
+        .prepare("UPDATE jr_files SET object_key = ? WHERE id = ?")
+        .run("replacement", "photo");
+    } else if (command.constructor.name === "DeleteObjectCommand") {
+      deleted.push(command.input.Key);
+    }
+    return {};
+  };
+  await assert.rejects(
+    library.duplicatePhoto("photo", "objects/photo"),
+    /Изображение изменилось/,
+  );
+  assert.deepEqual(deleted, [copied]);
+  assert.equal((await library.file("photo")).object_key, "replacement");
+  assert.equal((await library.list({ section: "all" })).items.length, 1);
+});
+
 test("video frames create distinct PNG files in the video's folder without changing the original", async (t) => {
   const uploads = [],
     paths = [];
@@ -1131,7 +1205,7 @@ test("R2 indexing paginates and does not duplicate or change metadata", async (t
   assert.deepEqual((await library.list()).items[0].tags, ["keep"]);
 });
 
-test("credentials are encrypted, redacted, reloaded and never persisted using basic_text", async (t) => {
+test("credentials are encrypted and session changes preserve the saved profile while the keychain is unavailable", async (t) => {
   const dir = await mkdtemp(path.join(os.tmpdir(), "jr-config-"));
   t.after(() => rm(dir, { recursive: true, force: true }));
   const safe = {
@@ -1147,13 +1221,9 @@ test("credentials are encrypted, redacted, reloaded and never persisted using ba
   assert.equal(store.summary().persisted, true);
   assert.equal("apiToken" in store.summary(), false);
   assert.equal("accessKeyId" in store.summary(), false);
-  const { readFile } = await import("node:fs/promises");
-  assert.equal(
-    (await readFile(path.join(dir, "connection.enc"), "utf8")).includes(
-      config.apiToken,
-    ),
-    false,
-  );
+  const filename = path.join(dir, "connection.enc");
+  const encrypted = await readFile(filename);
+  assert.equal(encrypted.toString().includes(config.apiToken), false);
   const next = new ConfigStore(dir, safe);
   await next.load();
   assert.deepEqual(next.current, config);
@@ -1162,13 +1232,105 @@ test("credentials are encrypted, redacted, reloaded and never persisted using ba
     config.apiToken,
   );
   safe.isAsyncEncryptionAvailable = async () => false;
-  await next.save(config);
+  await next.save({ ...config, apiToken: "only-in-memory" });
   assert.equal(next.summary().persisted, false);
-  await assert.rejects(readFile(path.join(dir, "connection.enc")), {
-    code: "ENOENT",
-  });
+  assert.deepEqual(await readFile(filename), encrypted);
   await next.clear();
   assert.equal(next.summary().configured, false);
+  await assert.rejects(readFile(filename), { code: "ENOENT" });
+});
+
+test("connection profiles migrate legacy credentials, isolate edits, persist selection and remove independently", async (t) => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "jr-profiles-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  let unlocked = true;
+  const encrypt = async (value) => Buffer.from(value).reverse();
+  const safe = {
+    isAsyncEncryptionAvailable: async () => unlocked,
+    getSelectedStorageBackend: () => "gnome_libsecret",
+    encryptStringAsync: encrypt,
+    decryptStringAsync: async (value) => ({
+      result: Buffer.from(value).reverse().toString(),
+    }),
+  };
+  const filename = path.join(dir, "connection.enc");
+  await writeFile(filename, await encrypt(JSON.stringify(config)));
+  const store = new ConfigStore(dir, safe);
+  const legacy = await store.load();
+  assert.equal(legacy.profiles.length, 1);
+  assert.equal(legacy.profiles[0].name, config.bucket);
+  assert.deepEqual(store.current, config);
+  const firstId = legacy.activeProfileId;
+  const other = normalizeConfig({
+    ...config,
+    databaseId: "cccccccc-cccc-cccc-cccc-cccccccccccc",
+    apiToken: "another-private-token",
+    bucket: "other-bucket",
+    accessKeyId: "other-r2-access",
+    secretAccessKey: "other-r2-secret",
+  });
+  assert.throws(
+    () => store.merge({ ...other, profileId: null, apiToken: "" }),
+    /apiToken/,
+  );
+  const created = await store.save(store.merge({ ...other, profileId: null }), {
+    profileId: null,
+    name: "Archive",
+  });
+  const secondId = created.activeProfileId;
+  assert.notEqual(firstId, secondId);
+  assert.equal(created.profiles.length, 2);
+  assert.equal(
+    store.merge({
+      ...config,
+      profileId: firstId,
+      apiToken: "",
+      accessKeyId: "",
+    }).apiToken,
+    config.apiToken,
+  );
+  assert.equal(
+    store.merge({ ...other, profileId: secondId, apiToken: "" }).apiToken,
+    other.apiToken,
+  );
+  assert.equal(
+    store
+      .redact(`${config.apiToken}: ${other.secretAccessKey}`)
+      .includes(other.secretAccessKey),
+    false,
+  );
+  for (const profile of created.profiles) {
+    assert.equal("apiToken" in profile, false);
+    assert.equal("secretAccessKey" in profile, false);
+  }
+  assert.deepEqual(store.current, other);
+  safe.encryptStringAsync = async () => {
+    throw new Error("Keychain error");
+  };
+  await assert.rejects(store.select(firstId), /Keychain error/);
+  assert.equal(store.activeId, secondId);
+  safe.encryptStringAsync = encrypt;
+  await store.select(firstId);
+  const restarted = new ConfigStore(dir, safe);
+  assert.equal((await restarted.load()).activeProfileId, firstId);
+  assert.deepEqual(restarted.current, config);
+  assert.equal(restarted.summary().profiles.length, 2);
+  const beforeLock = await readFile(filename);
+  unlocked = false;
+  await assert.rejects(restarted.clear(secondId));
+  assert.deepEqual(await readFile(filename), beforeLock);
+  const locked = new ConfigStore(dir, safe);
+  await assert.rejects(locked.load());
+  await locked.save(other, { profileId: null, name: "Session only" });
+  assert.equal(locked.summary().persisted, false);
+  await locked.clear();
+  assert.deepEqual(await readFile(filename), beforeLock);
+  unlocked = true;
+  assert.equal((await restarted.clear(firstId)).activeProfileId, secondId);
+  assert.deepEqual(restarted.current, other);
+  await restarted.clear(secondId);
+  assert.equal(restarted.summary().configured, false);
+  await assert.rejects(readFile(filename), { code: "ENOENT" });
 });
 
 test("configuration validates endpoints indirectly and namespaces each bucket/prefix", () => {

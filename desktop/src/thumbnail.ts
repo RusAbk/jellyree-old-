@@ -1,6 +1,39 @@
 import type { DriveFile, ThumbnailRevision } from "./types";
-import { normalizeImageAdjustments } from "../electron/image-adjustments.mjs";
-import { isImageFile, imageMimeType } from "../electron/image-formats.mjs";
+import {
+  needsImageProcessing,
+  normalizeImageAdjustments,
+} from "../electron/image-adjustments.mjs";
+import {
+  isHeicFile,
+  isImageFile,
+  isPxzFile,
+  imageMimeType,
+} from "../electron/image-formats.mjs";
+
+export function usesProcessedThumbnail(file: DriveFile) {
+  return (
+    isPxzFile(file) ||
+    (isImageFile(file) &&
+      (isHeicFile(file) || needsImageProcessing(file.adjustments)))
+  );
+}
+export function thumbnailGeometry(
+  file: DriveFile,
+  { width, height }: { width: number; height: number },
+) {
+  const rotation =
+    isImageFile(file) && !usesProcessedThumbnail(file)
+      ? (file.adjustments.rotate ?? 0)
+      : 0;
+  const angle = (rotation * Math.PI) / 180;
+  const cosine = Math.abs(Math.cos(angle));
+  const sine = Math.abs(Math.sin(angle));
+  return {
+    rotation,
+    boundsWidth: width * cosine + height * sine,
+    boundsHeight: width * sine + height * cosine,
+  };
+}
 export function thumbnailRevision(file: DriveFile): ThumbnailRevision {
   return {
     id: file.id,

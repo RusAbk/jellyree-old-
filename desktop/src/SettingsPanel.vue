@@ -1,7 +1,12 @@
 <script setup lang="ts">
 import { t } from "./i18n";
-import { reactive, ref, computed, onMounted } from "vue";
-import type { Connection, Settings, ThumbnailStats } from "./types";
+import { reactive, ref, computed, onMounted, watch } from "vue";
+import type {
+  ConnectionInput,
+  ConnectionProfile,
+  Settings,
+  ThumbnailStats,
+} from "./types";
 import { bytes } from "./format";
 import { api } from "./api";
 import LanguageSelect from "./LanguageSelect.vue";
@@ -28,13 +33,18 @@ async function clearThumbnails() {
 const emit = defineEmits<{
   close: [];
   saved: [settings: Settings];
-  disconnected: [];
+  selected: [settings: Settings];
+  removed: [settings: Settings];
 }>();
-const form = reactive<Connection>({
-  accountId: props.settings.accountId || "",
-  databaseId: props.settings.databaseId || "",
-  bucket: props.settings.bucket || "",
-  prefix: props.settings.prefix ?? "jellyree",
+const creating = ref(!props.settings.configured);
+const profileId = ref(props.settings.activeProfileId);
+const profiles = computed(() => props.settings.profiles ?? []);
+const form = reactive<ConnectionInput>({
+  name: "",
+  accountId: "",
+  databaseId: "",
+  bucket: "",
+  prefix: "",
   apiToken: "",
   accessKeyId: "",
   secretAccessKey: "",
@@ -43,18 +53,58 @@ const busy = ref(false),
   error = ref(props.settings.startupError || ""),
   message = ref(""),
   forget = ref(false);
-const placeholder = computed(() =>
-  props.settings.hasSecrets
-    ? t("Сохранено · оставьте пустым, чтобы не менять")
-    : "",
+const hasSecrets = computed(
+  () =>
+    !creating.value &&
+    (profileId.value
+      ? profiles.value.some(({ id }) => id === profileId.value)
+      : props.settings.hasSecrets),
 );
+const placeholder = computed(() =>
+  hasSecrets.value ? t("Сохранено · оставьте пустым, чтобы не менять") : "",
+);
+function fillForm(profile?: Settings | ConnectionProfile) {
+  Object.assign(form, {
+    name: profile?.name ?? "",
+    accountId: profile?.accountId ?? "",
+    databaseId: profile?.databaseId ?? "",
+    bucket: profile?.bucket ?? "",
+    prefix: profile?.prefix ?? "jellyree",
+    apiToken: "",
+    accessKeyId: "",
+    secretAccessKey: "",
+  });
+  error.value = "";
+  message.value = "";
+  forget.value = false;
+}
+function editConnection(id: string) {
+  const profile = profiles.value.find((entry) => entry.id === id);
+  creating.value = !profile;
+  profileId.value = profile?.id;
+  fillForm(profile);
+}
+watch(
+  () => props.settings,
+  (settings) => {
+    creating.value = !settings.configured;
+    profileId.value = settings.activeProfileId;
+    fillForm(settings.configured ? settings : undefined);
+    error.value = settings.startupError ?? "";
+  },
+  { immediate: true },
+);
+
 async function run(save: boolean) {
   if (busy.value || props.locked) return;
   busy.value = true;
   error.value = "";
   message.value = "";
   try {
-    const input = { ...form };
+    const input = {
+      ...form,
+      profileId: creating.value ? null : profileId.value,
+    };
     if (save) {
       const result = await api.settings.save(input);
       emit("saved", result);
@@ -68,12 +118,23 @@ async function run(save: boolean) {
     busy.value = false;
   }
 }
+async function openConnection() {
+  if (!profileId.value || busy.value || props.locked) return;
+  busy.value = true;
+  error.value = "";
+  try {
+    emit("selected", await api.settings.select(profileId.value));
+  } catch (e) {
+    error.value = (e as Error).message;
+  } finally {
+    busy.value = false;
+  }
+}
 async function disconnect() {
   if (busy.value || props.locked) return;
   busy.value = true;
   try {
-    await api.settings.clear();
-    emit("disconnected");
+    emit("removed", await api.settings.clear(profileId.value));
   } catch (e) {
     error.value = (e as Error).message;
   } finally {
@@ -115,11 +176,61 @@ async function disconnect() {
           )
         }}
       </p>
+      <div v-if="profiles.length" class="connection-profiles">
+        <label>
+          {{ t("Подключения") }}
+          <select
+            :value="profileId ?? ''"
+            :disabled="busy || locked"
+            @change="editConnection(($event.target as HTMLSelectElement).value)"
+          >
+            <option v-if="creating" value="">
+              {{ t("Новое подключение") }}
+            </option>
+            <option
+              v-for="profile in profiles"
+              :key="profile.id"
+              :value="profile.id"
+            >
+              {{ profile.name
+              }}{{
+                profile.id === settings.activeProfileId
+                  ? " · " + t("Активное")
+                  : ""
+              }}
+            </option>
+          </select>
+        </label>
+        <button
+          v-if="profileId && profileId !== settings.activeProfileId"
+          class="button"
+          :disabled="busy || locked"
+          @click="openConnection"
+        >
+          {{ t("Открыть подключение") }}
+        </button>
+        <button
+          class="button"
+          :disabled="busy || locked || creating"
+          @click="editConnection('')"
+        >
+          <i aria-hidden="true" class="ri-add-line"></i
+          >{{ t("Новое подключение") }}
+        </button>
+      </div>
       <form @submit.prevent="run(true)">
         <p v-if="locked" class="info-note">
           {{ t("Изменить подключение можно после завершения загрузок.") }}
         </p>
         <fieldset :disabled="busy || locked">
+          <label>
+            {{ t("Название подключения") }}
+            <input
+              v-model="form.name"
+              maxlength="80"
+              :placeholder="form.bucket || t('По имени бакета')"
+            />
+          </label>
           <label
             >{{ t("ID аккаунта Cloudflare")
             }}<input
@@ -145,7 +256,7 @@ async function disconnect() {
             }}<input
               v-model="form.apiToken"
               type="password"
-              :required="!settings.hasSecrets"
+              :required="!hasSecrets"
               autocomplete="new-password"
               :placeholder="placeholder"
             /><small>{{
@@ -175,7 +286,7 @@ async function disconnect() {
             }}<input
               v-model="form.accessKeyId"
               type="password"
-              :required="!settings.hasSecrets"
+              :required="!hasSecrets"
               autocomplete="new-password"
               :placeholder="placeholder"
           /></label>
@@ -184,7 +295,7 @@ async function disconnect() {
             }}<input
               v-model="form.secretAccessKey"
               type="password"
-              :required="!settings.hasSecrets"
+              :required="!hasSecrets"
               autocomplete="new-password"
               :placeholder="placeholder"
             /><small>{{
@@ -250,7 +361,7 @@ async function disconnect() {
           {{ cacheMessage }}
         </p>
       </section>
-      <div v-if="settings.configured" class="disconnect">
+      <div v-if="hasSecrets" class="disconnect">
         <template v-if="forget"
           ><span>{{
             t("Удалить реквизиты с этого устройства? Файлы в облаке останутся.")

@@ -7,6 +7,18 @@ export type Connection = {
   secretAccessKey: string;
   prefix: string;
 };
+export type ConnectionInput = Connection & {
+  profileId?: string | null;
+  name?: string;
+};
+export type ConnectionProfile = Omit<
+  Connection,
+  "apiToken" | "accessKeyId" | "secretAccessKey"
+> & {
+  id: string;
+  name: string;
+  persisted: boolean;
+};
 export type Settings = Partial<
   Omit<Connection, "apiToken" | "accessKeyId" | "secretAccessKey">
 > & {
@@ -14,6 +26,9 @@ export type Settings = Partial<
   persisted: boolean;
   hasSecrets?: boolean;
   startupError?: string;
+  name?: string;
+  activeProfileId?: string;
+  profiles?: ConnectionProfile[];
 };
 export type Folder = {
   id: string;
@@ -74,6 +89,7 @@ export type ThumbnailRevision = {
   mimeType: string;
   adjustments: Adjustments;
 };
+export type ThumbnailDimensions = { width: number; height: number };
 export type ThumbnailEntry = {
   data: Uint8Array;
   width: number;
@@ -136,6 +152,9 @@ export interface Jellyree {
     get(
       revision: ThumbnailRevision,
     ): Promise<{ epoch: number; entry: ThumbnailEntry | null }>;
+    dimensions(
+      revisions: ThumbnailRevision[],
+    ): Promise<(ThumbnailDimensions | null)[]>;
     put(
       revision: ThumbnailRevision,
       entry: ThumbnailEntry,
@@ -148,9 +167,10 @@ export interface Jellyree {
   setLocale(value: "en" | "ru" | "es"): Promise<void>;
   settings: {
     get(): Promise<Settings>;
-    test(input: Connection): Promise<{ ok: boolean }>;
-    save(input: Connection): Promise<Settings>;
-    clear(): Promise<Settings>;
+    test(input: ConnectionInput): Promise<{ ok: boolean }>;
+    save(input: ConnectionInput): Promise<Settings>;
+    select(id: string): Promise<Settings>;
+    clear(id?: string): Promise<Settings>;
   };
   list(input: ListInput): Promise<{
     items: DriveFile[];
@@ -180,6 +200,7 @@ export interface Jellyree {
   ): Promise<{ file: DriveFile; warning?: string }>;
   setDocumentDraft(owner: string, dirty: boolean): Promise<void>;
   videoSource(revision: ThumbnailRevision): Promise<string>;
+  duplicatePhoto(id: string, expectedObjectKey: string): Promise<DriveFile>;
   saveVideoFrame(
     id: string,
     expectedObjectKey: string,

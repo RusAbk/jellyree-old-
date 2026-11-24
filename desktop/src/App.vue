@@ -15,8 +15,10 @@ import DocumentViewer from "./DocumentViewer.vue";
 import { documentKind } from "../electron/document-preview.mjs";
 import { thumbnailRevision } from "./thumbnail";
 import PhotoEditor from "./PhotoEditor.vue";
+import PreviewTags from "./PreviewTags.vue";
 import { isImageFile } from "../electron/image-formats.mjs";
 import { isPhotoPreview, usePhotoPreview } from "./use-photo-preview";
+import { usePhotoZoom } from "./use-photo-zoom";
 import SettingsPanel from "./SettingsPanel.vue";
 import MediaFeed from "./MediaFeed.vue";
 import TimelineScale from "./TimelineScale.vue";
@@ -29,6 +31,8 @@ import LanguageSelect from "./LanguageSelect.vue";
 import { syncLanguage } from "./i18n";
 import { bytes, date, icon } from "./format";
 import { api } from "./api";
+import { useGalleryLayout } from "./use-gallery-layout";
+import { galleryGap } from "./gallery-layout";
 import { monthIndex, monthStart } from "./timeline-dates";
 import {
   INTERNAL_DRAG_TYPE,
@@ -53,6 +57,7 @@ const documentViewer = ref<InstanceType<typeof DocumentViewer>>(),
   documentVersion = ref(0);
 let previewNavigation = 0;
 const settingsOpen = ref(false),
+  switchingProfile = ref(false),
   ready = ref(false),
   section = ref("drive"),
   folderId = ref<string | null>(null);
@@ -96,6 +101,7 @@ const isTimeline = computed(() => section.value === "timeline");
 const mediaFeed = ref<InstanceType<typeof MediaFeed>>();
 const timelineBefore = ref<string>();
 const timelineBounds = shallowRef<TimelineBounds>();
+const timelineBoundsState = ref<"loading" | "ready" | "failed">("loading");
 const timelineDay = ref<number>();
 const timelineNewer = shallowRef<DriveFile[]>([]);
 const newerPage = ref(0);
@@ -105,16 +111,27 @@ const newerFailed = ref(false);
 let newerRequest = 0;
 let boundsRequest = 0;
 const knownTimelineBounds = computed(() => {
-  const newest = timelineBounds.value?.newest ?? files.value[0]?.created_at;
-  const oldest = timelineBounds.value?.oldest ?? files.value.at(-1)?.created_at;
-  if (
-    !newest ||
-    !oldest ||
-    !Number.isFinite(Date.parse(newest)) ||
-    !Number.isFinite(Date.parse(oldest))
-  )
-    return null;
-  return { newest, oldest };
+  if (!isTimeline.value) return null;
+  let oldest: string | undefined, newest: string | undefined;
+  let min = Infinity,
+    max = -Infinity;
+  function include(date: string | null | undefined) {
+    if (!date) return;
+    const time = Date.parse(date);
+    if (!Number.isFinite(time)) return;
+    if (time < min) {
+      min = time;
+      oldest = date;
+    }
+    if (time > max) {
+      max = time;
+      newest = date;
+    }
+  }
+  include(timelineBounds.value?.oldest);
+  include(timelineBounds.value?.newest);
+  for (const file of files.value) include(file.created_at);
+  return oldest && newest ? { oldest, newest } : null;
 });
 const listing = computed(() => ({
   section: section.value,
@@ -129,6 +146,7 @@ const listing = computed(() => ({
 const loadedListing = shallowRef<typeof listing.value>();
 const currentListing = computed(() => loadedListing.value === listing.value);
 const filesScroll = ref<HTMLElement>(),
+  fileListElement = ref<HTMLElement>(),
   loadMoreButton = ref<HTMLButtonElement>(),
   pageFailed = ref(false);
 const canLoadMore = computed(
@@ -180,6 +198,17 @@ const preview = ref<DriveFile | null>(null),
   previewLoading = ref(false),
   previewPageLoading = ref(false),
   editing = ref(false);
+const previewTagsOpen = ref(false);
+const previewTagsButton = ref<HTMLButtonElement>();
+const previewIndex = computed(() =>
+  files.value.findIndex((file) => file.id === preview.value?.id),
+);
+let previewLocation:
+  { listing: typeof listing.value; index: number } | undefined;
+watch(previewIndex, (index) => {
+  if (index >= 0 && currentListing.value)
+    previewLocation = { listing: listing.value, index };
+});
 const photo = computed(() =>
   preview.value && isPhotoPreview(preview.value) ? preview.value : null,
 );
@@ -191,6 +220,17 @@ const {
   retry: retryPhoto,
   clear: clearPhotos,
 } = usePhotoPreview(photo, files, editing, releasePreviewMedia);
+const photoZoom = usePhotoZoom(photoStage);
+const {
+  viewport: photoViewport,
+  scale: photoScale,
+  transform: photoTransform,
+  dragging: photoPanning,
+} = photoZoom;
+watch(
+  [() => photo.value?.id, () => photo.value?.object_key, editing],
+  photoZoom.reset,
+);
 const expanded = ref(new Set<string>());
 const modal = ref<{
   kind: string;
@@ -319,8 +359,42 @@ const progressPercent = computed(() =>
 );
 const scope = computed(
   () =>
-    `${settings.value.accountId}/${settings.value.bucket}/${settings.value.prefix}`,
+    `${settings.value.activeProfileId}/${settings.value.accountId}/${settings.value.databaseId}/${settings.value.bucket}/${settings.value.prefix}`,
 );
+const galleryActive = computed(
+  () => currentListing.value && !isTimeline.value && view.value === "gallery",
+);
+const {
+  rows: galleryRows,
+  pending: galleryPending,
+  remember: rememberGalleryDimensions,
+} = useGalleryLayout(
+  fileListElement,
+  galleryActive,
+  files,
+  previewSize,
+  scope,
+  listing,
+);
+const fileGroups = computed<
+  {
+    key: string;
+    height?: number;
+    tiles: { file: DriveFile; width?: number }[];
+  }[]
+>(() => {
+  if (view.value !== "gallery")
+    return [{ key: "catalog", tiles: files.value.map((file) => ({ file })) }];
+  const byId = new Map(files.value.map((file) => [file.id, file]));
+  return galleryRows.value.map((row) => ({
+    key: row.tiles[0]!.id,
+    height: row.height,
+    tiles: row.tiles.flatMap(({ id, width }) => {
+      const file = byId.get(id);
+      return file ? [{ file, width }] : [];
+    }),
+  }));
+});
 const selectedIds = computed(() => new Set(selection.value));
 let selectionAnchor: string | undefined;
 const {
@@ -574,17 +648,16 @@ function navigate(next: string, id: string | null = null, nextTag = "") {
   if (next === "timeline") void refreshTimelineBounds();
 }
 async function refreshTimelineBounds() {
-  if (
-    !settings.value.configured ||
-    typeof window.jellyree?.timelineBounds !== "function"
-  )
-    return;
+  if (!settings.value.configured) return;
   const id = ++boundsRequest;
+  timelineBoundsState.value = "loading";
   try {
     const result = await api.timelineBounds();
-    if (id === boundsRequest && isTimeline.value) timelineBounds.value = result;
+    if (id !== boundsRequest) return;
+    timelineBounds.value = result;
+    timelineBoundsState.value = "ready";
   } catch {
-    // The feed can still use the dates of media already loaded.
+    if (id === boundsRequest) timelineBoundsState.value = "failed";
   }
 }
 function jumpTimeline(month: number) {
@@ -723,6 +796,7 @@ function resetCatalog() {
   usageRequestedAt = 0;
   ++boundsRequest;
   timelineBounds.value = undefined;
+  timelineBoundsState.value = "loading";
   uploadRefreshPending = uploadFoldersPending = false;
   catalogError.value = "";
   stats.value = { files: 0, bytes: 0, trashed: 0, tags: [] };
@@ -739,6 +813,8 @@ async function refreshCatalog() {
 async function pollCatalog() {
   if (
     !settings.value.configured ||
+    switchingProfile.value ||
+    settingsOpen.value ||
     document.visibilityState !== "visible" ||
     !currentListing.value ||
     busy.value ||
@@ -1169,6 +1245,15 @@ function openModal(
 async function submitModal() {
   const value = modal.value;
   if (!value) return;
+  if (
+    value.kind === "delete" &&
+    photo.value &&
+    value.ids.length === 1 &&
+    value.ids[0] === photo.value.id
+  ) {
+    await deletePreviewPhoto(true);
+    return;
+  }
   const refresh = [
     "createFolder",
     "renameFolder",
@@ -1229,6 +1314,9 @@ async function openPreview(file: DriveFile) {
   documentVersion.value++;
   releasePreviewMedia(previewUrl.value);
   preview.value = file;
+  const index = previewIndex.value;
+  if (index >= 0) previewLocation = { listing: listing.value, index };
+  if (!isPhotoPreview(file)) previewTagsOpen.value = false;
   previewUrl.value = "";
   previewError.value = "";
   previewLoading.value = true;
@@ -1261,6 +1349,8 @@ async function closePreview() {
   previewGeneration++;
   releasePreviewMedia(previewUrl.value);
   preview.value = null;
+  previewLocation = undefined;
+  previewTagsOpen.value = false;
   previewUrl.value = "";
   editing.value = false;
 }
@@ -1279,16 +1369,27 @@ function documentSaved(file: DriveFile) {
   requestUploadRefresh("usage");
 }
 async function nextPreview(direction: number) {
-  if (editing.value || !preview.value || !currentListing.value) return;
+  if (
+    busy.value ||
+    editing.value ||
+    previewPageLoading.value ||
+    !preview.value ||
+    !currentListing.value
+  )
+    return;
   const fileId = preview.value.id;
-  const index = files.value.findIndex((f) => f.id === fileId),
-    next = files.value[index + direction];
-  if (index < 0) return;
+  const index = previewIndex.value;
+  const position =
+    previewLocation?.listing === listing.value ? previewLocation.index : 0;
+  const next =
+    files.value[
+      index < 0 ? position + Math.min(0, direction) : index + direction
+    ];
   if (next) {
     await openPreview(next);
     return;
   }
-  if (direction < 0 || previewPageLoading.value) return;
+  if (direction < 0) return;
   const pending = loadNextPage();
   if (!pending) return;
   const navigation = previewNavigation;
@@ -1304,11 +1405,131 @@ async function nextPreview(direction: number) {
     )
       return;
     const current = files.value.findIndex((f) => f.id === fileId);
-    const following = files.value[current + 1];
-    if (current >= 0 && following) void openPreview(following);
+    const following = files.value[current < 0 ? position : current + 1];
+    if (following) void openPreview(following);
   } finally {
     previewPageLoading.value = false;
   }
+}
+function closePreviewTags() {
+  previewTagsOpen.value = false;
+  previewTagsButton.value?.focus();
+}
+async function savePreviewTags(tags: string[]) {
+  const file = preview.value;
+  if (!file) return;
+  const saved = await action(
+    async () => {
+      await api.update([file.id], { tags });
+      if (preview.value?.id === file.id)
+        preview.value = { ...preview.value, tags };
+      files.value = files.value.map((current) =>
+        current.id === file.id ? { ...current, tags } : current,
+      );
+      timelineNewer.value = timelineNewer.value.map((current) =>
+        current.id === file.id ? { ...current, tags } : current,
+      );
+    },
+    "",
+    "none",
+  );
+  if (saved) requestUploadRefresh("usage");
+  return saved;
+}
+async function duplicatePreviewPhoto() {
+  const source = photo.value;
+  if (!source || source.trashed_at) return;
+  const navigation = previewNavigation;
+  const requestedListing = listing.value;
+  const saved = await action(
+    async () => {
+      const copy = await api.duplicatePhoto(source.id, source.object_key);
+      const index = files.value.findIndex((file) => file.id === source.id);
+      if (requestedListing === listing.value && index >= 0)
+        files.value = [
+          ...files.value.slice(0, index + 1),
+          copy,
+          ...files.value.slice(index + 1),
+        ];
+      if (navigation === previewNavigation) await openPreview(copy);
+    },
+    t("Дубликат создан."),
+    "none",
+  );
+  if (saved) {
+    requestUploadRefresh("usage");
+    if (isTimeline.value) void refreshTimelineBounds();
+  }
+}
+async function deletePreviewPhoto(permanent = false) {
+  const target = photo.value;
+  if (!target || busy.value || previewPageLoading.value) return;
+  if (!permanent && target.trashed_at) {
+    openModal("delete", [target.id]);
+    return;
+  }
+  const navigation = previewNavigation;
+  const requestedListing = listing.value;
+  const index = previewIndex.value;
+  const position =
+    index >= 0
+      ? index
+      : previewLocation?.listing === requestedListing
+        ? previewLocation.index
+        : 0;
+  const previous = files.value
+    .slice(0, position)
+    .reverse()
+    .find(isPhotoPreview);
+  let neighbor =
+    previous ??
+    files.value.slice(position + Number(index >= 0)).find(isPhotoPreview);
+  const saved = await action(
+    async () => {
+      if (permanent) await api.remove([target.id]);
+      else await api.update([target.id], { trashed: true });
+      files.value = files.value.filter((file) => file.id !== target.id);
+      timelineNewer.value = timelineNewer.value.filter(
+        (file) => file.id !== target.id,
+      );
+      selection.value = selection.value.filter((id) => id !== target.id);
+    },
+    permanent ? "" : t("Файлы перемещены в корзину."),
+    "none",
+  );
+  if (!saved) return;
+  if (permanent) modal.value = null;
+  if (navigation === previewNavigation && requestedListing === listing.value) {
+    if (!neighbor && hasMore.value) {
+      previewPageLoading.value = true;
+      try {
+        // Refresh the loaded pages so deleting a row cannot skip the first
+        // item on the next page of the Cloudflare listing.
+        await reload(false, true);
+        neighbor = files.value.find(isPhotoPreview);
+        while (
+          !neighbor &&
+          navigation === previewNavigation &&
+          requestedListing === listing.value
+        ) {
+          const pending = loadNextPage();
+          if (!pending) break;
+          const previousPage = page.value;
+          await pending;
+          if (page.value === previousPage) break;
+          neighbor = files.value.find(isPhotoPreview);
+        }
+      } finally {
+        previewPageLoading.value = false;
+      }
+    }
+    if (navigation === previewNavigation) {
+      if (neighbor) await openPreview(neighbor);
+      else await closePreview();
+    }
+  }
+  requestUploadRefresh("usage");
+  if (isTimeline.value) void refreshTimelineBounds();
 }
 async function saveVideoFrame(file: DriveFile, frame: CapturedVideoFrame) {
   const saved = await api.saveVideoFrame(
@@ -1357,48 +1578,84 @@ async function share(id: string) {
     "none",
   );
 }
-async function saved(value: Settings) {
+async function applyConnection(value: Settings, message: string) {
   ++generation;
   resetCatalog();
   loadedListing.value = undefined;
-  closePreview();
+  loading.value = loadingMore.value = false;
+  await closePreview();
   clearPhotos();
+  closeContextMenu();
+  finishDrag();
   settings.value = value;
   settingsOpen.value = false;
   files.value = [];
   folders.value = [];
+  expanded.value = new Set();
   selection.value = [];
+  selectionAnchor = undefined;
+  inspectorOpen.value = false;
+  modal.value = null;
   folderId.value = null;
   section.value = "drive";
+  timelineBefore.value = undefined;
+  timelineDay.value = undefined;
   tag.value = "";
   search.value = "";
-  notice.value = value.persisted
-    ? t("Подключение сохранено на этом устройстве.")
-    : t(
-        "Системное хранилище ключей недоступно. Реквизиты будут забыты при закрытии.",
-      );
+  error.value = "";
+  notice.value = message;
   await refreshCatalog();
 }
-function disconnected() {
-  ++generation;
-  resetCatalog();
-  loadedListing.value = undefined;
-  loading.value = false;
-  loadingMore.value = false;
-  closePreview();
-  clearPhotos();
-  settings.value = { configured: false, persisted: false };
-  settingsOpen.value = false;
-  files.value = [];
-  folders.value = [];
-  selection.value = [];
-  folderId.value = null;
-  search.value = "";
-  tag.value = "";
-  error.value = "";
-  notice.value = t("Подключение удалено с устройства.");
+function saved(value: Settings) {
+  return applyConnection(
+    value,
+    value.persisted
+      ? t("Подключение сохранено на этом устройстве.")
+      : t(
+          "Системное хранилище ключей недоступно. Реквизиты будут забыты при закрытии.",
+        ),
+  );
+}
+function selectedConnection(value: Settings) {
+  return applyConnection(
+    value,
+    t("Открыто подключение «{0}».", { "0": value.name || value.bucket }),
+  );
+}
+async function removedConnection(value: Settings) {
+  const message = t("Подключение удалено с устройства.");
+  if (
+    value.configured &&
+    value.activeProfileId === settings.value.activeProfileId
+  ) {
+    settings.value = value;
+    notice.value = message;
+  } else {
+    await applyConnection(value, message);
+  }
+}
+async function switchConnection(event: Event) {
+  const select = event.currentTarget as HTMLSelectElement;
+  const id = select.value;
+  if (
+    id !== settings.value.activeProfileId &&
+    !switchingProfile.value &&
+    !busy.value &&
+    !pendingUploads.value
+  ) {
+    switchingProfile.value = true;
+    try {
+      await selectedConnection(await api.settings.select(id));
+    } catch (e) {
+      error.value = (e as Error).message;
+    } finally {
+      switchingProfile.value = false;
+    }
+  }
+  select.value = settings.value.activeProfileId ?? "";
 }
 function keydown(event: KeyboardEvent) {
+  if (switchingProfile.value) return;
   if (event.key === "Escape" && cancelSelectionBox()) {
     event.preventDefault();
     return;
@@ -1448,13 +1705,39 @@ function keydown(event: KeyboardEvent) {
   if (event.key === "Escape") {
     if (busy.value) return;
     if (modal.value) modal.value = null;
-    else if (preview.value) closePreview();
-    else selection.value = [];
+    else if (previewTagsOpen.value) closePreviewTags();
+    else if (preview.value) {
+      void closePreview();
+      return;
+    } else selection.value = [];
   }
   if (settingsOpen.value || modal.value) return;
   if (preview.value) {
     if (event.key === "ArrowRight") nextPreview(1);
     if (event.key === "ArrowLeft") nextPreview(-1);
+    if (
+      photo.value &&
+      !photoLoading.value &&
+      !photoError.value &&
+      !event.ctrlKey &&
+      !event.metaKey &&
+      !event.altKey
+    ) {
+      if (["+", "=", "-", "0"].includes(event.key)) {
+        event.preventDefault();
+        if (event.key === "0") photoZoom.reset();
+        else photoZoom.zoomBy(event.key === "-" ? -1 : 1);
+      }
+    }
+    if (
+      photo.value &&
+      !previewTagsOpen.value &&
+      event.key === "Delete" &&
+      !event.repeat
+    ) {
+      event.preventDefault();
+      void deletePreviewPhoto();
+    }
     return;
   }
   if ((event.ctrlKey || event.metaKey) && event.key === "a") {
@@ -1514,6 +1797,7 @@ watch(scope, () => {
 const autoLoadMore = computed(
   () =>
     canLoadMore.value &&
+    !galleryPending.value &&
     !pageFailed.value &&
     !preview.value &&
     !settingsOpen.value &&
@@ -1593,6 +1877,7 @@ onBeforeUnmount(() => {
 <template>
   <div
     class="app-shell"
+    :inert="switchingProfile || undefined"
     @dragover="dragover"
     @dragleave="dragleave"
     @drop="drop"
@@ -1721,7 +2006,9 @@ onBeforeUnmount(() => {
         <strong
           >{{ bytes(stats.bytes) }}
           <span>· {{ t("{0} файлов", { "0": stats.files }) }}</span></strong
-        ><small>{{ settings.bucket || t("Подключите своё хранилище") }}</small
+        ><small :title="settings.bucket">{{
+          settings.name || settings.bucket || t("Подключите своё хранилище")
+        }}</small
         ><small
           v-if="settings.configured && !settings.persisted"
           class="session-only"
@@ -1730,7 +2017,7 @@ onBeforeUnmount(() => {
       </div>
       <button
         class="settings-link"
-        :disabled="busy"
+        :disabled="busy || switchingProfile"
         @click="settingsOpen = true"
       >
         <i aria-hidden="true" class="ri-settings-3-line"></i
@@ -1753,8 +2040,8 @@ onBeforeUnmount(() => {
             :aria-label="t('Очистить поиск')"
             @click="search = ''"
           >
-            <i aria-hidden="true" class="ri-close-line"></i></button
-          ><kbd>Ctrl A</kbd>
+            <i aria-hidden="true" class="ri-close-line"></i>
+          </button>
         </div>
         <LanguageSelect :disabled="busy" />
         <button
@@ -1786,7 +2073,34 @@ onBeforeUnmount(() => {
             >{{ uploadPercent(runningUpload.progress) }}%</small
           >
         </button>
-        <span class="direct-badge"
+        <div
+          v-if="(settings.profiles?.length ?? 0) > 1"
+          class="quick-connection"
+          :aria-busy="switchingProfile"
+        >
+          <i
+            aria-hidden="true"
+            :class="
+              switchingProfile ? 'ri-loader-4-line spinning' : 'ri-cloud-line'
+            "
+          ></i>
+          <select
+            :value="settings.activeProfileId"
+            :title="settings.name"
+            :aria-label="t('Активное подключение')"
+            :disabled="busy || switchingProfile || pendingUploads > 0"
+            @change="switchConnection"
+          >
+            <option
+              v-for="profile in settings.profiles"
+              :key="profile.id"
+              :value="profile.id"
+            >
+              {{ profile.name }}
+            </option>
+          </select>
+        </div>
+        <span v-else class="direct-badge"
           ><span
             class="status-dot"
             :class="{ connected: settings.configured }"
@@ -1808,7 +2122,7 @@ onBeforeUnmount(() => {
           class="avatar"
           :title="t('Настройки подключения')"
           :aria-label="t('Настройки подключения')"
-          :disabled="busy"
+          :disabled="busy || switchingProfile"
           @click="settingsOpen = true"
         >
           J
@@ -1889,18 +2203,9 @@ onBeforeUnmount(() => {
           </div>
           <header class="page-header">
             <div>
-              <span v-if="!isTimeline" class="eyebrow">{{
-                section === "trash"
-                  ? t("МОЖНО ВОССТАНОВИТЬ")
-                  : t("ВСЁ НА СВОИХ МЕСТАХ")
-              }}</span>
               <h1>{{ title }}</h1>
-              <p>
-                {{
-                  settings.configured
-                    ? listingSummary
-                    : t("Пространство для ваших файлов, фотографий и идей")
-                }}
+              <p v-if="settings.configured && listingSummary">
+                {{ listingSummary }}
               </p>
             </div>
             <div v-if="!isTimeline" class="page-actions">
@@ -1981,12 +2286,8 @@ onBeforeUnmount(() => {
                         ? 'ri-checkbox-fill'
                         : 'ri-checkbox-blank-line'
                     "
-                  ></i></button
-                ><span>{{
-                  selection.length
-                    ? t("Выбрано: {0}", { "0": selection.length })
-                    : t("Файлы")
-                }}</span>
+                  ></i>
+                </button>
               </div>
               <div>
                 <select v-model="sort" :aria-label="t('Сортировка')">
@@ -2107,13 +2408,6 @@ onBeforeUnmount(() => {
                 <i aria-hidden="true" class="ri-list-check"></i>
               </button>
             </div>
-            <span v-if="view === 'gallery'"
-              ><i aria-hidden="true" class="ri-aspect-ratio-line"></i
-              >{{ t("Исходные пропорции · без обрезки") }}</span
-            >
-            <span v-else>{{
-              view === "list" ? t("Файлы списком") : t("Превью файлов")
-            }}</span>
             <label v-if="view !== 'list'"
               >{{ t("Размер превью")
               }}<input
@@ -2133,6 +2427,7 @@ onBeforeUnmount(() => {
           :class="{
             'selecting-files': !!selectionBox,
             'timeline-scroll': isTimeline,
+            'gallery-scroll': !isTimeline && view === 'gallery',
           }"
           :tabindex="isTimeline ? 0 : undefined"
           :aria-label="isTimeline ? t('Медиалента') : undefined"
@@ -2250,104 +2545,125 @@ onBeforeUnmount(() => {
             </template>
             <div
               v-else
+              ref="fileListElement"
               :key="scope"
               class="files"
               :class="view"
-              :style="{ '--preview-size': `${previewSize}px` }"
-              :aria-busy="loading"
+              :style="{
+                '--preview-size': `${previewSize}px`,
+                '--gallery-gap': `${galleryGap}px`,
+              }"
+              :aria-busy="loading || galleryPending"
             >
-              <article
-                v-for="file in files"
-                :key="file.id"
-                class="file-card"
-                :data-file-id="file.id"
-                :class="{
-                  selected: highlightedIds.has(file.id),
-                  'drag-source':
-                    draggedItems?.kind === 'files' &&
-                    draggedItems.ids.includes(file.id),
-                }"
-                :draggable="!busy && !file.trashed_at"
-                @dragstart.stop="fileDragStart($event, file)"
-                tabindex="0"
-                @click="select(file, $event)"
-                @dblclick="openPreview(file)"
-                @contextmenu="fileContext($event, file)"
-                @keydown.enter="openPreview(file)"
-                @keydown.space.self.prevent="select(file, $event, true)"
+              <div
+                v-for="group in fileGroups"
+                :key="group.key"
+                :class="group.height ? 'gallery-row' : 'catalog-file-group'"
+                :style="
+                  group.height
+                    ? { '--gallery-thumb-height': `${group.height}px` }
+                    : undefined
+                "
               >
-                <div class="thumb-wrap">
-                  <FileThumb
-                    :file="file"
-                    :compact="view === 'list'"
-                    :natural="view === 'gallery'"
-                  /><button
-                    class="file-checkbox"
-                    :class="{ checked: highlightedIds.has(file.id) }"
-                    :aria-label="t('Выбрать {0}', { '0': file.name })"
-                    :aria-pressed="selectedIds.has(file.id)"
-                    @click.stop="select(file, $event, true)"
-                  >
-                    <i
-                      aria-hidden="true"
-                      :class="
-                        highlightedIds.has(file.id)
-                          ? 'ri-checkbox-fill'
-                          : 'ri-checkbox-blank-line'
-                      "
-                    ></i></button
-                  ><button
-                    class="favorite-button"
-                    :class="{ starred: file.favorite }"
-                    :disabled="busy"
-                    :aria-label="
-                      file.favorite
-                        ? t('Убрать из избранного')
-                        : t('В избранное')
-                    "
-                    @click.stop="patch([file.id], { favorite: !file.favorite })"
-                  >
-                    <i
-                      aria-hidden="true"
-                      :class="file.favorite ? 'ri-star-fill' : 'ri-star-line'"
-                    ></i>
-                  </button>
-                </div>
-                <div class="file-info">
-                  <div class="file-name" :title="file.name">
-                    <i
-                      aria-hidden="true"
-                      :class="icon(file.mime_type, file.name)"
-                    ></i
-                    ><span>{{ file.name }}</span>
-                  </div>
-                  <small v-if="view !== 'list'"
-                    >{{ bytes(file.size_bytes) }}<span>·</span
-                    >{{ date(file.created_at) }}</small
-                  >
-                  <div
-                    v-if="file.tags.length && view !== 'list'"
-                    class="tag-chips"
-                  >
-                    <span v-for="name in file.tags.slice(0, 3)" :key="name">{{
-                      name
-                    }}</span>
-                  </div>
-                </div>
-                <span v-if="view === 'list'" class="list-meta">{{
-                  bytes(file.size_bytes)
-                }}</span><span v-if="view === 'list'" class="list-meta">{{
-                  date(file.created_at)
-                }}</span
-                ><button
-                  class="file-open icon-button small"
-                  :title="t('Открыть')"
-                  :aria-label="t('Открыть файл')"
-                  @click.stop="openPreview(file)"
+                <article
+                  v-for="{ file, width } in group.tiles"
+                  :key="file.id"
+                  class="file-card"
+                  :data-file-id="file.id"
+                  :style="
+                    width === undefined ? undefined : { width: `${width}px` }
+                  "
+                  :class="{
+                    selected: highlightedIds.has(file.id),
+                    'drag-source':
+                      draggedItems?.kind === 'files' &&
+                      draggedItems.ids.includes(file.id),
+                  }"
+                  :draggable="!busy && !file.trashed_at"
+                  @dragstart.stop="fileDragStart($event, file)"
+                  tabindex="0"
+                  @click="select(file, $event)"
+                  @dblclick="openPreview(file)"
+                  @contextmenu="fileContext($event, file)"
+                  @keydown.enter="openPreview(file)"
+                  @keydown.space.self.prevent="select(file, $event, true)"
                 >
-                  <i aria-hidden="true" class="ri-arrow-right-up-line"></i>
-                </button>
-              </article>
+                  <div class="thumb-wrap">
+                    <FileThumb
+                      :file="file"
+                      :compact="view === 'list'"
+                      :contained="view === 'gallery'"
+                      @dimensions="rememberGalleryDimensions(file, $event)"
+                    /><button
+                      class="file-checkbox"
+                      :class="{ checked: highlightedIds.has(file.id) }"
+                      :aria-label="t('Выбрать {0}', { '0': file.name })"
+                      :aria-pressed="selectedIds.has(file.id)"
+                      @click.stop="select(file, $event, true)"
+                    >
+                      <i
+                        aria-hidden="true"
+                        :class="
+                          highlightedIds.has(file.id)
+                            ? 'ri-checkbox-fill'
+                            : 'ri-checkbox-blank-line'
+                        "
+                      ></i></button
+                    ><button
+                      class="favorite-button"
+                      :class="{ starred: file.favorite }"
+                      :disabled="busy"
+                      :aria-label="
+                        file.favorite
+                          ? t('Убрать из избранного')
+                          : t('В избранное')
+                      "
+                      @click.stop="
+                        patch([file.id], { favorite: !file.favorite })
+                      "
+                    >
+                      <i
+                        aria-hidden="true"
+                        :class="file.favorite ? 'ri-star-fill' : 'ri-star-line'"
+                      ></i>
+                    </button>
+                  </div>
+                  <div class="file-info">
+                    <div class="file-name" :title="file.name">
+                      <i
+                        aria-hidden="true"
+                        :class="icon(file.mime_type, file.name)"
+                      ></i
+                      ><span>{{ file.name }}</span>
+                    </div>
+                    <small v-if="view !== 'list'"
+                      >{{ bytes(file.size_bytes) }}<span>·</span
+                      >{{ date(file.created_at) }}</small
+                    >
+                    <div
+                      v-if="file.tags.length && view !== 'list'"
+                      class="tag-chips"
+                    >
+                      <span v-for="name in file.tags.slice(0, 3)" :key="name">{{
+                        name
+                      }}</span>
+                    </div>
+                  </div>
+                  <span v-if="view === 'list'" class="list-meta">{{
+                    bytes(file.size_bytes)
+                  }}</span><span v-if="view === 'list'" class="list-meta">{{
+                    date(file.created_at)
+                  }}</span
+                  ><button
+                    class="file-open icon-button small"
+                    :title="t('Открыть')"
+                    :aria-label="t('Открыть файл')"
+                    @click.stop="openPreview(file)"
+                  >
+                    <i aria-hidden="true" class="ri-arrow-right-up-line"></i>
+                  </button>
+                </article>
+              </div>
             </div>
             <div
               v-if="!files.length && !childFolders.length && !loading"
@@ -2452,10 +2768,13 @@ onBeforeUnmount(() => {
           </template>
         </div>
         <TimelineScale
-          v-if="isTimeline && knownTimelineBounds"
+          v-if="isTimeline && settings.configured"
           :bounds="knownTimelineBounds"
           :active-day="timelineDay"
+          :loading="timelineBoundsState === 'loading' || loading"
+          :failed="timelineBoundsState === 'failed'"
           @jump="jumpTimeline"
+          @retry="refreshTimelineBounds"
         />
       </section>
       <footer class="workspace-footer">
@@ -2555,8 +2874,9 @@ onBeforeUnmount(() => {
 
   <UploadPanel
     v-if="uploadsOpen"
+    :inert="switchingProfile || undefined"
     :class="{
-      'upload-panel-next-to-timeline': isTimeline && knownTimelineBounds,
+      'upload-panel-next-to-timeline': isTimeline && settings.configured,
       'upload-panel-next-to-inspector':
         isTimeline && selectedFile && inspectorOpen,
     }"
@@ -2598,7 +2918,8 @@ onBeforeUnmount(() => {
     :locked="pendingUploads > 0"
     @close="settingsOpen = false"
     @saved="saved"
-    @disconnected="disconnected"
+    @selected="selectedConnection"
+    @removed="removedConnection"
   />
   <div v-if="modal" class="overlay" @click.self="!busy && (modal = null)">
     <form
@@ -2709,7 +3030,7 @@ onBeforeUnmount(() => {
   <div
     v-if="preview"
     class="preview-overlay"
-    :inert="editing || undefined"
+    :inert="editing || !!modal || undefined"
     role="dialog"
     aria-modal="true"
     :aria-label="t('Просмотр файла')"
@@ -2739,10 +3060,39 @@ onBeforeUnmount(() => {
         ><button
           v-if="isImageFile(preview)"
           class="button"
+          :disabled="busy || previewPageLoading"
           @click="editing = !editing"
         >
           <i aria-hidden="true" class="ri-equalizer-line"></i
           >{{ t("Коррекция") }}</button
+        ><button
+          v-if="photo"
+          ref="previewTagsButton"
+          class="icon-button"
+          :aria-expanded="previewTagsOpen"
+          :aria-label="t('Теги')"
+          :title="t('Теги')"
+          @click="previewTagsOpen = !previewTagsOpen"
+        >
+          <i aria-hidden="true" class="ri-price-tag-3-line"></i></button
+        ><button
+          v-if="photo && !preview.trashed_at"
+          class="icon-button"
+          :disabled="busy || previewPageLoading"
+          :aria-label="t('Создать дубликат')"
+          :title="t('Создать дубликат')"
+          @click="duplicatePreviewPhoto"
+        >
+          <i aria-hidden="true" class="ri-file-copy-line"></i></button
+        ><button
+          v-if="photo"
+          class="icon-button preview-delete"
+          :disabled="busy || previewPageLoading"
+          :aria-label="t(preview.trashed_at ? 'Удалить навсегда' : 'В корзину')"
+          :title="t(preview.trashed_at ? 'Удалить навсегда' : 'В корзину')"
+          @click="deletePreviewPhoto()"
+        >
+          <i aria-hidden="true" class="ri-delete-bin-6-line"></i></button
         ><button
           class="icon-button"
           :disabled="busy"
@@ -2769,6 +3119,7 @@ onBeforeUnmount(() => {
     <div class="preview-body">
       <button
         class="preview-arrow previous"
+        :disabled="busy || previewPageLoading"
         :aria-label="t('Предыдущий файл')"
         @click="nextPreview(-1)"
       >
@@ -2794,10 +3145,28 @@ onBeforeUnmount(() => {
         </div>
         <template v-else-if="photo">
           <div
-            ref="photoStage"
-            class="photo-frame"
+            ref="photoViewport"
+            class="photo-viewport"
+            :class="{
+              'photo-zoomed': photoScale > 1,
+              'photo-panning': photoPanning,
+            }"
             :aria-hidden="photoLoading || undefined"
-          ></div>
+            @wheel.prevent="!photoLoading && photoZoom.wheel($event)"
+            @dblclick="!photoLoading && photoZoom.toggle($event)"
+            @pointerdown="!photoLoading && photoZoom.start($event)"
+            @pointermove="photoZoom.move"
+            @pointerup="photoZoom.stop"
+            @pointercancel="photoZoom.stop"
+            @lostpointercapture="photoZoom.stop"
+            @dragstart.prevent
+          >
+            <div
+              ref="photoStage"
+              class="photo-frame"
+              :style="{ transform: photoTransform }"
+            ></div>
+          </div>
           <div
             v-if="photoLoading"
             class="loading-state photo-loading"
@@ -2855,7 +3224,7 @@ onBeforeUnmount(() => {
         class="preview-arrow next"
         :aria-label="t('Следующий файл')"
         :aria-busy="previewPageLoading"
-        :disabled="previewPageLoading"
+        :disabled="busy || previewPageLoading"
         @click="nextPreview(1)"
       >
         <i
@@ -2867,14 +3236,62 @@ onBeforeUnmount(() => {
           "
         ></i>
       </button>
+      <PreviewTags
+        v-if="photo && previewTagsOpen"
+        :key="preview.id"
+        :tags="preview.tags"
+        :known="stats.tags"
+        :busy="busy || previewPageLoading"
+        :save="savePreviewTags"
+        @close="closePreviewTags"
+      />
     </div>
     <footer class="preview-footer">
-      <span
-        >{{ files.findIndex((f) => f.id === preview?.id) + 1 }} /
+      <span v-if="previewIndex >= 0"
+        >{{ previewIndex + 1 }} /
         {{ t("{0} загруженных файлов", { "0": files.length }) }}</span
-      ><span v-if="notice">{{ notice }}</span
-      ><span v-if="error" class="error">{{ error }}</span
-      ><span>{{
+      ><span v-if="notice" role="status">{{ notice }}</span
+      ><span v-if="error" class="error" role="alert">{{ error }}</span>
+      <div
+        v-if="photo"
+        class="photo-zoom"
+        role="group"
+        :aria-label="t('Масштаб фото')"
+      >
+        <button
+          class="icon-button small"
+          :disabled="photoScale <= 1 || photoLoading"
+          :title="t('Уменьшить фото')"
+          :aria-label="t('Уменьшить фото')"
+          @click="photoZoom.zoomBy(-1)"
+        >
+          <i aria-hidden="true" class="ri-subtract-line"></i>
+        </button>
+        <button
+          class="photo-zoom-reset"
+          :title="t('Сбросить масштаб')"
+          :aria-label="t('Сбросить масштаб')"
+          :disabled="photoScale <= 1"
+          @click="photoZoom.reset"
+        >
+          {{ Math.round(photoScale * 100) }}%
+        </button>
+        <button
+          class="icon-button small"
+          :disabled="
+            photoScale >= photoZoom.maxScale ||
+            !photoFrame ||
+            photoLoading ||
+            !!photoError
+          "
+          :title="t('Увеличить фото')"
+          :aria-label="t('Увеличить фото')"
+          @click="photoZoom.zoomBy(1)"
+        >
+          <i aria-hidden="true" class="ri-add-line"></i>
+        </button>
+      </div>
+      <span>{{
         preview.mime_type.startsWith("video/")
           ? t("Пробел: пауза · ← →: перемотка · Shift+S: кадр · Esc: выход")
           : t("← → для переключения · Esc для выхода")

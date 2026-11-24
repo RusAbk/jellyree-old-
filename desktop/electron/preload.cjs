@@ -10,7 +10,8 @@ contextBridge.exposeInMainWorld("jellyree", {
     get: () => invoke("settings:get"),
     test: (input) => invoke("settings:test", input),
     save: (input) => invoke("settings:save", input),
-    clear: () => invoke("settings:clear"),
+    select: (id) => invoke("settings:select", id),
+    clear: (id) => invoke("settings:clear", id),
   },
   list: (input) => invoke("files:list", input),
   timelineBounds: () => invoke("files:timeline-bounds"),
@@ -27,6 +28,8 @@ contextBridge.exposeInMainWorld("jellyree", {
     invoke("files:save-text-document", id, expectedObjectKey, data),
   setDocumentDraft: (owner, dirty) => invoke("documents:draft", owner, dirty),
   videoSource: (revision) => invoke("files:video-source", revision),
+  duplicatePhoto: (id, expectedObjectKey) =>
+    invoke("files:duplicate-photo", id, expectedObjectKey),
   saveVideoFrame: (id, expectedObjectKey, timestamp, data) =>
     invoke("files:save-video-frame", id, expectedObjectKey, timestamp, data),
   downloadVideoFrame: (id, expectedObjectKey, timestamp, data) =>
@@ -39,6 +42,7 @@ contextBridge.exposeInMainWorld("jellyree", {
     ),
   thumbnails: {
     get: (revision) => invoke("thumbnails:get", revision),
+    dimensions: (revisions) => invoke("thumbnails:dimensions", revisions),
     put: (revision, entry, epoch) =>
       invoke("thumbnails:put", revision, entry, epoch),
     source: (revision, requestId) =>

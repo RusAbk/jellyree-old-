@@ -1,11 +1,16 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { computed, ref, watch } from "vue";
 import { localeCode, t } from "./i18n";
 import { monthIndex, monthStart } from "./timeline-dates";
 import type { TimelineBounds } from "./types";
 
-const props = defineProps<{ bounds: TimelineBounds; activeDay?: number }>();
-const emit = defineEmits<{ jump: [number] }>();
+const props = defineProps<{
+  bounds: TimelineBounds | null;
+  activeDay?: number;
+  loading: boolean;
+  failed: boolean;
+}>();
+const emit = defineEmits<{ jump: [number]; retry: [] }>();
 const track = ref<HTMLElement>();
 const height = ref(0);
 const zoom = ref(0);
@@ -20,9 +25,10 @@ const fullMonth = computed(
   () =>
     new Intl.DateTimeFormat(localeCode(), { month: "long", year: "numeric" }),
 );
-const getMonth = (value: string | null) => monthIndex(new Date(value ?? NaN));
-const first = computed(() => getMonth(props.bounds.oldest));
-const last = computed(() => getMonth(props.bounds.newest));
+const getMonth = (value?: string | null) =>
+  value ? monthIndex(new Date(value)) : monthIndex(new Date());
+const first = computed(() => getMonth(props.bounds?.oldest));
+const last = computed(() => getMonth(props.bounds?.newest));
 const active = computed(() =>
   props.activeDay === undefined
     ? last.value
@@ -94,15 +100,18 @@ watch([active, first, last], () => {
 watch(active, () => {
   keyboardTarget.value = undefined;
 });
-let observer: ResizeObserver | undefined;
-onMounted(() => {
-  if (!track.value) return;
-  observer = new ResizeObserver(([entry]) => {
-    height.value = entry?.contentRect.height ?? 0;
-  });
-  observer.observe(track.value);
-});
-onBeforeUnmount(() => observer?.disconnect());
+watch(
+  track,
+  (element, _, onCleanup) => {
+    if (!element) return;
+    const observer = new ResizeObserver(([entry]) => {
+      height.value = entry?.contentRect.height ?? 0;
+    });
+    observer.observe(element);
+    onCleanup(() => observer.disconnect());
+  },
+  { flush: "post" },
+);
 
 function zoomBy(direction: number) {
   center.value = active.value;
@@ -165,8 +174,35 @@ function keydown(event: KeyboardEvent) {
     :aria-label="t('Временная шкала')"
     @contextmenu.stop
   >
-    <output class="timeline-current">{{ label }}</output>
-    <div ref="track" class="timeline-track">
+    <header class="timeline-heading">
+      <span>{{ t("Временная шкала") }}</span>
+      <div v-if="bounds" class="timeline-date">
+        <output class="timeline-current" :title="label">{{ label }}</output>
+        <button
+          v-if="failed"
+          class="icon-button small"
+          :title="t('Повторить')"
+          :aria-label="t('Повторить')"
+          @click="emit('retry')"
+        >
+          <i aria-hidden="true" class="ri-refresh-line"></i>
+        </button>
+      </div>
+    </header>
+    <div v-if="!bounds" class="timeline-track timeline-empty">
+      <div class="timeline-axis" aria-hidden="true"></div>
+      <span role="status">{{
+        t(loading ? "Загрузка дат…" : failed ? "Даты недоступны" : "Нет дат")
+      }}</span>
+      <button
+        v-if="failed && !loading"
+        class="text-button"
+        @click="emit('retry')"
+      >
+        {{ t("Повторить") }}
+      </button>
+    </div>
+    <div v-else ref="track" class="timeline-track">
       <div class="timeline-axis" aria-hidden="true"></div>
       <div
         class="timeline-scrubber"
@@ -206,7 +242,7 @@ function keydown(event: KeyboardEvent) {
         {{ mark.text }}
       </button>
     </div>
-    <div class="timeline-zoom">
+    <div v-if="bounds" class="timeline-zoom">
       <button
         class="icon-button small"
         :aria-label="t('Уменьшить масштаб шкалы')"

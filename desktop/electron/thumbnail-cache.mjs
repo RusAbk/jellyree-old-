@@ -3,6 +3,7 @@ import {
   mkdir,
   readdir,
   readFile,
+  open,
   writeFile,
   rename,
   unlink,
@@ -52,7 +53,7 @@ export function thumbnailKey(namespace, revision) {
     )
     .digest("hex");
 }
-function validEntry(entry) {
+function validDimensions(entry) {
   return (
     entry &&
     Number.isInteger(entry.width) &&
@@ -60,7 +61,12 @@ function validEntry(entry) {
     entry.width <= 100000 &&
     Number.isInteger(entry.height) &&
     entry.height > 0 &&
-    entry.height <= 100000 &&
+    entry.height <= 100000
+  );
+}
+function validEntry(entry) {
+  return (
+    validDimensions(entry) &&
     Number.isFinite(entry.duration) &&
     entry.duration >= 0 &&
     entry.duration < 1e9 &&
@@ -151,6 +157,7 @@ export class ThumbnailCache {
             data: new Uint8Array(file.subarray(separator + 1)),
           };
         if (!validEntry(entry)) throw new Error("Invalid thumbnail");
+        info.dimensions = { width: entry.width, height: entry.height };
         info.touched = this.now();
         if (info.touched - info.persisted > 60000) {
           info.persisted = info.touched;
@@ -192,9 +199,55 @@ export class ThumbnailCache {
         size: file.length,
         touched: this.now(),
         persisted: this.now(),
+        dimensions: { width: entry.width, height: entry.height },
       });
       await this.prune();
       return true;
+    });
+  }
+  dimensions(keys, signal) {
+    return this.run(async () => {
+      const results = [];
+      for (let offset = 0; offset < keys.length; offset += 16) {
+        signal?.throwIfAborted();
+        const batch = await Promise.all(
+          keys.slice(offset, offset + 16).map(async (key) => {
+            const name = this.name(key);
+            const info = this.entries.get(name);
+            if (!info) return null;
+            if (info.dimensions !== undefined) return info.dimensions;
+            try {
+              const file = await open(path.join(this.directory, name), "r");
+              try {
+                const header = Buffer.alloc(1025);
+                const { bytesRead } = await file.read(
+                  header,
+                  0,
+                  header.length,
+                  0,
+                );
+                const separator = header.subarray(0, bytesRead).indexOf(10);
+                if (separator < 0) return null;
+                const decoded = JSON.parse(
+                  header.subarray(0, separator).toString(),
+                );
+                if (validDimensions(decoded))
+                  info.dimensions = {
+                    width: decoded.width,
+                    height: decoded.height,
+                  };
+                return info.dimensions ?? null;
+              } finally {
+                await file.close();
+              }
+            } catch {
+              return null;
+            }
+          }),
+        );
+        results.push(...batch);
+      }
+      return results;
     });
   }
   stats() {
@@ -204,9 +257,12 @@ export class ThumbnailCache {
       maxBytes: this.maxBytes,
     }));
   }
+  invalidateWrites() {
+    this.epoch++;
+  }
   clear() {
     return this.run(async () => {
-      this.epoch++;
+      this.invalidateWrites();
       for (const name of [...this.entries.keys()]) await this.remove(name);
       return { count: 0, bytes: 0, maxBytes: this.maxBytes };
     });

@@ -15,6 +15,20 @@ export const messages = {
   },
   Медиалента: { en: "Media timeline", es: "Cronología multimedia" },
   "Временная шкала": { en: "Timeline", es: "Línea de tiempo" },
+  "Загрузка дат…": { en: "Loading dates…", es: "Cargando fechas…" },
+  "Даты недоступны": { en: "Dates unavailable", es: "Fechas no disponibles" },
+  "Нет дат": { en: "No dates", es: "Sin fechas" },
+  "Масштаб фото": { en: "Photo zoom", es: "Zoom de la foto" },
+  "Уменьшить фото": { en: "Zoom out photo", es: "Alejar foto" },
+  "Увеличить фото": { en: "Zoom in photo", es: "Acercar foto" },
+  "Добавить тег": { en: "Add tag", es: "Añadir etiqueta" },
+  "Удалить тег «{0}»": { en: "Remove tag “{0}”", es: "Quitar etiqueta «{0}»" },
+  "Создать дубликат": { en: "Create duplicate", es: "Crear duplicado" },
+  "Дубликат создан.": { en: "Duplicate created.", es: "Duplicado creado." },
+  "Изображение изменилось. Откройте его заново.": {
+    en: "The image changed. Open it again.",
+    es: "La imagen ha cambiado. Vuelve a abrirla.",
+  },
   "Дата на временной шкале": {
     en: "Date on timeline",
     es: "Fecha en la línea de tiempo",
@@ -245,6 +259,32 @@ export const messages = {
   "Подключение удалено с устройства.": {
     en: "Connection removed from this device.",
     es: "Conexión eliminada de este dispositivo.",
+  },
+  "Открыто подключение «{0}».": {
+    en: "Opened “{0}”.",
+    es: "Se abrió la conexión «{0}».",
+  },
+  Подключения: { en: "Connections", es: "Conexiones" },
+  Активное: { en: "Active", es: "Activa" },
+  "Активное подключение": { en: "Active connection", es: "Conexión activa" },
+  "Новое подключение": { en: "New connection", es: "Nueva conexión" },
+  "Открыть подключение": { en: "Open connection", es: "Abrir conexión" },
+  "Название подключения": {
+    en: "Connection name",
+    es: "Nombre de la conexión",
+  },
+  "По имени бакета": { en: "Use bucket name", es: "Usar nombre del bucket" },
+  "Подключение не найдено.": {
+    en: "Connection not found.",
+    es: "No se encontró la conexión.",
+  },
+  "Не удалось прочитать сохранённые подключения.": {
+    en: "Could not read the saved connections.",
+    es: "No se pudieron leer las conexiones guardadas.",
+  },
+  "Укажите название подключения до 80 символов.": {
+    en: "Use up to 80 characters for the connection name.",
+    es: "Usa hasta 80 caracteres para el nombre de la conexión.",
   },
   "Откройте приложение через Electron: npm run dev или npm start.": {
     en: "Open the app through Electron: npm run dev or npm start.",

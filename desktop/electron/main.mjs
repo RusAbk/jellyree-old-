@@ -11,8 +11,9 @@ import {
   net,
 } from "electron";
 import path from "node:path";
+import { rm } from "node:fs/promises";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { ConfigStore } from "./config.mjs";
+import { ConfigStore, libraryId } from "./config.mjs";
 import { Library } from "./library.mjs";
 import { isImageFile } from "./image-formats.mjs";
 import { UploadConflictBroker } from "./upload-conflicts.mjs";
@@ -38,11 +39,26 @@ const thumbnailMedia = new ThumbnailMedia((url, options) =>
 let thumbnailCache;
 const previewRequests = new Map();
 const cacheNamespace = () => `${library.id}:${library.config.databaseId}`;
+const connectionReads = new Set([
+  "files:list",
+  "files:timeline-bounds",
+  "files:url",
+  "files:image-source",
+  "files:document-source",
+  "files:video-source",
+  "folders:list",
+  "stats",
+  "thumbnails:get",
+  "thumbnails:dimensions",
+  "thumbnails:put",
+  "thumbnails:source",
+]);
 const catalogMutations = new Set([
   "files:update",
   "files:delete",
   "files:save-text-document",
   "files:save-video-frame",
+  "files:duplicate-photo",
   "files:pick-upload",
   "files:drop-upload",
   "files:retry-upload",
@@ -66,28 +82,36 @@ let window,
   store,
   library,
   activeOperations = 0,
+  blockingOperations = 0,
+  operationsDrained,
   changingConnection = false,
   transfer = false;
 let startupError = "";
-const redact = (message) => {
-  let result = String(message);
-  for (const key of ["apiToken", "accessKeyId", "secretAccessKey"])
-    if (store?.current?.[key])
-      result = result.replaceAll(store.current[key], t("[скрыто]"));
-  return result;
-};
+const redact = (message, input) =>
+  store?.redact(message, input) ?? String(message);
+const catalogFilename = (config) =>
+  path.join(
+    app.getPath("userData"),
+    "catalog-v1",
+    `${libraryId(config)}-${config.databaseId}.sqlite`,
+  );
 function enableCatalogCache(source) {
-  const name = `${source.id}-${source.config.databaseId}.sqlite`;
   try {
-    source.enableCatalogCache(
-      path.join(app.getPath("userData"), "catalog-v1", name),
-    );
+    source.enableCatalogCache(catalogFilename(source.config));
   } catch (error) {
     console.warn(
       "Could not open the local catalog cache:",
       redact(error.message),
     );
   }
+}
+function useLibrary(candidate) {
+  library?.close();
+  if (candidate) enableCatalogCache(candidate);
+  library = candidate;
+  thumbnailCache.invalidateWrites();
+  thumbnailMedia.clear();
+  startupError = "";
 }
 async function previewRequest(id, operation, timeoutMs = 45000) {
   if (id !== undefined && (typeof id !== "string" || !id || id.length > 128))
@@ -133,17 +157,28 @@ function handle(name, fn, needsLibrary = true) {
     try {
       if (needsLibrary && (!library || changingConnection))
         throw new Error(t("Подключите хранилище в настройках."));
+      const blocking = needsLibrary && !connectionReads.has(name);
       if (needsLibrary) activeOperations++;
+      if (blocking) blockingOperations++;
       try {
         return { ok: true, value: await fn(...args) };
       } finally {
         if (catalogMutations.has(name)) library?.catalog?.invalidate();
-        if (needsLibrary) activeOperations--;
+        if (blocking) blockingOperations--;
+        if (needsLibrary && --activeOperations === 0) {
+          operationsDrained?.();
+          operationsDrained = undefined;
+        }
       }
     } catch (error) {
       return {
         ok: false,
-        error: redact(error.message || t("Операция не выполнена.")),
+        error: redact(
+          error.message || t("Операция не выполнена."),
+          name === "settings:save" || name === "settings:test"
+            ? args[0]
+            : undefined,
+        ),
       };
     }
   });
@@ -153,10 +188,15 @@ async function connectionOperation(fn) {
     throw new Error(
       t("Сначала сохраните или закройте редактируемый документ."),
     );
-  if (activeOperations || changingConnection)
+  if (blockingOperations || changingConnection)
     throw new Error(t("Дождитесь завершения текущих операций."));
   changingConnection = true;
   try {
+    for (const controller of previewRequests.values()) controller.abort();
+    if (activeOperations)
+      await new Promise((resolve) => {
+        operationsDrained = resolve;
+      });
     return await fn();
   } finally {
     changingConnection = false;
@@ -275,12 +315,28 @@ function registerHandlers() {
         try {
           await candidate.check();
           await candidate.initialize();
-          const summary = await store.save(config);
-          library?.close();
-          enableCatalogCache(candidate);
-          library = candidate;
-          thumbnailMedia.clear();
-          startupError = "";
+          const summary = await store.save(config, input);
+          useLibrary(candidate);
+          return summary;
+        } catch (error) {
+          candidate.close();
+          throw error;
+        }
+      }),
+    false,
+  );
+  handle(
+    "settings:select",
+    (id) =>
+      connectionOperation(async () => {
+        if (id === store.activeId && library) return store.summary();
+        const config = store.connection(id);
+        if (!config || typeof id !== "string")
+          throw new Error(t("Подключение не найдено."));
+        const candidate = new Library(config);
+        try {
+          const summary = await store.select(id);
+          useLibrary(candidate);
           return summary;
         } catch (error) {
           candidate.close();
@@ -291,14 +347,21 @@ function registerHandlers() {
   );
   handle(
     "settings:clear",
-    () =>
+    (id = store.activeId) =>
       connectionOperation(async () => {
-        await store.clear();
-        const previous = library;
-        library = null;
-        previous?.close(true);
-        thumbnailMedia.clear();
-        return { configured: false, persisted: false };
+        const removed = store.connection(id);
+        const wasActive = id === store.activeId;
+        const summary = await store.clear(id);
+        if (wasActive)
+          useLibrary(store.current ? new Library(store.current) : null);
+        if (removed && !store.usesLibrary(removed))
+          await rm(catalogFilename(removed), { force: true }).catch((error) => {
+            console.warn(
+              "Could not remove the catalog cache:",
+              redact(error.message),
+            );
+          });
+        return summary;
       }),
     false,
   );
@@ -362,6 +425,9 @@ function registerHandlers() {
     await resolve();
     return thumbnailMedia.create(resolve);
   });
+  handle("files:duplicate-photo", (id, expectedObjectKey) =>
+    uploads.run(() => library.duplicatePhoto(id, expectedObjectKey)),
+  );
   handle("files:save-video-frame", (id, expectedObjectKey, timestamp, data) =>
     uploads.run(() =>
       library.saveVideoFrame(id, expectedObjectKey, timestamp, data),
@@ -399,6 +465,17 @@ function registerHandlers() {
       5000,
     ),
   );
+  handle("thumbnails:dimensions", (revisions) => {
+    if (!Array.isArray(revisions) || revisions.length > 160)
+      throw new TypeError("Invalid thumbnail revisions");
+    const namespace = cacheNamespace();
+    const keys = revisions.map((revision) => thumbnailKey(namespace, revision));
+    return previewRequest(
+      undefined,
+      (signal) => thumbnailCache.dimensions(keys, signal),
+      1200,
+    );
+  });
   handle("thumbnails:put", (revision, entry, epoch) =>
     previewRequest(
       undefined,

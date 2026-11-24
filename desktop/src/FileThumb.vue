@@ -6,8 +6,12 @@ import { fileExtensionBadge, icon, imageStyle } from "./format";
 import { api } from "./api";
 import { runThumbnailPreview, videoDuration } from "./video-preview";
 import ProcessedImage from "./ProcessedImage.vue";
-import { needsImageProcessing } from "../electron/image-adjustments.mjs";
-import { thumbnailRevision, thumbnailBytes } from "./thumbnail";
+import {
+  thumbnailRevision,
+  thumbnailBytes,
+  thumbnailGeometry,
+  usesProcessedThumbnail,
+} from "./thumbnail";
 import {
   isImageFile,
   isHeicFile,
@@ -17,6 +21,10 @@ const props = defineProps<{
   file: DriveFile;
   compact?: boolean;
   natural?: boolean;
+  contained?: boolean;
+}>();
+const emit = defineEmits<{
+  dimensions: [dimensions: { width: number; height: number }];
 }>();
 const isPxz = computed(() => isPxzFile(props.file));
 const isVideo = computed(
@@ -27,13 +35,11 @@ const isVideo = computed(
 );
 const isImage = computed(() => isPxz.value || isImageFile(props.file));
 const extension = computed(() => fileExtensionBadge(props.file.name));
-const processed = computed(
-  () =>
-    isPxz.value ||
-    (isImage.value &&
-      (isHeicFile(props.file) || needsImageProcessing(props.file.adjustments))),
-);
+const processed = computed(() => usesProcessedThumbnail(props.file));
 const dimensions = ref({ width: 0, height: 0 });
+watch(dimensions, (value) => {
+  if (value.width && value.height) emit("dimensions", value);
+});
 const revision = computed(() => thumbnailRevision(props.file));
 const cachedEntry = ref<ThumbnailEntry | null>(null);
 let cacheEpoch: number | null = null,
@@ -51,39 +57,36 @@ const url = ref(""),
 const durationLabel = computed(() => videoDuration(duration.value));
 const geometry = computed(() => {
   const { width, height } = dimensions.value;
-  if (!width || !height || !props.natural) return null;
-  const angle =
-    isVideo.value || processed.value
-      ? 0
-      : ((props.file.adjustments.rotate ?? 0) * Math.PI) / 180;
+  if (!width || !height || (!props.natural && !props.contained)) return null;
   return {
     width,
     height,
-    boundsWidth:
-      Math.abs(width * Math.cos(angle)) + Math.abs(height * Math.sin(angle)),
-    boundsHeight:
-      Math.abs(width * Math.sin(angle)) + Math.abs(height * Math.cos(angle)),
+    ...thumbnailGeometry(props.file, { width, height }),
   };
 });
 const frameStyle = computed(() =>
-  geometry.value
+  props.natural && geometry.value
     ? {
         aspectRatio: `${geometry.value.boundsWidth} / ${geometry.value.boundsHeight}`,
       }
     : {},
 );
-const thumbnailStyle = computed(() => ({
-  ...(isVideo.value || processed.value
-    ? {}
-    : imageStyle(props.file.adjustments)),
-  ...(geometry.value
-    ? {
-        width: `${(geometry.value.width / geometry.value.boundsWidth) * 100}%`,
-        height: `${(geometry.value.height / geometry.value.boundsHeight) * 100}%`,
-        transform: `translate(-50%, -50%) rotate(${isVideo.value || processed.value ? 0 : (props.file.adjustments.rotate ?? 0)}deg)`,
-      }
-    : {}),
-}));
+const thumbnailStyle = computed(() => {
+  const style =
+    isVideo.value || processed.value ? {} : imageStyle(props.file.adjustments);
+  if (!geometry.value) return style;
+  const { width, height, boundsWidth, boundsHeight, rotation } = geometry.value;
+  return {
+    ...style,
+    width: props.contained
+      ? `min(${(width / boundsWidth) * 100}cqw, ${(width / boundsHeight) * 100}cqh)`
+      : `${(width / boundsWidth) * 100}%`,
+    height: props.contained
+      ? `min(${(height / boundsWidth) * 100}cqw, ${(height / boundsHeight) * 100}cqh)`
+      : `${(height / boundsHeight) * 100}%`,
+    transform: `translate(-50%, -50%) rotate(${rotation}deg)`,
+  };
+});
 let observer: IntersectionObserver | undefined,
   disposed = false,
   visible = false,
@@ -474,6 +477,7 @@ onBeforeUnmount(() => {
       {
         compact,
         natural,
+        contained,
         'natural-loaded': !!geometry && !failed,
         'video-ready': videoReady,
       },
