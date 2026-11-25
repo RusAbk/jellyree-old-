@@ -89,18 +89,33 @@ const thumbnailStyle = computed(() => {
   };
 });
 let observer: IntersectionObserver | undefined,
+  scrollRoot: Element | null | undefined,
   disposed = false,
   visible = false,
   request = 0,
   seekRequested = false,
   capturing = false;
 let work: AbortController | undefined,
+  visibilityTimer: ReturnType<typeof setTimeout> | undefined,
   retryTimer: ReturnType<typeof setTimeout> | undefined,
   retries = 0,
   mediaUrl = "";
 let displaySignal: AbortSignal | undefined;
 let finishDisplay: ((error?: Error) => void) | undefined;
 const ready = ref(false);
+function isOnScreen() {
+  if (!visible || !root.value) return false;
+  if (!scrollRoot) return true;
+  // A queued job can start before the observer reports the latest scroll position.
+  const tile = root.value.getBoundingClientRect();
+  const viewport = scrollRoot.getBoundingClientRect();
+  return (
+    tile.bottom >= viewport.top &&
+    tile.top <= viewport.bottom &&
+    tile.right >= viewport.left &&
+    tile.left <= viewport.right
+  );
+}
 function releaseMedia(value: string) {
   if (value === mediaUrl) mediaUrl = "";
   if (
@@ -122,6 +137,7 @@ function releaseDecoder() {
 }
 function stop() {
   request++;
+  clearTimeout(visibilityTimer);
   clearTimeout(retryTimer);
   releaseDecoder();
   work?.abort();
@@ -129,7 +145,10 @@ function stop() {
   releaseMedia(mediaUrl);
   decoding.value = false;
   pending.value = false;
-  if (!ready.value) url.value = "";
+  if (!ready.value) {
+    url.value = "";
+    videoReady.value = false;
+  }
 }
 async function loadCached(current: () => boolean, signal: AbortSignal) {
   if (typeof window.jellyree.thumbnails?.get !== "function") return false;
@@ -318,7 +337,7 @@ function imageError() {
     ready.value = false;
     videoReady.value = false;
     url.value = "";
-    void fetchPreview(false);
+    if (visible) void fetchPreview(false);
   } else finishDisplay?.(new Error("Image preview failed"));
 }
 function retry() {
@@ -328,6 +347,7 @@ function retry() {
   if (visible) void fetchPreview(false);
 }
 async function fetchPreview(useCache = true) {
+  if (!isOnScreen()) return;
   const generation = ++request,
     controller = new AbortController();
   work = controller;
@@ -337,13 +357,13 @@ async function fetchPreview(useCache = true) {
   failed.value = false;
   try {
     if (useCache && (await loadCached(current, controller.signal))) return;
-    if (!current() || !visible) return;
+    if (!current() || !isOnScreen()) return;
     await runThumbnailPreview(
       async (signal) => {
         displaySignal = signal;
         let acquired = "";
         try {
-          if (!current() || !visible || signal.aborted) return;
+          if (!current() || !isOnScreen() || signal.aborted) return;
           if (isPxz.value) {
             const { renderPxzPreview } = await import("./pxz-preview");
             const { canvas, width, height } = await renderPxzPreview(
@@ -362,7 +382,7 @@ async function fetchPreview(useCache = true) {
             ? { url: "processed", readable: true }
             : await sourceUrl(revision.value, signal);
           acquired = value.url;
-          if (!current() || !visible || signal.aborted) return;
+          if (!current() || !isOnScreen() || signal.aborted) return;
           readable = value.readable;
           if (managedMediaUrl(acquired)) mediaUrl = acquired;
           await new Promise<void>((resolve, reject) => {
@@ -431,9 +451,12 @@ watch(
   },
 );
 onMounted(() => {
+  scrollRoot = root.value?.closest(".files-scroll");
   observer = new IntersectionObserver(
     (entries) => {
-      visible = entries.some((entry) => entry.isIntersecting);
+      const isIntersecting = entries.at(-1)?.isIntersecting ?? false;
+      if (visible === isIntersecting) return;
+      visible = isIntersecting;
       if (visible) {
         if (ready.value && cachedEntry.value && !url.value) {
           blobUrl = URL.createObjectURL(
@@ -449,9 +472,16 @@ onMounted(() => {
           (!failed.value || retries < 2)
         ) {
           clearTimeout(retryTimer);
-          void fetchPreview();
+          if (scrollRoot) {
+            // Let the viewport pass over these tiles before admitting them to the queue.
+            visibilityTimer = setTimeout(() => {
+              if (visible && !ready.value && !pending.value)
+                void fetchPreview();
+            }, 75);
+          } else void fetchPreview();
         }
       } else {
+        clearTimeout(visibilityTimer);
         if (pending.value) stop();
         if (ready.value && cachedEntry.value) {
           releaseBlob();
@@ -459,7 +489,7 @@ onMounted(() => {
         }
       }
     },
-    { root: root.value?.closest(".files-scroll"), rootMargin: "180px" },
+    { root: scrollRoot },
   );
   if (root.value) observer.observe(root.value);
 });

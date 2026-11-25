@@ -74,6 +74,9 @@ try {
         attempts: {},
         hits: 0,
         cancels: 0,
+        scrollRequests: [],
+        stalledScrollRequests: new Map(),
+        canceledScrollRequests: [],
         files: Array.from({ length: 24 }, (_, index) => ({
           id: `photo-${index}`,
           name: `Photo ${index}.png`,
@@ -163,11 +166,22 @@ try {
       replace("thumbnails:put", (revision, entry, epoch) =>
         cache.put(thumbnailKey("stress", revision), entry, epoch),
       );
-      replace("thumbnails:source", async (revision) => {
+      replace("thumbnails:source", async (revision, requestId) => {
         state.active++;
         state.peak = Math.max(state.active, state.peak);
         state.attempts[revision.id] = (state.attempts[revision.id] || 0) + 1;
         try {
+          if (revision.id.startsWith("scroll-")) {
+            state.scrollRequests.push(revision.id);
+            if (state.holdScrollRequests) {
+              await new Promise((_, reject) => {
+                state.stalledScrollRequests.set(requestId, {
+                  id: revision.id,
+                  reject,
+                });
+              });
+            }
+          }
           await new Promise((resolve) => setTimeout(resolve, 120));
           if (revision.id === "photo-0" && state.attempts[revision.id] === 1)
             throw new Error("Temporary D1 error");
@@ -193,8 +207,14 @@ try {
           });
         return { data: new Uint8Array(largePng), mimeType: "image/png" };
       });
-      replace("previews:cancel", () => {
+      replace("previews:cancel", (requestId) => {
         state.cancels++;
+        const stalled = state.stalledScrollRequests.get(requestId);
+        if (stalled) {
+          state.stalledScrollRequests.delete(requestId);
+          state.canceledScrollRequests.push(stalled.id);
+          stalled.reject(new Error("Preview canceled"));
+        }
       });
       state.stats = () => cache.stats();
       state.sources = () => media.sources.size;
@@ -208,8 +228,12 @@ try {
     },
   );
   await page.reload();
-  await page.locator(".file-card").nth(23).scrollIntoViewIfNeeded();
-  await page.locator(".file-card").first().scrollIntoViewIfNeeded();
+  const cards = page.locator(".file-card");
+  for (let i = 0; i < 24; i++) {
+    const card = cards.nth(i);
+    await card.scrollIntoViewIfNeeded();
+    await card.locator("img.cached-thumbnail").waitFor();
+  }
   for (let i = 0; i < 80; i++) {
     const state = await app.evaluate(async () => ({
       peak: globalThis.__thumbnailStress.peak,
@@ -374,12 +398,76 @@ try {
       .filter({ hasText: name })
       .locator("img.cached-thumbnail")
       .waitFor();
+  const scrollFileCount = 144;
+  await app.evaluate((_, fileCount) => {
+    const s = globalThis.__thumbnailStress;
+    s.holdScrollRequests = true;
+    s.files = Array.from({ length: fileCount }, (_, i) =>
+      s.makeFile(`scroll-${String(i).padStart(3, "0")}`),
+    );
+  }, scrollFileCount);
+  await refresh();
+  const lastCard = cards.nth(scrollFileCount - 1);
+  await lastCard.waitFor();
+  let stalledIds = [];
+  for (let i = 0; i < 100; i++) {
+    stalledIds = await app.evaluate(() =>
+      [...globalThis.__thumbnailStress.stalledScrollRequests.values()].map(
+        ({ id }) => id,
+      ),
+    );
+    if (stalledIds.length === 3) break;
+    await page.waitForTimeout(30);
+  }
+  assert.equal(stalledIds.length, 3, "the previous viewport fills the queue");
+  await app.evaluate(() => {
+    globalThis.__thumbnailStress.holdScrollRequests = false;
+  });
+  const visibleIds = await lastCard.evaluate(async (last) => {
+    const root = last.closest(".files-scroll");
+    const cards = [...root.querySelectorAll(".file-card")];
+    const middle = cards[Math.floor(cards.length / 2)];
+    await new Promise((resolve) => {
+      const observer = new IntersectionObserver(
+        ([entry]) => {
+          if (!entry.isIntersecting) return;
+          observer.disconnect();
+          resolve();
+        },
+        { root },
+      );
+      observer.observe(middle);
+      middle.scrollIntoView({ block: "center" });
+    });
+    last.scrollIntoView({ block: "end" });
+    const { top, bottom } = root.getBoundingClientRect();
+    return cards.flatMap((card) => {
+      const rect = card.querySelector(".file-thumb").getBoundingClientRect();
+      return rect.bottom >= top && rect.top <= bottom
+        ? [card.dataset.fileId]
+        : [];
+    });
+  });
+  await lastCard.locator("img.cached-thumbnail").waitFor();
+  const scroll = await app.evaluate(() => ({
+    requests: globalThis.__thumbnailStress.scrollRequests,
+    canceled: globalThis.__thumbnailStress.canceledScrollRequests,
+  }));
+  assert.deepEqual(scroll.canceled.sort(), stalledIds.sort());
+  assert.ok(scroll.requests.length > 3);
+  assert.ok(
+    scroll.requests.slice(3).every((id) => visibleIds.includes(id)),
+    `only the final viewport should start new requests: ${scroll.requests.slice(3)}`,
+  );
+  const revisited = cards.filter({ hasText: `${stalledIds[0]}.png` });
+  await revisited.scrollIntoViewIfNeeded();
+  await revisited.locator("img.cached-thumbnail").waitFor();
   await page.screenshot({
     path: path.join(os.tmpdir(), "jellyree-thumbnail-recovery.png"),
   });
   assert.deepEqual(errors, []);
   console.log(
-    "PASS: 24 large photos with at most 3 source requests; transient errors; small decoded thumbnails; canceled S3 and worker hangs; subsequent edited/photo/video previews; bounded retries and manual recovery",
+    "PASS: 24 large photos with at most 3 source requests; transient errors; small decoded thumbnails; canceled S3 and worker hangs; bounded retries and manual recovery; current viewport takes priority after fast scrolling",
     { peak: result.peak, count: result.count, sources: result.sources },
   );
 } finally {
