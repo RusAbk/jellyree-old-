@@ -13,6 +13,7 @@ import { createReadStream, createWriteStream } from "node:fs";
 import { pipeline } from "node:stream/promises";
 import path from "node:path";
 import {
+  AbortMultipartUploadCommand,
   S3Client,
   HeadBucketCommand,
   GetObjectCommand,
@@ -50,9 +51,12 @@ import {
   IMAGE_EDIT_MAX_BYTES,
 } from "./image-formats.mjs";
 import { PXZ_LIMIT, PxzRangeReader, readPxz } from "./pxz-archive.mjs";
+import { untilUploadCanceled } from "./upload-cancellation.mjs";
 
 const schema = await readFile(new URL("./schema.sql", import.meta.url), "utf8");
 const uploadConcurrency = 3;
+const uploadCleanupTimeoutMs = 10000;
+const uploadResponseTimeoutMs = 60000;
 const catalogIndexes = {
   ...Object.fromEntries(
     ["all", "photo", "video"].map((kind) => [
@@ -828,6 +832,11 @@ export class Library {
     const key = [this.config.prefix, "objects", randomUUID(), newName]
       .filter(Boolean)
       .join("/");
+    const discard = (objectKey) =>
+      this.s3.send(
+        new DeleteObjectCommand({ Bucket: this.config.bucket, Key: objectKey }),
+        { abortSignal: AbortSignal.timeout(uploadCleanupTimeoutMs) },
+      );
     const mimeType =
       options.mimeType ||
       mime.getType(path.basename(source)) ||
@@ -840,11 +849,20 @@ export class Library {
     const client = signal
       ? {
           config: this.s3.config,
-          send: (command) =>
-            command instanceof PutObjectCommand ||
-            command instanceof UploadPartCommand
-              ? this.s3.send(command, { abortSignal: signal })
-              : this.s3.send(command),
+          send: (command) => {
+            if (command instanceof AbortMultipartUploadCommand)
+              return this.s3.send(command, {
+                abortSignal: AbortSignal.timeout(uploadCleanupTimeoutMs),
+              });
+            signal.throwIfAborted();
+            return this.s3.send(command, {
+              abortSignal:
+                command instanceof PutObjectCommand ||
+                command instanceof UploadPartCommand
+                  ? signal
+                  : AbortSignal.timeout(uploadResponseTimeoutMs),
+            });
+          },
         }
       : this.s3;
     const upload = this.createUpload({
@@ -868,11 +886,13 @@ export class Library {
       cancellation?.commit();
     } catch (error) {
       if (signal?.aborted) {
-        // The PUT or multipart completion may have reached R2 before abort.
-        // The fresh key is safe to discard and a replaced file still uses its old key.
-        await this.s3.send(
-          new DeleteObjectCommand({ Bucket: this.config.bucket, Key: key }),
-        );
+        // Let an in-flight multipart completion settle before deleting its fresh key.
+        // The upload queue stops waiting as soon as the file is canceled.
+        try {
+          await discard(key);
+        } catch {
+          console.warn("Could not remove a canceled upload from R2");
+        }
         signal.throwIfAborted();
       }
       throw error;
@@ -941,9 +961,7 @@ export class Library {
         );
       }
       if (saved?.object_key !== key) {
-        await this.s3.send(
-          new DeleteObjectCommand({ Bucket: this.config.bucket, Key: key }),
-        );
+        await discard(key);
         throw error;
       }
       if (previous) replacement = fileRow(saved);
@@ -951,12 +969,7 @@ export class Library {
     let warning;
     if (previous) {
       try {
-        await this.s3.send(
-          new DeleteObjectCommand({
-            Bucket: this.config.bucket,
-            Key: previous.object_key,
-          }),
-        );
+        await discard(previous.object_key);
       } catch {
         warning = t(
           "Файл {0} заменён, но предыдущий объект не удалось удалить из R2.",
@@ -1050,7 +1063,8 @@ export class Library {
   async #uploadJobs(jobs, report, resolveConflict, cancellation) {
     const failures = [],
       warnings = [],
-      resolvedRetryIds = [];
+      resolvedRetryIds = [],
+      canceledFiles = [];
     const indexed = jobs.length && (await this.#ensureIndex("folderName"));
     const reserved = new Map(),
       seen = new Map();
@@ -1102,7 +1116,7 @@ export class Library {
       }
       return parts.join(" / ");
     };
-    const uniqueName = async (name, names, parent) => {
+    const uniqueName = async (name, names, parent, signal) => {
       const extension = path.extname(name),
         stem = path.basename(name, extension);
       let suffix = 1;
@@ -1110,8 +1124,9 @@ export class Library {
         const tail = ` (${suffix++})${extension}`;
         const candidate = `${stem.slice(0, Math.max(1, 255 - tail.length))}${tail}`;
         if (names.has(candidate)) continue;
-        if (!(await this.#filesNamed(parent, candidate)).length)
-          return candidate;
+        const matches = await this.#filesNamed(parent, candidate, signal);
+        signal?.throwIfAborted();
+        if (!matches.length) return candidate;
         names.add(candidate);
       }
     };
@@ -1129,6 +1144,7 @@ export class Library {
     for (const [fileIndex, job] of jobs.entries()) {
       if (active.size >= uploadConcurrency) await Promise.race(active.values());
       const file = cancellation?.file(fileIndex);
+      const wait = (operation) => untilUploadCanceled(file?.signal, operation);
       const targetPath = folderPath(job.folder);
       const destination = (name) => JSON.stringify([job.folder, name]);
       let name = job.name,
@@ -1155,6 +1171,7 @@ export class Library {
       const finish = (fileState, message) => {
         fileProgress.delete(fileIndex);
         cancellation?.finish(fileIndex);
+        if (fileState === "canceled") canceledFiles.push(fileIndex);
         if (
           job.retryId &&
           (fileState === "uploaded" || fileState === "skipped")
@@ -1195,9 +1212,10 @@ export class Library {
         file?.signal.throwIfAborted();
         // Resolve names in queue order, including a preceding upload of the same name.
         const preceding = active.get(destination(name));
-        if (preceding) await preceding;
-        file?.signal.throwIfAborted();
-        const matches = await this.#filesNamed(job.folder, name);
+        if (preceding) await wait(() => preceding);
+        const matches = await wait(() =>
+          this.#filesNamed(job.folder, name, file?.signal),
+        );
         file?.signal.throwIfAborted();
         if (matches.length) {
           if (!job.conflict) {
@@ -1206,7 +1224,9 @@ export class Library {
             pendingConflict = true;
           }
           const names = reserved.get(job.folder);
-          const suggestedName = await uniqueName(name, names, job.folder);
+          const suggestedName = await wait(() =>
+            uniqueName(name, names, job.folder, file?.signal),
+          );
           let decision = policy ? { action: policy } : null;
           if (!decision) {
             if (!resolveConflict)
@@ -1218,7 +1238,8 @@ export class Library {
               const candidate = cleanName(answer.name || suggestedName);
               if (
                 names.has(candidate) ||
-                (await this.#filesNamed(job.folder, candidate)).length
+                (await this.#filesNamed(job.folder, candidate, file?.signal))
+                  .length
               )
                 throw new Error(t("Это имя уже занято. Введите другое имя."));
             };
@@ -1249,14 +1270,18 @@ export class Library {
               throw new Error(
                 t("Некорректное решение для совпадающего файла."),
               );
-            await validate(decision);
+            await wait(() => validate(decision));
             if (decision.applyToAll) policy = decision.action;
           }
           remaining = Math.max(0, remaining - 1);
           pendingConflict = false;
           if (decision.action === "cancel") {
             canceled = true;
+            for (let index = 0; index < fileIndex; index++)
+              cancellation?.cancel(index);
             finish("canceled");
+            for (let index = fileIndex + 1; index < jobs.length; index++)
+              canceledFiles.push(index);
             break;
           }
           if (decision.action === "skip") {
@@ -1275,17 +1300,20 @@ export class Library {
         }
         file?.signal.throwIfAborted();
         const reportFile = (p) => {
+          if (file?.signal.aborted) return;
           const loaded = Math.max(fileProgress.get(fileIndex) ?? 0, p.loaded);
           fileProgress.set(fileIndex, Math.min(job.size, loaded));
           progress(p.committing ? "committing" : "uploading", loaded);
         };
         reportFile({ loaded: 0 });
         const key = destination(name);
-        const upload = this.uploadFile(job.source, job.folder, reportFile, {
-          name,
-          replaceId,
-          cancellation: file,
-        })
+        const upload = wait(() =>
+          this.uploadFile(job.source, job.folder, reportFile, {
+            name,
+            replaceId,
+            cancellation: file,
+          }),
+        )
           .then((result) => {
             done++;
             if (result.warning) warnings.push(result.warning);
@@ -1305,6 +1333,7 @@ export class Library {
       canceled,
       failures,
       warnings,
+      ...(canceledFiles.length ? { canceledFiles } : {}),
       ...(resolvedRetryIds.length ? { resolvedRetryIds } : {}),
     };
   }
@@ -1325,10 +1354,11 @@ export class Library {
     } while ((await this.#filesNamed(folderId, name)).length);
     return name;
   }
-  #filesNamed(parent, name) {
+  #filesNamed(parent, name, signal) {
     return this.db.query(
       "SELECT id, name, size_bytes, updated_at FROM jr_files WHERE library_id = ? AND folder_id IS ? AND name = ? AND trashed_at IS NULL ORDER BY created_at DESC, id DESC",
       [this.id, parent, name],
+      { signal },
     );
   }
   async importBucket(report = () => {}) {

@@ -1,3 +1,24 @@
+export async function untilUploadCanceled(signal, operation) {
+  if (!signal) return operation();
+  signal.throwIfAborted();
+  let abort;
+  const canceled = new Promise((_, reject) => {
+    abort = () => reject(signal.reason);
+    signal.addEventListener("abort", abort, { once: true });
+  });
+  try {
+    return await Promise.race([
+      canceled,
+      Promise.resolve().then(() => {
+        signal.throwIfAborted();
+        return operation();
+      }),
+    ]);
+  } finally {
+    signal.removeEventListener("abort", abort);
+  }
+}
+
 export class UploadCancellation {
   count = 0;
   #files = new Map();

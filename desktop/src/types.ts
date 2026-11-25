@@ -146,6 +146,7 @@ export type UploadResult = {
   done: number;
   skipped?: number;
   canceled?: boolean;
+  canceledFiles?: number[];
   warnings?: string[];
   failures: {
     name: string;

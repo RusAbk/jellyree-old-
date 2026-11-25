@@ -3,7 +3,12 @@ import assert from "node:assert/strict";
 import { DatabaseSync } from "node:sqlite";
 import { createHash } from "node:crypto";
 import { Readable } from "node:stream";
-import { PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
+import {
+  CompleteMultipartUploadCommand,
+  DeleteObjectCommand,
+  PutObjectCommand,
+  S3Client,
+} from "@aws-sdk/client-s3";
 import { UploadCancellation } from "../electron/upload-cancellation.mjs";
 import { fileURLToPath } from "node:url";
 import {
@@ -1899,6 +1904,86 @@ test("canceling a pending file and an active replacement keeps the original and 
 });
 
 test(
+  "a canceled replacement releases the queue while multipart completion and cleanup are stalled",
+  { timeout: 5000 },
+  async (t) => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), "jr-stalled-upload-"));
+    t.after(() => rm(dir, { recursive: true, force: true }));
+    const source = path.join(dir, "one.jpg");
+    const nextSource = path.join(dir, "next.txt");
+    await writeFile(source, "replacement");
+    await writeFile(nextSource, "next file");
+    const finishing = Promise.withResolvers();
+    const completed = Promise.withResolvers();
+    const deleting = Promise.withResolvers();
+    const deleted = Promise.withResolvers();
+    const progress = [];
+    const { library, insert } = fixture(t, {
+      createUpload: ({ client, params }) => {
+        let report;
+        return {
+          on(_event, callback) {
+            report = callback;
+          },
+          async done() {
+            for await (const chunk of params.Body) assert.ok(chunk.length);
+            if (params.Key.endsWith("/one.jpg")) {
+              await client.send(
+                new CompleteMultipartUploadCommand({ Key: params.Key }),
+              );
+            }
+            report({ loaded: params.ContentLength });
+          },
+        };
+      },
+    });
+    library.s3.send = async (command, options) => {
+      if (command instanceof CompleteMultipartUploadCommand) {
+        finishing.resolve(command.input.Key);
+        await completed.promise;
+      }
+      if (command instanceof DeleteObjectCommand) {
+        assert.ok(options.abortSignal);
+        deleting.resolve(command.input.Key);
+        await deleted.promise;
+      }
+      return {};
+    };
+    await library.initialize();
+    insert("one");
+    const cancellation = new UploadCancellation();
+    const plan = await library.planUploadPaths([source], null);
+    cancellation.count = 1;
+    const result = library.uploadPlanned(
+      plan,
+      (value) => progress.push(value),
+      async () => ({ action: "replace" }),
+      cancellation,
+    );
+    try {
+      const freshKey = await finishing.promise;
+      assert.equal(cancellation.cancel(0), true);
+      const outcome = await result;
+      assert.deepEqual(outcome.canceledFiles, [0]);
+      assert.equal(outcome.done, 0);
+      assert.equal(progress.at(-1).fileState, "canceled");
+      completed.resolve();
+      assert.equal(await deleting.promise, freshKey);
+      assert.equal((await library.uploadPaths([nextSource], null)).done, 1);
+      assert.equal((await library.file("one")).object_key, "objects/one");
+      assert.equal(
+        progress.at(-1).fileState,
+        "canceled",
+        "late progress stays suppressed",
+      );
+    } finally {
+      completed.resolve();
+      deleted.resolve();
+    }
+  },
+);
+
+test(
   "uploads up to three files at once, sums their progress and allows out-of-order cancellation",
   { timeout: 5000 },
   async (t) => {
@@ -2286,31 +2371,57 @@ test("retry uses the original source and destination for each failed upload", as
   ]);
 });
 
-test("canceling a duplicate decision stops the remaining batch without changing originals", async (t) => {
-  const dir = await mkdtemp(path.join(os.tmpdir(), "jr-cancel-"));
-  t.after(() => rm(dir, { recursive: true, force: true }));
-  const first = path.join(dir, "one.jpg"),
-    second = path.join(dir, "two.jpg");
-  await writeFile(first, "new");
-  await writeFile(second, "new");
-  const { library, insert } = fixture(t, {
-    createUpload: () => {
-      throw new Error("must not upload");
-    },
-  });
-  await library.initialize();
-  insert("one");
-  const result = await library.uploadPaths(
-    [first, second],
-    null,
-    () => {},
-    async () => ({ action: "cancel" }),
-  );
-  assert.equal(result.canceled, true);
-  assert.equal(result.done, 0);
-  assert.equal(result.failures.length, 0);
-  assert.equal((await library.list()).total, 1);
-});
+test(
+  "canceling a duplicate decision stops the active and remaining files without changing originals",
+  { timeout: 5000 },
+  async (t) => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), "jr-cancel-"));
+    t.after(() => rm(dir, { recursive: true, force: true }));
+    const first = path.join(dir, "one.jpg"),
+      second = path.join(dir, "two.jpg"),
+      third = path.join(dir, "three.jpg");
+    await writeFile(first, "new");
+    await writeFile(second, "new");
+    await writeFile(third, "new");
+    const started = Promise.withResolvers();
+    const pending = Promise.withResolvers();
+    const { library, insert } = fixture(t, {
+      createUpload: ({ params }) => ({
+        on() {},
+        async done() {
+          assert.ok(params.Key.endsWith("/two.jpg"));
+          for await (const chunk of params.Body) assert.ok(chunk.length);
+          started.resolve();
+          await pending.promise;
+        },
+      }),
+    });
+    await library.initialize();
+    insert("one");
+    const cancellation = new UploadCancellation();
+    const plan = await library.planUploadPaths([second, first, third], null);
+    cancellation.count = plan.jobs.length;
+    try {
+      const result = await library.uploadPlanned(
+        plan,
+        () => {},
+        async () => {
+          await started.promise;
+          return { action: "cancel" };
+        },
+        cancellation,
+      );
+      assert.equal(result.canceled, true);
+      assert.equal(result.done, 0);
+      assert.equal(result.failures.length, 0);
+      assert.deepEqual(result.canceledFiles.sort(), [0, 1, 2]);
+      assert.equal((await library.list()).total, 1);
+      assert.equal((await library.file("one")).object_key, "objects/one");
+    } finally {
+      pending.resolve();
+    }
+  },
+);
 
 test("uncertain replacement retains both R2 objects until the D1 outcome can be confirmed", async (t) => {
   const dir = await mkdtemp(path.join(os.tmpdir(), "jr-uncertain-"));

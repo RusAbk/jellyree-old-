@@ -66,6 +66,22 @@ void main() {
   });
 
   test(
+    'canceling releases the upload without waiting for R2 to finish',
+    () async {
+      final control = UploadCancellation();
+      final pending = Completer<int>();
+      final upload = control.run(() => pending.future);
+      final canceled = expectLater(upload, throwsA(isA<UploadCanceled>()));
+      expect(control.cancel(), isTrue);
+      await canceled.timeout(const Duration(seconds: 1));
+      expect(pending.isCompleted, isFalse);
+      pending.completeError(
+        const CloudError('R2 request failed after cancellation'),
+      );
+    },
+  );
+
+  test(
     'R2 batch deletion checksums XML and distinguishes rejected keys',
     () async {
       final cloud = _BatchR2();

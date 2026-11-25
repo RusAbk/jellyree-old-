@@ -140,6 +140,35 @@ test("upload progress is bounded and supports file counts without byte totals", 
   assert.equal(uploadPercent({ done: 0, loaded: -10, totalBytes: 100 }), 0);
 });
 
+test("confirmed cancellation moves an active file to history and ignores late upload progress", async () => {
+  const batch = Promise.withResolvers();
+  const state = useUploadJobs(
+    { pickUpload: () => batch.promise, cancelUpload: async () => true },
+    () => {},
+  );
+  const upload = state.start(false, undefined, null, "");
+  const [job] = state.jobs.value;
+  const progress = {
+    kind: "upload",
+    jobId: job.id,
+    fileIndex: 0,
+    fileState: "uploading",
+    name: "large.mp4",
+    done: 0,
+    total: 2,
+    loaded: 30,
+  };
+  state.onProgress(progress);
+  await state.cancel(job.id, 0);
+  assert.equal(job.files[0].state, "canceled");
+  state.onProgress(progress);
+  assert.equal(job.files[0].state, "canceled");
+  assert.equal(state.pending.value, 1);
+  batch.resolve({ done: 1, failures: [], canceledFiles: [0] });
+  await upload;
+  assert.equal(job.files[0].state, "canceled");
+});
+
 test("finished file rows appear before their batch ends; overall progress survives history cleanup", async () => {
   const resolve = [];
   const state = useUploadJobs(

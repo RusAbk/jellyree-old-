@@ -168,16 +168,19 @@ export function useUploadJobs(
         : result.failures.length || result.warnings?.length
           ? "issues"
           : "complete";
+      const canceledFiles = new Set(result.canceledFiles);
       for (const file of job.files.filter((file) => !uploadFileFinished(file)))
-        file.state = result.canceled
-          ? "canceled"
-          : result.failures.some((failure) =>
-                failure.fileIndex === undefined
-                  ? failure.name === file.name
-                  : failure.fileIndex === file.index,
-              )
-            ? "failed"
-            : "uploaded";
+        file.state =
+          (result.canceled && !result.canceledFiles) ||
+          canceledFiles.has(file.index)
+            ? "canceled"
+            : result.failures.some((failure) =>
+                  failure.fileIndex === undefined
+                    ? failure.name === file.name
+                    : failure.fileIndex === file.index,
+                )
+              ? "failed"
+              : "uploaded";
       const rows = new Map(job.files.map((file) => [file.index, file]));
       for (const failure of result.failures) {
         if (failure.fileIndex === undefined) continue;
@@ -277,17 +280,19 @@ export function useUploadJobs(
         file = { index, name: value.name, state: "uploading" };
         job.files.push(file);
       }
-      Object.assign(file, {
-        name: value.name,
-        state:
-          file.state === "canceling" && value.fileState === "uploading"
-            ? "canceling"
-            : value.fileState || "uploading",
-        loadedBytes: value.fileLoaded ?? file.loadedBytes,
-        sizeBytes: value.sizeBytes,
-        destination: value.targetPath,
-        error: value.message,
-      });
+      const state = value.fileState || "uploading";
+      if (!uploadFileFinished(file) || file.state === state)
+        Object.assign(file, {
+          name: value.name,
+          state:
+            file.state === "canceling" && state === "uploading"
+              ? "canceling"
+              : state,
+          loadedBytes: value.fileLoaded ?? file.loadedBytes,
+          sizeBytes: value.sizeBytes,
+          destination: value.targetPath,
+          error: value.message,
+        });
     }
     if (
       value.fileState === "canceled" &&
@@ -312,9 +317,14 @@ export function useUploadJobs(
     try {
       const accepted = await bridge.cancelUpload(jobId, index);
       if (file.state === "canceling") {
-        if (!accepted) file.state = previous;
-        else if (previous === "queued") file.state = "canceled";
+        file.state = accepted ? "canceled" : previous;
       }
+      if (
+        accepted &&
+        conflict.value?.jobId === jobId &&
+        conflict.value.fileIndex === index
+      )
+        resolveConflict(conflict.value.id);
     } catch (error) {
       if (file.state === "canceling") file.state = previous;
       file.error = (error as Error).message;
@@ -322,9 +332,10 @@ export function useUploadJobs(
   }
   function onConflict(value: UploadConflict) {
     const job = findJob(value.jobId);
+    const file = job?.files.find((entry) => entry.index === value.fileIndex);
+    if ((job && finished(job)) || (file && uploadFileFinished(file))) return;
     conflict.value = { ...value, jobId: job?.id || value.jobId };
     if (job) job.state = "waiting";
-    const file = job?.files.find((entry) => entry.index === value.fileIndex);
     if (file?.state === "queued") file.state = "waiting";
     panelOpen.value = true;
     conflictOpen.value = true;

@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
@@ -46,6 +47,19 @@ class UploadCancellation {
       _listeners.add(listener);
     }
     return () => _listeners.remove(listener);
+  }
+
+  Future<T> run<T>(Future<T> Function() operation) async {
+    check();
+    final interrupted = Completer<T>();
+    final detach = onCancel(
+      () => interrupted.completeError(const UploadCanceled()),
+    );
+    try {
+      return await Future.any([interrupted.future, Future.sync(operation)]);
+    } finally {
+      detach();
+    }
   }
 }
 
@@ -140,6 +154,7 @@ class Cloudflare {
   final DateTime Function() now;
   String get host => '${config['accountId']}.r2.cloudflarestorage.com';
   static const unsigned = 'UNSIGNED-PAYLOAD';
+  static const _responseTimeout = Duration(seconds: 60);
 
   Future<HttpClientRequest> _request(String method, Uri url) async {
     final request = await http
@@ -315,10 +330,14 @@ class Cloudflare {
         request.contentLength = 0;
       }
       final response = await request.close().timeout(
-        const Duration(seconds: 60),
+        _responseTimeout,
+        onTimeout: () {
+          request.abort();
+          throw TimeoutException('R2 did not respond', _responseTimeout);
+        },
       );
       if (response.statusCode < 200 || response.statusCode >= 300) {
-        await response.drain<void>();
+        await response.timeout(_responseTimeout).drain<void>();
         throw CloudError('Ошибка Cloudflare R2 (HTTP {0}).', {
           '0': response.statusCode,
         });
@@ -350,6 +369,7 @@ class Cloudflare {
     Stream<List<int>> chunks(int start, int end) async* {
       var sent = start;
       await for (final chunk in data.openRead(start, end)) {
+        cancellation?.check();
         sent += chunk.length;
         report(sent);
         yield chunk;
@@ -366,7 +386,7 @@ class Cloudflare {
         length,
         cancellation,
       );
-      await response.drain<void>();
+      await response.timeout(_responseTimeout).drain<void>();
       return;
     }
     final init = await xmlResponse(
@@ -391,7 +411,7 @@ class Cloudflare {
           cancellation,
         );
         final tag = part.headers.value(HttpHeaders.etagHeader);
-        await part.drain<void>();
+        await part.timeout(_responseTimeout).drain<void>();
         if (tag == null) {
           throw const CloudError('Не удалось завершить операцию в R2.');
         }
@@ -416,7 +436,11 @@ class Cloudflare {
       );
     } on Object {
       try {
-        await (await object('DELETE', key, query)).drain<void>();
+        await (await object(
+          'DELETE',
+          key,
+          query,
+        )).timeout(_responseTimeout).drain<void>();
       } on Object {
         /* Keep original error. */
       }
@@ -425,7 +449,7 @@ class Cloudflare {
   }
 
   Future<void> delete(String key) async =>
-      (await object('DELETE', key)).drain<void>();
+      (await object('DELETE', key)).timeout(_responseTimeout).drain<void>();
 
   Future<({Set<String> removed, Set<String> rejected})> deleteBatch(
     List<String> keys,

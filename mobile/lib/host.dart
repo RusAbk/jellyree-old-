@@ -900,13 +900,12 @@ class MobileHost {
 
       try {
         control.check();
-        size = await item.file.length();
+        size = await control.run(item.file.length);
         final folder = await resolveFolder(index);
         // A preceding transfer may still be creating this destination.
         final preceding = active[(folder, name)];
-        if (preceding != null) await preceding;
-        control.check();
-        final matches = await library.named(folder, name);
+        if (preceding != null) await control.run(() => preceding);
+        final matches = await control.run(() => library.named(folder, name));
         control.check();
         Json? replace;
         if (matches.isNotEmpty) {
@@ -914,11 +913,13 @@ class MobileHost {
             for (final (parent, name) in active.keys)
               if (parent == folder) name,
           };
-          final suggested = await library.availableName(
-            folder,
-            name,
-            start: 1,
-            reserved: reserved(),
+          final suggested = await control.run(
+            () => library.availableName(
+              folder,
+              name,
+              start: 1,
+              reserved: reserved(),
+            ),
           );
           final Json answer;
           if (applyToAll == null) {
@@ -961,6 +962,16 @@ class MobileHost {
           if (answer['applyToAll'] == true) applyToAll = action;
           if (action == 'cancel') {
             canceled = true;
+            for (final earlier in controls.take(index)) {
+              earlier.cancel();
+            }
+            for (
+              var remaining = index;
+              remaining < controls.length;
+              remaining++
+            ) {
+              canceledFiles.add(remaining);
+            }
             finish('canceled');
             break;
           }
@@ -976,12 +987,15 @@ class MobileHost {
             name = cleanName(answer['name'] ?? suggested);
             final names = reserved();
             if (names.contains(name) ||
-                (await library.named(folder, name)).isNotEmpty) {
-              name = await library.availableName(
-                folder,
-                name,
-                start: 1,
-                reserved: names,
+                (await control.run(() => library.named(folder, name)))
+                    .isNotEmpty) {
+              name = await control.run(
+                () => library.availableName(
+                  folder,
+                  name,
+                  start: 1,
+                  reserved: names,
+                ),
               );
             }
           }
@@ -989,6 +1003,7 @@ class MobileHost {
         control.check();
         final destination = (folder, name);
         void reportFile(String state, int loaded) {
+          if (control.canceled) return;
           fileProgress[index] = loaded.clamp(
             fileProgress[index] ?? 0,
             sizes[index],
@@ -1000,21 +1015,23 @@ class MobileHost {
           try {
             reportFile('uploading', 0);
             var lastReport = 0;
-            final result = await library.write(
-              item.file,
-              name,
-              folder,
-              mimeType: lookupMimeType(item.name),
-              replace: replace,
-              cancellation: control,
-              onCommit: () => reportFile('committing', size),
-              report: (loaded) {
-                final now = DateTime.now().millisecondsSinceEpoch;
-                if (now - lastReport > 120 || loaded == size) {
-                  lastReport = now;
-                  reportFile('uploading', loaded);
-                }
-              },
+            final result = await control.run(
+              () => library.write(
+                item.file,
+                name,
+                folder,
+                mimeType: lookupMimeType(item.name),
+                replace: replace,
+                cancellation: control,
+                onCommit: () => reportFile('committing', size),
+                report: (loaded) {
+                  final now = DateTime.now().millisecondsSinceEpoch;
+                  if (now - lastReport > 120 || loaded == size) {
+                    lastReport = now;
+                    reportFile('uploading', loaded);
+                  }
+                },
+              ),
             );
             if (result.warning != null) {
               warnings.add({
@@ -1346,20 +1363,15 @@ class MobileHost {
             a[1] as String,
             roots: items.map((entry) => entry.$2.$3).toList(),
           );
-          final canceled =
-              result.remove('canceledFiles') as List<int>? ?? const [];
-          if (result['canceled'] != true) {
-            final resolved = [
-              for (final (index, entry) in items.indexed)
-                if (!canceled.contains(index)) entry,
-            ];
-            for (final entry in resolved) {
-              _failed.remove(entry.$1);
-            }
-            result['resolvedRetryIds'] = resolved
-                .map((entry) => entry.$1)
-                .toList();
+          final canceled = (result['canceledFiles'] as List<int>?)?.toSet();
+          final resolved = [
+            for (final (index, entry) in items.indexed)
+              if (canceled?.contains(index) != true) entry.$1,
+          ];
+          for (final id in resolved) {
+            _failed.remove(id);
           }
+          result['resolvedRetryIds'] = resolved;
           return result;
         default:
           throw const CloudError('Не удалось выполнить операцию.');
