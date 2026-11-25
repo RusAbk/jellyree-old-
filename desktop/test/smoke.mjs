@@ -1018,6 +1018,14 @@ try {
       .getAttribute("value"),
     "40",
   );
+  assert.deepEqual(
+    await uploads
+      .getByRole("progressbar")
+      .evaluateAll((bars) =>
+        bars.map((bar) => getComputedStyle(bar).accentColor),
+      ),
+    ["rgb(76, 174, 120)", "rgb(76, 174, 120)"],
+  );
   assert.equal(await window.locator(".transfer-bar").count(), 0);
   assert.equal(await window.locator(".upload-button").isEnabled(), true);
   await nativeFile("during-upload.txt").click({ button: "right" });

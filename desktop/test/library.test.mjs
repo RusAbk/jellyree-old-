@@ -1884,7 +1884,8 @@ test("canceling a pending file and an active replacement keeps the original and 
   assert.deepEqual(
     progress
       .filter((value) => value.fileState === "canceled")
-      .map((value) => value.fileIndex),
+      .map((value) => value.fileIndex)
+      .sort(),
     [0, 1],
   );
   assert.ok(
@@ -1896,6 +1897,84 @@ test("canceling a pending file and an active replacement keeps the original and 
   assert.equal((await library.file("original")).object_key, "objects/original");
   assert.equal((await library.list()).total, 2);
 });
+
+test(
+  "uploads up to three files at once, sums their progress and allows out-of-order cancellation",
+  { timeout: 5000 },
+  async (t) => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), "jr-parallel-upload-"));
+    t.after(() => rm(dir, { recursive: true, force: true }));
+    const paths = Array.from({ length: 5 }, (_, index) =>
+      path.join(dir, `${index}.txt`),
+    );
+    await Promise.all(paths.map((source) => writeFile(source, "0123456789")));
+    const { library } = fixture(t);
+    await library.initialize();
+    const plan = await library.planUploadPaths(paths, null);
+    const cancellation = new UploadCancellation();
+    cancellation.count = paths.length;
+    const progress = [];
+    const started = paths.map(() => Promise.withResolvers());
+    const gates = paths.map(() => Promise.withResolvers());
+    let active = 0;
+    let peak = 0;
+    library.uploadFile = async (source, _folder, report, options) => {
+      const index = paths.indexOf(source);
+      const { signal } = options.cancellation;
+      active++;
+      peak = Math.max(peak, active);
+      signal.addEventListener("abort", gates[index].resolve, { once: true });
+      try {
+        report({ loaded: 4 });
+        started[index].resolve();
+        await gates[index].promise;
+        signal.throwIfAborted();
+        return {};
+      } finally {
+        signal.removeEventListener("abort", gates[index].resolve);
+        active--;
+      }
+    };
+    const upload = library.uploadPlanned(
+      plan,
+      (value) => progress.push(value),
+      undefined,
+      cancellation,
+    );
+    try {
+      await started[2].promise;
+      assert.equal(active, 3);
+      assert.equal(progress.at(-1).loaded, 12);
+      assert.equal(progress.at(-1).fileLoaded, 4);
+      assert.equal(progress.at(-1).done, 0);
+      gates[2].resolve();
+      await started[3].promise;
+      assert.equal(progress.at(-1).done, 1);
+      assert.equal(cancellation.cancel(2), false);
+      assert.equal(cancellation.cancel(0), true);
+      await started[4].promise;
+      assert.equal(progress.at(-1).done, 2);
+    } finally {
+      for (const gate of gates) gate.resolve();
+    }
+    const result = await upload;
+    assert.equal(peak, 3);
+    assert.equal(result.done, 4);
+    assert.deepEqual(result.failures, []);
+    assert.equal(
+      progress.find((event) => event.fileState === "canceled").fileIndex,
+      0,
+    );
+    assert.equal(progress.at(-1).loaded, 50);
+    assert.equal(progress.at(-1).done, 5);
+    assert.ok(
+      progress.every(
+        ({ loaded }, index) =>
+          index === 0 || loaded >= progress[index - 1].loaded,
+      ),
+    );
+  },
+);
 
 test("upload collisions: skip all applies only to this batch and counts every duplicate", async (t) => {
   const dir = await mkdtemp(path.join(os.tmpdir(), "jr-skip-"));

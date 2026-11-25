@@ -675,6 +675,7 @@ class MobileLibrary {
     String? folder,
     String name, {
     int start = 0,
+    Set<String> reserved = const {},
   }) async {
     final dot = name.lastIndexOf('.');
     final extension = dot > 0 ? name.substring(dot) : '';
@@ -685,7 +686,9 @@ class MobileLibrary {
       final value =
           stem.substring(0, stem.length.clamp(0, 255 - safeSuffix.length)) +
           safeSuffix;
-      if ((await named(folder, value)).isEmpty) return value;
+      if (!reserved.contains(value) && (await named(folder, value)).isEmpty) {
+        return value;
+      }
     }
   }
 

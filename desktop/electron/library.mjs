@@ -52,6 +52,7 @@ import {
 import { PXZ_LIMIT, PxzRangeReader, readPxz } from "./pxz-archive.mjs";
 
 const schema = await readFile(new URL("./schema.sql", import.meta.url), "utf8");
+const uploadConcurrency = 3;
 const catalogIndexes = {
   ...Object.fromEntries(
     ["all", "photo", "video"].map((kind) => [
@@ -1122,15 +1123,79 @@ export class Library {
       policy = null,
       canceled = false;
     const totalBytes = jobs.reduce((sum, job) => sum + job.size, 0);
+    const active = new Map();
+    const fileProgress = new Map();
     report({ done: 0, total: jobs.length, loaded: 0, totalBytes });
-    for (const job of jobs) {
-      const file = cancellation?.file(processed);
+    for (const [fileIndex, job] of jobs.entries()) {
+      if (active.size >= uploadConcurrency) await Promise.race(active.values());
+      const file = cancellation?.file(fileIndex);
+      const targetPath = folderPath(job.folder);
+      const destination = (name) => JSON.stringify([job.folder, name]);
       let name = job.name,
         replaceId,
-        pendingConflict = job.conflict,
-        fileState = "failed",
-        fileMessage;
+        pendingConflict = job.conflict;
+      const progress = (fileState, fileLoaded, message) => {
+        let loaded = bytes;
+        for (const size of fileProgress.values()) loaded += size;
+        report({
+          name,
+          done: processed,
+          total: jobs.length,
+          loaded,
+          totalBytes,
+          failures: failures.length,
+          fileIndex,
+          fileState,
+          fileLoaded,
+          sizeBytes: job.size,
+          targetPath,
+          message,
+        });
+      };
+      const finish = (fileState, message) => {
+        fileProgress.delete(fileIndex);
+        cancellation?.finish(fileIndex);
+        if (
+          job.retryId &&
+          (fileState === "uploaded" || fileState === "skipped")
+        ) {
+          this.#failedUploads.delete(job.retryId);
+          resolvedRetryIds.push(job.retryId);
+        }
+        processed++;
+        bytes += job.size;
+        progress(fileState, undefined, message);
+      };
+      const fail = (error) => {
+        if (file?.signal.aborted) {
+          if (pendingConflict) remaining = Math.max(0, remaining - 1);
+          if (error !== file.signal.reason && error.name !== "AbortError")
+            warnings.push(error.message);
+          finish("canceled");
+          return;
+        }
+        const retryId = job.retryId ?? randomUUID();
+        this.#failedUploads.set(retryId, {
+          source: job.source,
+          folder: job.folder,
+          size: job.size,
+          name,
+        });
+        failures.push({
+          name,
+          message: error.message,
+          retryId,
+          fileIndex,
+          targetPath,
+          sizeBytes: job.size,
+        });
+        finish("failed", error.message);
+      };
       try {
+        file?.signal.throwIfAborted();
+        // Resolve names in queue order, including a preceding upload of the same name.
+        const preceding = active.get(destination(name));
+        if (preceding) await preceding;
         file?.signal.throwIfAborted();
         const matches = await this.#filesNamed(job.folder, name);
         file?.signal.throwIfAborted();
@@ -1160,8 +1225,8 @@ export class Library {
             decision = await resolveConflict(
               {
                 name,
-                fileIndex: processed,
-                targetPath: folderPath(job.folder),
+                fileIndex,
+                targetPath,
                 suggestedName,
                 remaining,
                 total: totalConflicts,
@@ -1191,12 +1256,12 @@ export class Library {
           pendingConflict = false;
           if (decision.action === "cancel") {
             canceled = true;
-            fileState = "canceled";
+            finish("canceled");
             break;
           }
           if (decision.action === "skip") {
             skipped++;
-            fileState = "skipped";
+            finish("skipped");
             continue;
           }
           if (decision.action === "rename") {
@@ -1208,80 +1273,32 @@ export class Library {
           remaining = Math.max(0, remaining - 1);
           pendingConflict = false;
         }
-        const reportFile = (p) =>
-          report({
-            name,
-            done: processed,
-            total: jobs.length,
-            loaded: bytes + p.loaded,
-            totalBytes,
-            failures: failures.length,
-            fileIndex: processed,
-            fileState: p.committing ? "committing" : "uploading",
-            fileLoaded: p.loaded,
-            sizeBytes: job.size,
-            targetPath: folderPath(job.folder),
-          });
+        file?.signal.throwIfAborted();
+        const reportFile = (p) => {
+          const loaded = Math.max(fileProgress.get(fileIndex) ?? 0, p.loaded);
+          fileProgress.set(fileIndex, Math.min(job.size, loaded));
+          progress(p.committing ? "committing" : "uploading", loaded);
+        };
         reportFile({ loaded: 0 });
-        const result = await this.uploadFile(
-          job.source,
-          job.folder,
-          reportFile,
-          { name, replaceId, cancellation: file },
-        );
-        done++;
-        fileState = "uploaded";
-        if (result.warning) warnings.push(result.warning);
+        const key = destination(name);
+        const upload = this.uploadFile(job.source, job.folder, reportFile, {
+          name,
+          replaceId,
+          cancellation: file,
+        })
+          .then((result) => {
+            done++;
+            if (result.warning) warnings.push(result.warning);
+            finish("uploaded");
+          }, fail)
+          .finally(() => active.delete(key));
+        active.set(key, upload);
       } catch (error) {
-        if (file?.signal.aborted) {
-          fileState = "canceled";
-          if (pendingConflict) remaining = Math.max(0, remaining - 1);
-          if (error !== file.signal.reason && error.name !== "AbortError")
-            warnings.push(error.message);
-          continue;
-        }
-        fileMessage = error.message;
-        const retryId = job.retryId ?? randomUUID();
-        this.#failedUploads.set(retryId, {
-          source: job.source,
-          folder: job.folder,
-          size: job.size,
-          name,
-        });
-        failures.push({
-          name,
-          message: fileMessage,
-          retryId,
-          fileIndex: processed,
-          targetPath: folderPath(job.folder),
-          sizeBytes: job.size,
-        });
-      } finally {
-        cancellation?.finish(processed);
-        if (
-          job.retryId &&
-          (fileState === "uploaded" || fileState === "skipped")
-        ) {
-          this.#failedUploads.delete(job.retryId);
-          resolvedRetryIds.push(job.retryId);
-        }
-        processed++;
-        bytes += job.size;
-        report({
-          name,
-          done: processed,
-          total: jobs.length,
-          loaded: bytes,
-          totalBytes,
-          failures: failures.length,
-          fileIndex: processed - 1,
-          fileState,
-          sizeBytes: job.size,
-          targetPath: folderPath(job.folder),
-          message: fileMessage,
-        });
+        fail(error);
       }
     }
+    await Promise.all(active.values());
+    failures.sort((a, b) => a.fileIndex - b.fileIndex);
     return {
       done,
       skipped,

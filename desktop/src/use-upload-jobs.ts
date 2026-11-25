@@ -346,7 +346,7 @@ export function useUploadJobs(
       for (const job of jobs.value) {
         if (finished(job)) job.cleared = true;
         job.files = job.files.filter(
-          (file) => file.state === "uploading" || file.state === "failed",
+          (file) => !uploadFileFinished(file) || file.state === "failed",
         );
       }
   }

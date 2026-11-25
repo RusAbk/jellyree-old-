@@ -1,7 +1,7 @@
 export class UploadCancellation {
   count = 0;
   #files = new Map();
-  #next = 0;
+  #finished = new Set();
 
   file(index) {
     if (!this.#files.has(index)) {
@@ -20,7 +20,12 @@ export class UploadCancellation {
   }
 
   cancel(index) {
-    if (!Number.isInteger(index) || index < this.#next || index >= this.count)
+    if (
+      !Number.isInteger(index) ||
+      index < 0 ||
+      index >= this.count ||
+      this.#finished.has(index)
+    )
       return false;
     const file = this.file(index);
     if (file.committing || file.signal.aborted) return false;
@@ -29,7 +34,7 @@ export class UploadCancellation {
   }
 
   finish(index) {
-    this.#next = index + 1;
+    this.#finished.add(index);
     this.#files.delete(index);
   }
 }

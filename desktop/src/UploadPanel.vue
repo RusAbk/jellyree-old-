@@ -123,6 +123,7 @@ function label(
   }[state];
 }
 function filePercent(file: UploadJob["files"][number]) {
+  if (file.state === "committing") return 100;
   return uploadPercent({
     kind: "upload",
     done: 0,
@@ -264,7 +265,10 @@ function title(job: UploadJob) {
               · {{ job.progress.done }} / {{ job.progress.total }}</template
             ></small
           ><progress
-            v-if="file?.state === 'uploading'"
+            v-if="
+              file &&
+              (file.state === 'uploading' || file.state === 'committing')
+            "
             :value="filePercent(file)"
             max="100"
             :aria-label="t('Прогресс загрузки')"

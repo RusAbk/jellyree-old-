@@ -17,6 +17,7 @@ typedef Picker = Future<List<Picked>> Function(bool folders);
 typedef ShareFiles = Future<void> Function(List<String> files);
 typedef ShareLink = Future<void> Function(String uri);
 final _uuid = Uuid();
+const _uploadConcurrency = 3;
 
 class _Profile {
   _Profile(this.id, this.name, this.config);
@@ -769,6 +770,7 @@ class MobileHost {
     List<String?>? roots,
   }) async {
     final paths = <(String?, String), String>{};
+    final active = <(String?, String), Future<void>>{};
     String? target(int index) => roots == null ? root : roots[index];
     List<Json>? folders;
     Future<String?> resolveFolder(int index) async {
@@ -817,6 +819,9 @@ class MobileHost {
         for (final entry in unique.entries)
           entry.key: await library.existingNames(entry.key, entry.value),
       };
+      for (final (folder, name) in active.keys) {
+        known[folder]?.add(name);
+      }
       return candidates
           .where((entry) => !known[entry.$1]!.add(entry.$2))
           .length
@@ -826,43 +831,95 @@ class MobileHost {
     final failures = <Json>[];
     final warnings = <Json>[];
     final canceledFiles = <int>[];
-    var done = 0, skipped = 0;
+    var done = 0, skipped = 0, processed = 0;
     var bytesCompleted = 0;
+    final fileProgress = <int, int>{};
     final totalBytes = sizes.fold<int>(0, (sum, size) => sum + size);
     var canceled = false;
     String? applyToAll;
-    for (var index = 0; index < picked.length; index++) {
-      final item = picked[index];
+    for (final (index, item) in picked.indexed) {
+      if (active.length >= _uploadConcurrency) {
+        await Future.any(active.values);
+      }
       final control = controls[index];
       var size = sizes[index];
       var name = item.name;
-      var fileState = 'failed';
       final targetPath = [...item.folders, name].join('/');
-      void progress(String state, int loaded, {bool finished = false}) =>
-          _emit('progress', {
-            'kind': 'upload',
-            'jobId': job,
-            'phase': 'uploading',
-            'fileIndex': index,
-            'fileState': state,
-            'name': name,
-            'done': index + (finished ? 1 : 0),
-            'total': picked.length,
-            'loaded': bytesCompleted + loaded,
-            'fileLoaded': loaded,
-            'sizeBytes': size,
-            'totalBytes': totalBytes,
-            'targetPath': targetPath,
-          });
+      void progress(String state, int? loaded) {
+        _emit('progress', {
+          'kind': 'upload',
+          'jobId': job,
+          'phase': 'uploading',
+          'fileIndex': index,
+          'fileState': state,
+          'name': name,
+          'done': processed,
+          'total': picked.length,
+          'loaded': fileProgress.values.fold<int>(
+            bytesCompleted,
+            (sum, bytes) => sum + bytes,
+          ),
+          'fileLoaded': ?loaded,
+          'sizeBytes': size,
+          'totalBytes': totalBytes,
+          'targetPath': targetPath,
+        });
+      }
+
+      void finish(String state) {
+        control.finish();
+        fileProgress.remove(index);
+        bytesCompleted += sizes[index];
+        processed++;
+        progress(state, null);
+      }
+
+      void fail(Object error) {
+        if (control.canceled) {
+          canceledFiles.add(index);
+          if (error is! UploadCanceled) {
+            warnings.add({'key': 'Не удалось завершить операцию в R2.'});
+          }
+          finish('canceled');
+          return;
+        }
+        final id = _uuid.v4();
+        _failed[id] = (library, item, target(index));
+        failures.add({
+          'name': name,
+          'retryId': id,
+          'fileIndex': index,
+          'sizeBytes': size,
+          'targetPath': targetPath,
+          'message': error is CloudError
+              ? {'key': error.message, 'values': error.values}
+              : {'key': 'Не удалось выполнить операцию.'},
+        });
+        finish('failed');
+      }
+
       try {
         control.check();
         size = await item.file.length();
         final folder = await resolveFolder(index);
-        var matches = await library.named(folder, name);
+        // A preceding transfer may still be creating this destination.
+        final preceding = active[(folder, name)];
+        if (preceding != null) await preceding;
+        control.check();
+        final matches = await library.named(folder, name);
         control.check();
         Json? replace;
         if (matches.isNotEmpty) {
-          final suggested = await library.availableName(folder, name, start: 1);
+          Set<String> reserved() => {
+            for (final (parent, name) in active.keys)
+              if (parent == folder) name,
+          };
+          final suggested = await library.availableName(
+            folder,
+            name,
+            start: 1,
+            reserved: reserved(),
+          );
           final Json answer;
           if (applyToAll == null) {
             final id = _uuid.v4();
@@ -904,12 +961,12 @@ class MobileHost {
           if (answer['applyToAll'] == true) applyToAll = action;
           if (action == 'cancel') {
             canceled = true;
-            fileState = 'canceled';
+            finish('canceled');
             break;
           }
           if (action == 'skip') {
             skipped++;
-            fileState = 'skipped';
+            finish('skipped');
             continue;
           }
           if (action == 'replace') {
@@ -917,65 +974,73 @@ class MobileHost {
           }
           if (action == 'rename') {
             name = cleanName(answer['name'] ?? suggested);
-            matches = await library.named(folder, name);
-            if (matches.isNotEmpty) {
-              name = await library.availableName(folder, name, start: 1);
+            final names = reserved();
+            if (names.contains(name) ||
+                (await library.named(folder, name)).isNotEmpty) {
+              name = await library.availableName(
+                folder,
+                name,
+                start: 1,
+                reserved: names,
+              );
             }
           }
         }
-        progress('uploading', 0);
-        var lastReport = 0;
-        final result = await library.write(
-          item.file,
-          name,
-          folder,
-          mimeType: lookupMimeType(item.name),
-          replace: replace,
-          cancellation: control,
-          onCommit: () => progress('committing', size),
-          report: (loaded) {
-            final now = DateTime.now().millisecondsSinceEpoch;
-            if (now - lastReport > 120 || loaded == size) {
-              lastReport = now;
-              progress('uploading', loaded);
-            }
-          },
-        );
-        if (result.warning != null) {
-          warnings.add({
-            'key': 'Файл {0} заменён, но предыдущий объект не удалось удалить из R2.',
-            'values': {'0': result.warning},
-          });
+        control.check();
+        final destination = (folder, name);
+        void reportFile(String state, int loaded) {
+          fileProgress[index] = loaded.clamp(
+            fileProgress[index] ?? 0,
+            sizes[index],
+          );
+          progress(state, loaded);
         }
-        done++;
-        fileState = 'uploaded';
+
+        Future<void> transfer() async {
+          try {
+            reportFile('uploading', 0);
+            var lastReport = 0;
+            final result = await library.write(
+              item.file,
+              name,
+              folder,
+              mimeType: lookupMimeType(item.name),
+              replace: replace,
+              cancellation: control,
+              onCommit: () => reportFile('committing', size),
+              report: (loaded) {
+                final now = DateTime.now().millisecondsSinceEpoch;
+                if (now - lastReport > 120 || loaded == size) {
+                  lastReport = now;
+                  reportFile('uploading', loaded);
+                }
+              },
+            );
+            if (result.warning != null) {
+              warnings.add({
+                'key': 'Файл {0} заменён, но предыдущий объект не удалось удалить из R2.',
+                'values': {'0': result.warning},
+              });
+            }
+            done++;
+            finish('uploaded');
+          } on Object catch (error) {
+            fail(error);
+          } finally {
+            active.remove(destination);
+          }
+        }
+
+        active[destination] = transfer();
       } on Object catch (error) {
-        if (control.canceled) {
-          fileState = 'canceled';
-          canceledFiles.add(index);
-          if (error is! UploadCanceled) {
-            warnings.add({'key': 'Не удалось завершить операцию в R2.'});
-          }
-          continue;
-        }
-        final id = _uuid.v4();
-        _failed[id] = (library, item, target(index));
-        failures.add({
-          'name': name,
-          'retryId': id,
-          'fileIndex': index,
-          'sizeBytes': size,
-          'targetPath': targetPath,
-          'message': error is CloudError
-              ? {'key': error.message, 'values': error.values}
-              : {'key': 'Не удалось выполнить операцию.'},
-        });
-      } finally {
-        control.finish();
-        progress(fileState, size, finished: true);
-        bytesCompleted += size;
+        fail(error);
       }
     }
+    await Future.wait(active.values);
+    failures.sort(
+      (a, b) => (a['fileIndex'] as int).compareTo(b['fileIndex'] as int),
+    );
+    canceledFiles.sort();
     return {
       'done': done,
       'skipped': skipped,

@@ -3712,7 +3712,29 @@ button {
   width: 100%;
   height: 4px;
   margin: 4px 0 0;
-  accent-color: #9176d9;
+}
+.upload-panel progress {
+  --upload-progress-fill: #4cae78;
+  accent-color: var(--upload-progress-fill);
+}
+.upload-panel progress[value] {
+  appearance: none;
+  border: 0;
+  border-radius: 999px;
+  background: #e4efe8;
+}
+.upload-panel progress[value]::-webkit-progress-bar {
+  background: #e4efe8;
+  border-radius: 999px;
+}
+.upload-panel progress[value]::-webkit-progress-value {
+  background: var(--upload-progress-fill);
+  border-radius: 999px;
+  transition: width 160ms ease-out;
+}
+.upload-panel progress[value]::-moz-progress-bar {
+  background: var(--upload-progress-fill);
+  border-radius: 999px;
 }
 .upload-tabs {
   display: flex;
@@ -3820,7 +3842,6 @@ button {
   margin: 3px 0 0;
   height: 3px;
   display: block;
-  accent-color: #a391d4;
 }
 .upload-job-content > .text-button {
   font-size: 10px;
