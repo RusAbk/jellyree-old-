@@ -1,6 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { DatabaseSync } from "node:sqlite";
+import { createHash } from "node:crypto";
+import { Readable } from "node:stream";
+import { S3Client } from "@aws-sdk/client-s3";
 import { fileURLToPath } from "node:url";
 import {
   mkdir,
@@ -71,6 +74,11 @@ function fixture(t, overrides = {}) {
     send: async (command) => {
       if (command.constructor.name === "DeleteObjectCommand")
         deleted.push(command.input.Key);
+      if (command.constructor.name === "DeleteObjectsCommand") {
+        const { Objects } = command.input.Delete;
+        deleted.push(...Objects.map(({ Key }) => Key));
+        return { Deleted: Objects };
+      }
       return {};
     },
     destroy() {},
@@ -1362,7 +1370,12 @@ test("permanent deletion refuses active files and keeps records when R2 fails", 
   const { library, insert, deleted } = fixture(t);
   await library.initialize();
   insert("one");
-  await assert.rejects(library.deletePermanently(["one"]), /Сначала/);
+  insert("trashed", { trash: "2026-01-02" });
+  await assert.rejects(
+    library.deletePermanently(["trashed", "one"]),
+    /Сначала/,
+  );
+  assert.deepEqual(deleted, []);
   await library.updateFiles(["one"], { trashed: true });
   const send = library.s3.send;
   library.s3.send = async () => {
@@ -1370,10 +1383,106 @@ test("permanent deletion refuses active files and keeps records when R2 fails", 
   };
   await assert.rejects(library.deletePermanently(["one"]), /offline/);
   assert.equal((await library.file("one")).id, "one");
+  await assert.rejects(
+    library.updateFiles(["one"], { trashed: false }),
+    /началось окончательное удаление/,
+  );
   library.s3.send = send;
-  await library.deletePermanently(["one"]);
+  assert.deepEqual(await library.deletePermanently(["one", "one"]), {
+    done: 1,
+    failed: 0,
+  });
   assert.deepEqual(deleted, ["objects/one"]);
   await assert.rejects(library.file("one"), /не найден/);
+  assert.deepEqual(await library.deletePermanently(["one"]), {
+    done: 0,
+    failed: 0,
+  });
+});
+
+test("emptying trash batches all pages, preserves other libraries and leaves rejected files restorable", async (t) => {
+  const { library, insert, sqlite, requests } = fixture(t);
+  await library.initialize();
+  insert("active");
+  insert("foreign", { scope: "other-library", trash: "2026-01-02" });
+  for (let n = 0; n < 503; n++) {
+    insert(`trash-${String(n).padStart(3, "0")}`, { trash: "2026-01-02" });
+  }
+  const batches = [];
+  library.s3.send = async (command) => {
+    assert.equal(command.constructor.name, "DeleteObjectsCommand");
+    const { Objects, Quiet } = command.input.Delete;
+    assert.equal(Quiet, false);
+    batches.push(Objects.length);
+    const Key = "objects/trash-006";
+    const Errors = Objects.some((object) => object.Key === Key)
+      ? [{ Key, Code: "AccessDenied" }]
+      : [];
+    return { Deleted: Objects.filter((object) => object.Key !== Key), Errors };
+  };
+  const start = requests.length;
+  assert.deepEqual(await library.emptyTrash(), { done: 502, failed: 1 });
+  assert.deepEqual(batches, [250, 250, 3]);
+  assert.ok(requests.length - start <= 10);
+  assert.deepEqual(
+    sqlite
+      .prepare("SELECT id FROM jr_files ORDER BY id")
+      .all()
+      .map(({ id }) => id),
+    ["active", "foreign", "trash-006"],
+  );
+  assert.equal(
+    sqlite.prepare("SELECT COUNT(*) AS n FROM jr_pending_trash_deletes").get()
+      .n,
+    0,
+  );
+  await library.updateFiles(["trash-006"], { trashed: false });
+  assert.deepEqual(await library.emptyTrash(), { done: 0, failed: 0 });
+});
+
+test("R2 batch deletion signs the checksum of the serialized XML and recognizes per-key results", async (t) => {
+  const s3 = new S3Client({
+    region: "auto",
+    endpoint: "https://example.test",
+    credentials: {
+      accessKeyId: config.accessKeyId,
+      secretAccessKey: config.secretAccessKey,
+    },
+    requestChecksumCalculation: "WHEN_REQUIRED",
+    responseChecksumValidation: "WHEN_REQUIRED",
+    requestHandler: {
+      async handle(request) {
+        assert.equal(request.method, "POST");
+        assert.ok("delete" in request.query);
+        assert.match(String(request.body), /objects\/one &amp; two/);
+        assert.equal(
+          request.headers["content-md5"],
+          createHash("md5").update(request.body).digest("base64"),
+        );
+        return {
+          response: {
+            statusCode: 200,
+            headers: { "content-type": "application/xml" },
+            body: Readable.from([
+              "<DeleteResult><Deleted><Key>objects/one &amp; two</Key></Deleted>" +
+                "<Error><Key>objects/denied</Key><Code>AccessDenied</Code></Error></DeleteResult>",
+            ]),
+          },
+        };
+      },
+    },
+  });
+  t.after(() => s3.destroy());
+  const { library, insert } = fixture(t, { s3 });
+  await library.initialize();
+  insert("one & two", { trash: "2026-01-02" });
+  insert("denied", { trash: "2026-01-02" });
+  assert.deepEqual(await library.deletePermanently(["one & two", "denied"]), {
+    done: 1,
+    failed: 1,
+  });
+  await assert.rejects(library.file("one & two"), /не найден/);
+  await library.updateFiles(["denied"], { trashed: false });
 });
 
 test("upload removes orphan on definite D1 failure but keeps an object after ambiguous timeout", async (t) => {

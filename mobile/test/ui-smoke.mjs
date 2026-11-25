@@ -146,7 +146,9 @@ const server = createServer(async (request, response) => {
             activeProfile.id === "work"
               ? [{ ...files[0], name: "Work-only.png" }]
               : mediaFiles(args[0].mediaKind).filter(
-                  (row) => args[0].section !== "favorites" || row.favorite,
+                  (row) =>
+                    (args[0].section === "trash") === Boolean(row.trashed_at) &&
+                    (args[0].section !== "favorites" || row.favorite),
                 ),
           hasMore: false,
           page: 1,
@@ -197,6 +199,12 @@ const server = createServer(async (request, response) => {
       case "update":
         for (const id of args[0]) Object.assign(fileFor(id), args[1]);
         return json(response, null);
+      case "emptyTrash": {
+        const remaining = files.filter((row) => !row.trashed_at);
+        const done = files.length - remaining.length;
+        files.splice(0, files.length, ...remaining);
+        return json(response, { done, failed: 0 });
+      }
       default:
         return json(response, null);
     }
@@ -387,8 +395,31 @@ try {
   await page.screenshot({
     path: path.join(os.tmpdir(), "jellyree-mobile-timeline.png"),
   });
+  files.push({
+    ...files[0],
+    id: "trashed",
+    name: "Trashed.png",
+    trashed_at: "2026-11-25T01:00:00.000Z",
+  });
+  await page.getByRole("button", { name: "Open menu", exact: true }).tap();
+  await page.getByRole("button", { name: "Trash", exact: true }).tap();
+  await page.getByText("Trashed.png", { exact: true }).waitFor();
+  await page.getByRole("button", { name: "Empty trash", exact: true }).tap();
+  const emptyTrash = page.getByRole("dialog", { name: "Empty trash?" });
+  await emptyTrash
+    .getByRole("button", { name: "Empty trash", exact: true })
+    .tap();
+  await page
+    .getByRole("heading", { name: "Trash is empty", exact: true })
+    .waitFor();
+  assert.equal(
+    files.some((row) => row.trashed_at),
+    false,
+  );
+  assert.equal(files.length, 3);
+  assert.ok(rpcCalls.includes("emptyTrash"));
   console.log(
-    "PASS: bundled UI, mobile RPC, navigation, touch swipe, tags, photo replacement, and media filters",
+    "PASS: bundled UI, mobile RPC, navigation, touch swipe, tags, photo replacement, media filters, and empty trash",
   );
 } finally {
   await browser?.close();

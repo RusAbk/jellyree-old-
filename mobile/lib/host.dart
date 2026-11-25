@@ -1102,7 +1102,9 @@ class MobileHost {
           await library.update((a[0] as List).cast<String>(), a[1] as Json);
           return null;
         case 'remove':
-          return {'done': await library.remove((a[0] as List).cast<String>())};
+          return library.remove((a[0] as List).cast<String>());
+        case 'emptyTrash':
+          return library.emptyTrash();
         case 'createFolder':
           return library.createFolder(a[0] as String, a[1] as String?);
         case 'updateFolder':

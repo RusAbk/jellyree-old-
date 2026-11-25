@@ -70,6 +70,7 @@ export type ListInput = {
   timelineSince?: string;
 };
 export type TimelineBounds = { oldest: string | null; newest: string | null };
+export type TrashResult = { done: number; failed: number };
 export type FilePatch = {
   name?: string;
   favorite?: boolean;
@@ -183,7 +184,8 @@ export interface Jellyree {
   }>;
   timelineBounds(kind?: MediaKind): Promise<TimelineBounds>;
   update(ids: string[], patch: FilePatch): Promise<void>;
-  remove(ids: string[]): Promise<{ done: number }>;
+  remove(ids: string[]): Promise<TrashResult>;
+  emptyTrash(): Promise<TrashResult>;
   url(id: string): Promise<string>;
   imageSource(
     id: string,

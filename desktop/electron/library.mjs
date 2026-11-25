@@ -32,6 +32,7 @@ import {
   normalizeMediaKind,
 } from "./catalog-query.mjs";
 import { readCaptureDate } from "./capture-date.mjs";
+import { pendingRestoreError, Trash } from "./trash.mjs";
 import { libraryId } from "./config.mjs";
 import { normalizeImageAdjustments } from "./image-adjustments.mjs";
 import { validateVideoFrame, videoFrameName } from "./video-frames.mjs";
@@ -95,6 +96,7 @@ export class Library {
   #failedUploads = new Map();
   #indexAttempts = new Map();
   #captureSchema;
+  #trash;
 
   constructor(config, { db, s3, createUpload } = {}) {
     this.createUpload = createUpload ?? ((options) => new Upload(options));
@@ -113,6 +115,7 @@ export class Library {
         requestChecksumCalculation: "WHEN_REQUIRED",
         responseChecksumValidation: "WHEN_REQUIRED",
       });
+    this.#trash = new Trash(this.db, this.s3, this.id, config.bucket);
   }
   async check() {
     await Promise.all([
@@ -361,15 +364,19 @@ export class Library {
     // Small batches stay below D1's bound parameter limit.
     for (let offset = 0; offset < ids.length; offset += 50) {
       const part = ids.slice(offset, offset + 50);
-      const updated = await this.db.query(
-        `UPDATE jr_files SET ${sets.join(", ")} WHERE library_id = ? AND id IN (${part.map(() => "?").join(",")})${guarded ? " AND object_key = ? AND trashed_at IS NULL RETURNING id" : ""}`,
-        [
-          ...params,
-          this.id,
-          ...part,
-          ...(guarded ? [patch.expectedObjectKey] : []),
-        ],
-      );
+      const updated = await this.db
+        .query(
+          `UPDATE jr_files SET ${sets.join(", ")} WHERE library_id = ? AND id IN (${part.map(() => "?").join(",")})${guarded ? " AND object_key = ? AND trashed_at IS NULL RETURNING id" : ""}`,
+          [
+            ...params,
+            this.id,
+            ...part,
+            ...(guarded ? [patch.expectedObjectKey] : []),
+          ],
+        )
+        .catch((error) => {
+          throw pendingRestoreError(error);
+        });
       if (guarded && updated.length !== 1)
         throw new Error(
           t(
@@ -620,28 +627,17 @@ export class Library {
       throw error;
     }
   }
-  async deletePermanently(ids) {
-    if (!Array.isArray(ids) || ids.length > 1000)
+  deletePermanently(ids) {
+    if (
+      !Array.isArray(ids) ||
+      ids.length > 1000 ||
+      ids.some((id) => typeof id !== "string")
+    )
       throw new Error(t("Слишком много файлов."));
-    let done = 0;
-    for (const id of ids) {
-      const file = await this.file(id);
-      if (!file.trashed_at)
-        throw new Error(t("Сначала переместите файл в корзину."));
-      // Delete object first; keep the record on R2 failure so deletion is retryable.
-      await this.s3.send(
-        new DeleteObjectCommand({
-          Bucket: this.config.bucket,
-          Key: file.object_key,
-        }),
-      );
-      await this.db.query(
-        "DELETE FROM jr_files WHERE id = ? AND library_id = ?",
-        [id, this.id],
-      );
-      done++;
-    }
-    return { done };
+    return this.#trash.remove(ids);
+  }
+  emptyTrash() {
+    return this.#trash.empty();
   }
   async saveVideoFrame(id, expectedObjectKey, timestamp, data) {
     try {

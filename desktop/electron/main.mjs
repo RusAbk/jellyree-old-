@@ -56,6 +56,7 @@ const connectionReads = new Set([
 const catalogMutations = new Set([
   "files:update",
   "files:delete",
+  "files:empty-trash",
   "files:save-text-document",
   "files:save-edited-image",
   "files:save-video-frame",
@@ -370,6 +371,7 @@ function registerHandlers() {
   handle("files:timeline-bounds", (kind) => library.timelineBounds(kind));
   handle("files:update", (ids, patch) => library.updateFiles(ids, patch));
   handle("files:delete", (ids) => library.deletePermanently(ids));
+  handle("files:empty-trash", () => library.emptyTrash());
   handle("files:url", (id) => library.url(id));
   handle("files:image-source", (id, requestId, pxz) => {
     const sourceLibrary = library;

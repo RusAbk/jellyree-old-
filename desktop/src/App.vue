@@ -51,6 +51,7 @@ import type {
   Settings,
   Stats,
   TimelineBounds,
+  TrashResult,
   ListInput,
 } from "./types";
 
@@ -1347,6 +1348,7 @@ function openModal(
     moveFolder: t("Переместить папку"),
     deleteFolder: t("Удалить пустую папку?"),
     delete: t("Удалить навсегда?"),
+    emptyTrash: t("Очистить корзину?"),
     import: t("Добавить существующие объекты R2?"),
   };
   const file = files.value.find((f) => f.id === ids[0]);
@@ -1377,6 +1379,17 @@ function rememberTags(tags: string[]) {
     tags: [...new Set([...stats.value.tags, ...tags])],
   };
 }
+function showTrashResult(result: TrashResult) {
+  if (result.failed)
+    throw new Error(
+      t("Удалено файлов: {0}. Не удалось удалить: {1}.", {
+        "0": result.done,
+        "1": result.failed,
+      }),
+    );
+  if (result.done)
+    notice.value = t("Удалено файлов: {0}", { "0": result.done });
+}
 async function submitModal() {
   const value = modal.value;
   if (!value) return;
@@ -1396,7 +1409,7 @@ async function submitModal() {
     "deleteFolder",
   ].includes(value.kind)
     ? "folders"
-    : ["delete", "import", "tags"].includes(value.kind)
+    : ["delete", "emptyTrash", "import", "tags"].includes(value.kind)
       ? "usage"
       : "files";
   const success = await action(
@@ -1424,10 +1437,11 @@ async function submitModal() {
           folderId.value = value.folder.parent_id || null;
       }
       if (value.kind === "delete") {
-        await api.remove(value.ids);
+        showTrashResult(await api.remove(value.ids));
         if (preview.value && value.ids.includes(preview.value.id))
           closePreview();
       }
+      if (value.kind === "emptyTrash") showTrashResult(await api.emptyTrash());
       if (value.kind === "import") {
         const result = await api.importBucket();
         notice.value = t("Проверено объектов: {0}", { "0": result.scanned });
@@ -1623,7 +1637,7 @@ async function deletePreviewPhoto(permanent = false) {
     files.value.slice(position + Number(index >= 0)).find(isPhotoPreview);
   const saved = await action(
     async () => {
-      if (permanent) await api.remove([target.id]);
+      if (permanent) showTrashResult(await api.remove([target.id]));
       else await api.update([target.id], { trashed: true });
       files.value = files.value.filter((file) => file.id !== target.id);
       timelineNewer.value = timelineNewer.value.filter(
@@ -2408,7 +2422,22 @@ onBeforeUnmount(() => {
                 {{ t(filter.label) }}
               </button>
             </div>
-            <div v-if="!isTimeline" class="page-actions">
+            <div v-if="section === 'trash'" class="page-actions">
+              <button
+                type="button"
+                class="button danger"
+                :disabled="
+                  busy ||
+                  !settings.configured ||
+                  (currentListing && !search && !tag && !files.length)
+                "
+                @click="openModal('emptyTrash', [])"
+              >
+                <i aria-hidden="true" class="ri-delete-bin-6-line"></i>
+                {{ t("Очистить корзину") }}
+              </button>
+            </div>
+            <div v-else-if="!isTimeline" class="page-actions">
               <template v-if="currentFolder && section === 'drive'"
                 ><button
                   class="icon-button"
@@ -3234,6 +3263,13 @@ onBeforeUnmount(() => {
           )
         }}
       </p>
+      <p v-if="modal.kind === 'emptyTrash'" class="muted">
+        {{
+          t(
+            "Все файлы в корзине будут удалены навсегда, включая скрытые поиском.",
+          )
+        }}
+      </p>
       <p v-if="modal.kind === 'deleteFolder'" class="muted">
         {{
           t(
@@ -3261,7 +3297,7 @@ onBeforeUnmount(() => {
           {{ t("Отмена") }}</button><button
           class="button"
           :class="
-            ['delete', 'deleteFolder'].includes(modal.kind)
+            ['delete', 'deleteFolder', 'emptyTrash'].includes(modal.kind)
               ? 'danger-fill'
               : 'primary'
           "
@@ -3270,11 +3306,13 @@ onBeforeUnmount(() => {
           {{
             busy
               ? t("Выполняется…")
-              : ["delete", "deleteFolder"].includes(modal.kind)
-                ? t("Удалить")
-                : modal.kind === "import"
-                  ? t("Добавить объекты")
-                  : t("Сохранить")
+              : modal.kind === "emptyTrash"
+                ? t("Очистить корзину")
+                : ["delete", "deleteFolder"].includes(modal.kind)
+                  ? t("Удалить")
+                  : modal.kind === "import"
+                    ? t("Добавить объекты")
+                    : t("Сохранить")
           }}
         </button>
       </footer>

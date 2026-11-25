@@ -139,6 +139,24 @@ class Cloudflare {
         results.isEmpty ||
         (results.first as Json)['success'] != true) {
       // Errors can be returned to the renderer. Keep credentials in the native process.
+      final messages = [
+        if (data?['errors'] case final List errors)
+          for (final error in errors.whereType<Json>()) error['message'],
+        if (results is List)
+          for (final result in results.whereType<Json>()) result['error'],
+      ].whereType<String>();
+      if (messages.any(
+        (message) => message.contains('jellyree_trash_delete_pending'),
+      )) {
+        throw const CloudError(
+          'Для этого файла уже началось окончательное удаление. Повторите удаление из корзины.',
+        );
+      }
+      if (messages.any(
+        (message) => message.contains('jr_pending_trash_deletes.trashed_at'),
+      )) {
+        throw const CloudError('Сначала переместите файл в корзину.');
+      }
       throw CloudError('Ошибка Cloudflare D1 (HTTP {0}).', {
         '0': response.statusCode,
       });
@@ -349,6 +367,54 @@ class Cloudflare {
 
   Future<void> delete(String key) async =>
       (await object('DELETE', key)).drain<void>();
+
+  Future<({Set<String> removed, Set<String> rejected})> deleteBatch(
+    List<String> keys,
+  ) async {
+    final builder = XmlBuilder();
+    builder.element(
+      'Delete',
+      attributes: {'xmlns': 'http://s3.amazonaws.com/doc/2006-03-01/'},
+      nest: () {
+        for (final key in keys) {
+          builder.element(
+            'Object',
+            nest: () => builder.element('Key', nest: key),
+          );
+        }
+        builder.element('Quiet', nest: 'false');
+      },
+    );
+    final bytes = utf8.encode(
+      builder.buildDocument().toXmlString().replaceAll('\r', '&#xD;'),
+    );
+    final result = await xmlResponse(
+      await object(
+        'POST',
+        null,
+        {'delete': ''},
+        {
+          'content-type': 'application/xml',
+          'content-md5': base64.encode(md5.convert(bytes).bytes),
+        },
+        Stream.value(bytes),
+        bytes.length,
+      ),
+    );
+    if (result.rootElement.name.local != 'DeleteResult') {
+      throw const CloudError('Не удалось завершить операцию в R2.');
+    }
+    Set<String> keysIn(String type) => {
+      for (final entry in result.rootElement.childElements)
+        if (entry.name.local == type)
+          if (entry.childElements
+                  .where((child) => child.name.local == 'Key')
+                  .firstOrNull
+              case final key?)
+            key.innerText,
+    };
+    return (removed: keysIn('Deleted'), rejected: keysIn('Error'));
+  }
 }
 
 Future<Uint8List> boundedBytes(Stream<List<int>> stream, int limit) async {

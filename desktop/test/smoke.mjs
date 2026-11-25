@@ -371,6 +371,8 @@ try {
       );
       if (input.section === "drive")
         items = items.filter((f) => f.folder_id === (input.folderId || null));
+      if (input.search)
+        items = items.filter((f) => f.name.includes(input.search));
       return { items, total: items.length, page: 1, hasMore: false };
     });
     replace("files:update", (ids, patch) => {
@@ -387,7 +389,23 @@ try {
         throw new Error("Only trashed files may be deleted");
       state.calls.push({ channel: "delete", ids });
       state.files = state.files.filter((f) => !ids.includes(f.id));
-      return { done: ids.length };
+      return { done: ids.length, failed: 0 };
+    });
+    replace("files:empty-trash", () => {
+      const retry = state.calls.some(
+        ({ channel }) => channel === "empty-trash",
+      );
+      state.calls.push({ channel: "empty-trash" });
+      const ids = new Set(
+        state.files
+          .filter((f) => f.trashed_at && (f.id !== "locked" || retry))
+          .map((f) => f.id),
+      );
+      state.files = state.files.filter((f) => !ids.has(f.id));
+      return {
+        done: ids.size,
+        failed: state.files.filter((f) => f.trashed_at).length,
+      };
     });
   });
   await window.reload();
@@ -453,9 +471,64 @@ try {
     fixture.calls.map((c) => c.ids),
     [["delete-me"], ["delete-me"], ["delete-me", "keep-me"], ["delete-me"]],
   );
+  await electron.evaluate(() => {
+    const state = globalThis.__jellyreeIpcFixture;
+    state.files.push(
+      { ...state.files[0], id: "locked", name: "locked.txt" },
+      { ...state.files[0], id: "active", name: "active.txt", trashed_at: null },
+    );
+  });
+  const trashSearch = window.getByRole("textbox", {
+    name: "Поиск файлов и тегов",
+  });
+  await trashSearch.fill("never-matches");
+  await window.getByRole("heading", { name: "Ничего не найдено" }).waitFor();
+  const emptyTrashButton = window
+    .locator(".page-actions")
+    .getByRole("button", { name: "Очистить корзину", exact: true });
+  const emptyTrashDialog = window.getByRole("dialog", {
+    name: "Очистить корзину?",
+  });
+  await emptyTrashButton.click();
+  await emptyTrashDialog
+    .getByRole("button", { name: "Отмена", exact: true })
+    .click();
+  await emptyTrashDialog.waitFor({ state: "hidden" });
+  assert.equal(
+    await electron.evaluate(
+      () =>
+        globalThis.__jellyreeIpcFixture.calls.filter(
+          ({ channel }) => channel === "empty-trash",
+        ).length,
+    ),
+    0,
+  );
+  await emptyTrashButton.click();
+  const confirmEmpty = emptyTrashDialog.getByRole("button", {
+    name: "Очистить корзину",
+    exact: true,
+  });
+  await confirmEmpty.click();
+  await emptyTrashDialog
+    .getByText("Удалено файлов: 1. Не удалось удалить: 1.", { exact: true })
+    .waitFor();
+  await confirmEmpty.click();
+  await emptyTrashDialog.waitFor({ state: "hidden" });
+  assert.deepEqual(
+    await electron.evaluate(() =>
+      globalThis.__jellyreeIpcFixture.files.map(({ id }) => id),
+    ),
+    ["active"],
+  );
+  await trashSearch.fill("");
+  await window.getByRole("heading", { name: "Корзина пуста" }).waitFor();
+  await emptyTrashButton.and(window.locator(":disabled")).waitFor();
   assert.deepEqual(errors, []);
+  await electron.evaluate((_, files) => {
+    globalThis.__jellyreeIpcFixture.files = files;
+  }, fixture.files);
   console.log(
-    "PASS: real Electron IPC, trash, restore, bulk trash, permanent deletion",
+    "PASS: real Electron IPC, trash, restore, permanent deletion, empty trash confirmation and partial retry",
   );
 
   // Exercise real preload conflict events and answers; cloud bytes stay mocked.
@@ -1366,7 +1439,9 @@ try {
         return copy;
       },
       remove: async (ids) => {
+        const previousCount = files.length;
         files = files.filter((file) => !ids.includes(file.id));
+        return { done: previousCount - files.length, failed: 0 };
       },
       createFolder: async (name, parent_id) => {
         const folder = { id: String(folders.length), name, parent_id };

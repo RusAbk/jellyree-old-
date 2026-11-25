@@ -157,6 +157,25 @@ export const messages = {
     en: "Delete permanently",
     es: "Eliminar definitivamente",
   },
+  "Очистить корзину": { en: "Empty trash", es: "Vaciar papelera" },
+  "Очистить корзину?": { en: "Empty trash?", es: "¿Vaciar la papelera?" },
+  "Все файлы в корзине будут удалены навсегда, включая скрытые поиском.": {
+    en: "All files in trash will be permanently deleted, including files hidden by search.",
+    es: "Se eliminarán permanentemente todos los archivos de la papelera, incluidos los ocultos por la búsqueda.",
+  },
+  "Для этого файла уже началось окончательное удаление. Повторите удаление из корзины.":
+    {
+      en: "Permanent deletion has already started for this file. Retry deleting it from trash.",
+      es: "La eliminación permanente de este archivo ya ha comenzado. Intenta eliminarlo de la papelera de nuevo.",
+    },
+  "Удалено файлов: {0}": {
+    en: "Files deleted: {0}",
+    es: "Archivos eliminados: {0}",
+  },
+  "Удалено файлов: {0}. Не удалось удалить: {1}.": {
+    en: "Files deleted: {0}. Could not delete: {1}.",
+    es: "Archivos eliminados: {0}. No se eliminaron: {1}.",
+  },
   Переместить: {
     en: "Move",
     es: "Mover",

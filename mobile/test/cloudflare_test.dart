@@ -1,6 +1,8 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:crypto/crypto.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:jellyree_mobile/capture_date.dart';
 import 'package:jellyree_mobile/cloudflare.dart';
@@ -17,6 +19,17 @@ Connection profile() => Connection({
 });
 
 void main() {
+  test(
+    'R2 batch deletion checksums XML and distinguishes rejected keys',
+    () async {
+      final cloud = _BatchR2();
+      addTearDown(() => cloud.http.close(force: true));
+      final result = await cloud.deleteBatch(['folder/a & b', 'denied']);
+      expect(result.removed, {'folder/a & b'});
+      expect(result.rejected, {'denied'});
+    },
+  );
+
   test('compatible with the desktop library hash and R2 canonical paths', () {
     final connection = profile();
     expect(
@@ -137,4 +150,53 @@ void main() {
       }
     },
   );
+}
+
+class _BatchR2 extends Cloudflare {
+  _BatchR2() : super(profile());
+
+  @override
+  Future<HttpClientResponse> object(
+    String method, [
+    String? key,
+    Map<String, String> query = const {},
+    Map<String, String> headers = const {},
+    Stream<List<int>>? body,
+    int length = 0,
+  ]) async {
+    expect(method, 'POST');
+    expect(key, isNull);
+    expect(query, {'delete': ''});
+    final bytes = (await body!.toList()).expand((chunk) => chunk).toList();
+    expect(bytes.length, length);
+    expect(utf8.decode(bytes), contains('<Key>folder/a &amp; b</Key>'));
+    expect(headers['content-md5'], base64.encode(md5.convert(bytes).bytes));
+    return _R2Response(
+      '<DeleteResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">'
+      '<Deleted><Key>folder/a &amp; b</Key></Deleted>'
+      '<Error><Key>denied</Key><Code>AccessDenied</Code></Error>'
+      '</DeleteResult>',
+    );
+  }
+}
+
+class _R2Response extends Stream<List<int>> implements HttpClientResponse {
+  _R2Response(String xml) : _body = Stream.value(utf8.encode(xml));
+  final Stream<List<int>> _body;
+
+  @override
+  StreamSubscription<List<int>> listen(
+    void Function(List<int>)? onData, {
+    Function? onError,
+    void Function()? onDone,
+    bool? cancelOnError,
+  }) => _body.listen(
+    onData,
+    onError: onError,
+    onDone: onDone,
+    cancelOnError: cancelOnError,
+  );
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }

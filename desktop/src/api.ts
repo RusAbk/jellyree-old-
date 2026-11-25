@@ -35,6 +35,7 @@ export function createApi(bridge: Jellyree): Jellyree {
     timelineBounds: (kind) => bridge.timelineBounds(kind),
     update: (ids, patch) => bridge.update(toIpcData(ids), toIpcData(patch)),
     remove: (ids) => bridge.remove(toIpcData(ids)),
+    emptyTrash: () => bridge.emptyTrash(),
     url: (id) => bridge.url(id),
     imageSource: (id, requestId, pxz) => bridge.imageSource(id, requestId, pxz),
     cancelPreview: (requestId) => bridge.cancelPreview(requestId),

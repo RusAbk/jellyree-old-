@@ -8,6 +8,7 @@ import 'package:xml/xml.dart';
 
 import 'capture_date.dart';
 import 'cloudflare.dart';
+import 'trash.dart';
 
 const mobilePageSize = 80;
 const _imageMedia = "mime_type LIKE 'image/%'";
@@ -190,6 +191,7 @@ class ListingQuery {
 class MobileLibrary {
   MobileLibrary(this.cloud, this.cache);
   final Cloudflare cloud;
+  late final _trash = TrashOperations(cloud);
   final Directory cache;
   final Map<String, (DateTime, Json)> _files = {};
   final Map<String, (DateTime, Future<String?>)> _heads = {};
@@ -583,26 +585,21 @@ class MobileLibrary {
     }
   }
 
-  Future<int> remove(List<String> ids) async {
+  Future<Json> remove(List<String> ids) async {
     validateIds(ids);
-    var done = 0;
     try {
-      for (final fileId in ids.toSet()) {
-        final file = await this.file(fileId, fresh: true);
-        if (file['trashed_at'] == null) {
-          throw const CloudError('Файл не найден в этом хранилище.');
-        }
-        await cloud.delete(file['object_key'] as String);
-        final rows = await cloud.query(
-          'DELETE FROM jr_files WHERE id = ? AND library_id = ? AND object_key = ? AND trashed_at IS NOT NULL RETURNING id',
-          [fileId, id, file['object_key']],
-        );
-        done += rows.length;
-      }
+      return await _trash.remove(ids);
     } finally {
       await invalidate();
     }
-    return done;
+  }
+
+  Future<Json> emptyTrash() async {
+    try {
+      return await _trash.empty();
+    } finally {
+      await invalidate();
+    }
   }
 
   Future<List<Json>> named(String? folder, String name) => cloud

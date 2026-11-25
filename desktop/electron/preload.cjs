@@ -17,6 +17,7 @@ contextBridge.exposeInMainWorld("jellyree", {
   timelineBounds: (kind) => invoke("files:timeline-bounds", kind),
   update: (ids, patch) => invoke("files:update", ids, patch),
   remove: (ids) => invoke("files:delete", ids),
+  emptyTrash: () => invoke("files:empty-trash"),
   url: (id) => invoke("files:url", id),
   imageSource: (id, requestId, pxz) =>
     invoke("files:image-source", id, requestId, pxz),

@@ -200,6 +200,7 @@ export async function installMobileBridge() {
     timelineBounds: (kind) => call("timelineBounds", [kind]),
     update: (ids, patch) => call("update", [ids, patch]),
     remove: (ids) => call("remove", [ids]),
+    emptyTrash: () => call("emptyTrash"),
     url: (id) => call("url", [id]),
     imageSource: (id, request, revision) =>
       binary("imageSource", [id, request, revision]),
