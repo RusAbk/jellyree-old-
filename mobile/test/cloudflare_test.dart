@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
@@ -88,21 +89,22 @@ void main() {
     );
   });
 
-  test('reads the EXIF capture time and offset from JPG and HEIC', () async {
-    const fixtures = '../desktop/test/fixtures';
-    for (final (name, type) in [
-      ('capture-date.jpg', 'image/jpeg'),
-      ('capture-date.heic', 'image/heic'),
-    ]) {
-      expect(
-        await readCaptureDate(File('$fixtures/$name'), type),
-        '2012-05-02T01:26:00.125Z',
-        reason: name,
-      );
-    }
-    expect(
-      await readCaptureDate(File('$fixtures/editor.png'), 'image/png'),
-      isNull,
-    );
-  });
+  test(
+    'photo and video metadata use the most reliable recording date',
+    () async {
+      const fixtures = '../desktop/test/fixtures';
+      final examples = jsonDecode(
+        await File('$fixtures/media-dates.json').readAsString(),
+      ) as List<dynamic>;
+      for (final example in examples.cast<List<Object?>>()) {
+        final name = example[0] as String;
+        final type = example[1] as String;
+        expect(
+          await readCaptureDate(File('$fixtures/$name'), type),
+          example[2],
+          reason: name,
+        );
+      }
+    },
+  );
 }

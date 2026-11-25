@@ -22,6 +22,7 @@ import { setLanguage } from "../electron/locales.mjs";
 setLanguage("ru");
 import { Library } from "../electron/library.mjs";
 import { catalogListing } from "../electron/catalog-query.mjs";
+import { readCaptureDate } from "../electron/capture-date.mjs";
 import { D1 } from "../electron/d1.mjs";
 import {
   ConfigStore,
@@ -294,7 +295,21 @@ test("text editor saves a new R2 version in place, preserves metadata and cleans
   for (const source of paths)
     await assert.rejects(stat(source), { code: "ENOENT" });
 });
-test("uploads retain JPG and HEIC capture times separately from catalog dates after migrating an existing database and cache", async (t) => {
+test("photo and video metadata prefer recording dates to later creation, digitization, or export dates", async () => {
+  const fixtures = new URL("fixtures/", import.meta.url);
+  const examples = JSON.parse(
+    await readFile(new URL("media-dates.json", fixtures)),
+  );
+  for (const [name, type, expected] of examples) {
+    assert.equal(
+      await readCaptureDate(fileURLToPath(new URL(name, fixtures)), type),
+      expected,
+      name,
+    );
+  }
+});
+
+test("photo and video uploads retain media dates separately after migrating an existing database and cache", async (t) => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "jr-capture-"));
   t.after(() => rm(directory, { recursive: true, force: true }));
   const cache = path.join(directory, "catalog.sqlite");
@@ -322,24 +337,35 @@ test("uploads retain JPG and HEIC capture times separately from catalog dates af
   t.after(() => reopened.catalog.close());
   assert.equal((await reopened.list()).items[0].id, "legacy");
   await Promise.all(
-    ["jpg", "heic"].map((extension) =>
-      reopened.uploadFile(
-        fileURLToPath(
-          new URL(`fixtures/capture-date.${extension}`, import.meta.url),
+    ["capture-date.jpg", "capture-date.heic", "dates-quicktime.mov"].map(
+      (name) =>
+        reopened.uploadFile(
+          fileURLToPath(new URL(`fixtures/${name}`, import.meta.url)),
+          null,
         ),
-        null,
-      ),
     ),
   );
   const { items } = await reopened.list({ section: "timeline" });
   assert.equal(items[0].id, "legacy");
   assert.equal(items[0].captured_at, null);
-  assert.equal(items.length, 3);
-  for (const item of items.slice(1)) {
+  assert.equal(items.length, 4);
+  assert.equal(items[1].name, "dates-quicktime.mov");
+  assert.equal(items[1].captured_at, "2019-08-12T10:04:05.000Z");
+  for (const item of items.slice(2))
     assert.equal(item.captured_at, captureDate);
+  for (const item of items.slice(1)) {
     assert.notEqual(item.created_at, item.captured_at);
     assert.equal(item.updated_at, item.created_at);
   }
+  insert("old-video", { name: "dates-header.mp4", mime: "video/mp4" });
+  const { file } = await reopened.uploadFile(
+    fileURLToPath(new URL("fixtures/dates-header.mp4", import.meta.url)),
+    null,
+    () => {},
+    { replaceId: "old-video" },
+  );
+  assert.equal(file.captured_at, "2024-11-28T10:30:00.000Z");
+  assert.equal(file.created_at, "2026-01-01");
   assert.equal(
     requests.filter(({ sql }) => sql?.startsWith("ALTER TABLE")).length,
     1,
