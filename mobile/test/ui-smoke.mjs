@@ -171,6 +171,14 @@ const server = createServer(async (request, response) => {
         return json(response, {
           newest: dates.at(-1) ?? null,
           oldest: dates[0] ?? null,
+          months: [
+            ...new Set(
+              dates.map((value) => {
+                const date = new Date(value);
+                return date.getFullYear() * 12 + date.getMonth();
+              }),
+            ),
+          ],
         });
       }
       case "thumb.get":
@@ -387,6 +395,16 @@ try {
     .getByRole("complementary", { name: "Timeline" })
     .getByRole("slider")
     .waitFor();
+  const scale = page.getByRole("complementary", { name: "Timeline" });
+  await scale
+    .getByRole("button", { name: "Go to 2021", exact: true })
+    .waitFor();
+  assert.equal(
+    await scale
+      .getByRole("button", { name: "Go to 2022", exact: true })
+      .count(),
+    0,
+  );
   const mediaFilters = page.getByRole("group", { name: "Media type" });
   const videoFilter = mediaFilters.getByRole("button", {
     name: "Videos",
@@ -394,7 +412,6 @@ try {
   });
   await videoFilter.tap();
   await page.locator('.media-card[data-file-id="clip"]').waitFor();
-  const scale = page.getByRole("complementary", { name: "Timeline" });
   await scale
     .getByRole("button", { name: "Go to 2023", exact: true })
     .waitFor();

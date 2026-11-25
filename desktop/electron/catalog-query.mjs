@@ -40,6 +40,44 @@ export function mediaPredicate(kind, section = "timeline") {
   return section === "photos" ? visualMedia : timelineMedia;
 }
 export const mediaDateColumn = "COALESCE(captured_at, created_at)";
+const localMonth = (value) => {
+  const date = new Date(value);
+  return date.getFullYear() * 12 + date.getMonth();
+};
+const localMonthBoundary = (month) => {
+  const date = new Date(0);
+  date.setFullYear(Math.floor(month / 12), month % 12, 1);
+  date.setHours(0, 0, 0, 0);
+  // Include older date-only rows when the boundary is midnight UTC.
+  return date.toISOString().replace(/T00:00:00\.000Z$/, "");
+};
+export async function populatedMediaMonths(db, match, libraryId, bounds) {
+  if (!bounds.oldest || !bounds.newest) return [];
+  const first = localMonth(bounds.oldest);
+  const last = localMonth(bounds.newest);
+  if (!Number.isFinite(first) || !Number.isFinite(last)) return [];
+  const months = [first];
+  // Each EXISTS can stop at the first match in the capture-date index.
+  for (let start = first + 1; start < last; start += 480) {
+    const ranges = [];
+    let lower = localMonthBoundary(start);
+    for (let month = start; month < Math.min(start + 480, last); month++) {
+      const upper = localMonthBoundary(month + 1);
+      ranges.push([lower, upper]);
+      lower = upper;
+    }
+    const matches = await db.query(
+      `SELECT month.key AS position FROM json_each(?) AS month
+       WHERE EXISTS (SELECT 1 ${match}
+                     AND ${mediaDateColumn} >= json_extract(month.value, '$[0]')
+                     AND ${mediaDateColumn} < json_extract(month.value, '$[1]'))`,
+      [JSON.stringify(ranges), libraryId],
+    );
+    for (const { position } of matches) months.push(start + position);
+  }
+  if (last !== first) months.push(last);
+  return months.sort((a, b) => a - b);
+}
 const captureDate = { ...sorts.date, column: mediaDateColumn };
 const ascendingDate = {
   ...captureDate,

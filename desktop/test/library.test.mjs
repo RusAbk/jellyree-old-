@@ -742,11 +742,21 @@ test("D1 listing refreshes five pages with a single count and skips counts on co
 
 test("media timeline seeks both ways by date and indexes only active media", async (t) => {
   const { library, insert, sqlite, requests } = fixture(t);
+  const photoMonths = [2012 * 12 + 4, 2019 * 12 + 2, 2026 * 12 + 1];
+  const videoDate = "2021-04-01T00:30:00.000Z";
+  const videoMonth = 2021 * 12 + new Date(videoDate).getMonth();
+  const months = [
+    photoMonths[0],
+    2016 * 12 + 1,
+    photoMonths[1],
+    videoMonth,
+    photoMonths[2],
+  ];
   await library.initialize();
   for (const [id, mime, added, options] of [
     ["audio", "audio/mpeg", "2016-02-03", {}],
     ["heic", "application/octet-stream", "2019-03-08", { name: "import.HEIC" }],
-    ["video", "video/mp4", "2021-04-08", {}],
+    ["video", "video/mp4", "2021-04-01", {}],
     ["photo", "image/png", "2026-02-01", {}],
     ["archive", "image/jpeg", "2026-02-02", { captured: captureDate }],
     ["document", "text/plain", "2001-01-01", {}],
@@ -755,12 +765,26 @@ test("media timeline seeks both ways by date and indexes only active media", asy
     insert(id, { mime, ...options });
     sqlite
       .prepare("UPDATE jr_files SET created_at = ? WHERE id = ?")
-      .run(`${added}T12:00:00.000Z`, id);
+      .run(id === "video" ? videoDate : `${added}T12:00:00.000Z`, id);
   }
   assert.deepEqual(await library.timelineBounds(), {
     oldest: captureDate,
     newest: "2026-02-01T12:00:00.000Z",
+    months,
   });
+  const lookupMonths = requests.find(({ sql }) =>
+    sql.includes("FROM json_each(?) AS month"),
+  );
+  const indexPlan = sqlite
+    .prepare(`EXPLAIN QUERY PLAN ${lookupMonths.sql}`)
+    .all(...lookupMonths.params);
+  assert.ok(
+    indexPlan.some(
+      ({ detail }) =>
+        detail.includes("jr_media_capture_date") &&
+        detail.includes("<expr>>? AND <expr><?"),
+    ),
+  );
   const boundary = "2020-01-01T00:00:00.000Z";
   const older = await library.list({
     section: "timeline",
@@ -855,18 +879,20 @@ test("media timeline seeks both ways by date and indexes only active media", asy
     library.catalog.close();
     await rm(directory, { recursive: true, force: true });
   });
-  const videoDate = "2021-04-08T12:00:00.000Z";
   assert.deepEqual(await library.timelineBounds("video"), {
     oldest: videoDate,
     newest: videoDate,
+    months: [videoMonth],
   });
   assert.deepEqual(await library.timelineBounds("photo"), {
     oldest: captureDate,
     newest: "2026-02-01T12:00:00.000Z",
+    months: photoMonths,
   });
   assert.deepEqual(await library.timelineBounds(), {
     oldest: captureDate,
     newest: "2026-02-01T12:00:00.000Z",
+    months,
   });
   const cachedAll = await library.list({ section: "timeline" });
   assert.ok(cachedAll.items.some(({ id }) => id === "audio"));
@@ -882,6 +908,7 @@ test("media timeline seeks both ways by date and indexes only active media", asy
   assert.deepEqual(await library.timelineBounds("video"), {
     oldest: videoDate,
     newest: videoDate,
+    months: [videoMonth],
   });
   assert.equal(requests.length, requestCount);
 });
@@ -904,6 +931,7 @@ test("changing media dates updates distinct dates atomically before moving files
   assert.deepEqual(await library.timelineBounds(), {
     oldest: photoDate,
     newest: videoDate,
+    months: [2001 * 12 + 1],
   });
   const { items } = await library.list({
     section: "timeline",

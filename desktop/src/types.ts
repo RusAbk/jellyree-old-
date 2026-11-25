@@ -69,7 +69,11 @@ export type ListInput = {
   timelineBefore?: string;
   timelineSince?: string;
 };
-export type TimelineBounds = { oldest: string | null; newest: string | null };
+export type TimelineBounds = {
+  oldest: string | null;
+  newest: string | null;
+  months: number[];
+};
 export type CaptureDateEdit = { id: string; capturedAt: string };
 export type FileNote = {
   id: string;

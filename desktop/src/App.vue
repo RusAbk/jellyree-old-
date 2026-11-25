@@ -153,28 +153,19 @@ const loadingNewer = ref(false);
 const newerFailed = ref(false);
 let newerRequest = 0;
 let boundsRequest = 0;
-const knownTimelineBounds = computed(() => {
-  if (!isTimeline.value) return null;
-  let oldest: string | undefined, newest: string | undefined;
-  let min = Infinity,
-    max = -Infinity;
+const timelineMonths = computed(() => {
+  if (!isTimeline.value) return [];
+  const months = new Set(timelineBounds.value?.months);
   function include(date: string | null | undefined) {
     if (!date) return;
     const time = Date.parse(date);
-    if (!Number.isFinite(time)) return;
-    if (time < min) {
-      min = time;
-      oldest = date;
-    }
-    if (time > max) {
-      max = time;
-      newest = date;
-    }
+    if (Number.isFinite(time)) months.add(monthIndex(new Date(time)));
   }
   include(timelineBounds.value?.oldest);
   include(timelineBounds.value?.newest);
-  for (const file of files.value) include(mediaDate(file));
-  return oldest && newest ? { oldest, newest } : null;
+  if (currentListing.value)
+    for (const file of files.value) include(mediaDate(file));
+  return [...months].sort((a, b) => b - a);
 });
 const listing = computed(() => ({
   section: section.value,
@@ -756,9 +747,8 @@ async function refreshTimelineBounds() {
 }
 function jumpTimeline(month: number) {
   if (!isTimeline.value || !settings.value.configured || busy.value) return;
-  const newest = knownTimelineBounds.value?.newest;
   const before =
-    newest && month >= monthIndex(new Date(newest))
+    month >= (timelineMonths.value[0] ?? month)
       ? undefined
       : monthStart(month + 1).toISOString();
   if (
@@ -945,7 +935,9 @@ function flushUploadRefresh() {
     uploadFoldersPending = false;
     void refreshFolders();
   }
-  void reload(false, true);
+  void reload(false, true).then(() => {
+    if (isTimeline.value) void refreshTimelineBounds();
+  });
 }
 watch([busy, loading, currentListing], flushUploadRefresh);
 const refreshPages = 5;
@@ -1321,7 +1313,11 @@ function patch(ids: string[], input: FilePatch, message = "") {
     () => api.update(ids, input),
     message,
     input.trashed !== undefined || input.tags !== undefined ? "usage" : "files",
-  );
+  ).then((saved) => {
+    if (saved && isTimeline.value && input.trashed !== undefined)
+      void refreshTimelineBounds();
+    return saved;
+  });
 }
 async function upload(
   folders = false,
@@ -1534,7 +1530,11 @@ async function submitModal() {
     value.captureDate ? t("Дата изменена.") : "",
     refresh,
   );
-  if (success) modal.value = null;
+  if (success) {
+    modal.value = null;
+    if (isTimeline.value && ["delete", "import", "rename"].includes(value.kind))
+      void refreshTimelineBounds();
+  }
 }
 async function openPreview(file: DriveFile) {
   const navigation = ++previewNavigation;
@@ -3019,7 +3019,7 @@ onBeforeUnmount(() => {
                     ? t("Ничего не найдено")
                     : section === "trash"
                       ? t("Корзина пуста")
-                      : isTimeline && knownTimelineBounds
+                      : isTimeline && timelineMonths.length
                         ? t("Нет медиафайлов на эту дату")
                         : filteredMedia
                           ? t(
@@ -3039,7 +3039,7 @@ onBeforeUnmount(() => {
                   !filteredMedia ||
                   search ||
                   tag ||
-                  (isTimeline && knownTimelineBounds)
+                  (isTimeline && timelineMonths.length)
                 "
               >
                 {{
@@ -3050,7 +3050,7 @@ onBeforeUnmount(() => {
                           "Удалённые файлы остаются здесь до окончательного удаления.",
                         )
                       : isTimeline
-                        ? knownTimelineBounds
+                        ? timelineMonths.length
                           ? t("Выберите другой месяц на временной шкале.")
                           : t("Загрузите фото, видео или аудио.")
                         : section === "favorites"
@@ -3114,7 +3114,7 @@ onBeforeUnmount(() => {
         </div>
         <TimelineScale
           v-if="isTimeline && settings.configured"
-          :bounds="knownTimelineBounds"
+          :months="timelineMonths"
           :active-day="timelineDay"
           :loading="timelineBoundsState === 'loading' || loading"
           :failed="timelineBoundsState === 'failed'"

@@ -2603,6 +2603,11 @@ try {
         mime_type: "image/jpeg",
       })),
       {
+        id: "timeline-fall",
+        created_at: "2026-09-03T12:00:00.000Z",
+        mime_type: "image/jpeg",
+      },
+      {
         id: "timeline-clip",
         created_at: "2023-02-02T12:00:00.000Z",
         mime_type: "video/mp4",
@@ -2620,7 +2625,7 @@ try {
       },
       {
         id: "timeline-document",
-        created_at: "2019-04-14T12:00:00.000Z",
+        created_at: "2020-04-14T12:00:00.000Z",
         mime_type: "application/pdf",
       },
     ].map((file) => ({
@@ -2661,9 +2666,14 @@ try {
         throw new Error("Timeline bounds unavailable");
       }
       const matches = mediaRows(kind);
+      const months = matches.map((row) => {
+        const date = new Date(mediaDate(row));
+        return date.getFullYear() * 12 + date.getMonth();
+      });
       return {
         oldest: mediaDate(matches.at(-1)),
         newest: mediaDate(matches[0]),
+        months: [...new Set(months)],
       };
     };
     window.jellyree.list = async (input) => {
@@ -2709,12 +2719,23 @@ try {
     .getByRole("button", { name: "Перейти к 2015", exact: true })
     .waitFor();
   const yearCount = await rail.locator(".year-mark").count();
-  for (let count = 0; count < 3; count++)
-    await rail.getByRole("button", { name: "Увеличить масштаб шкалы" }).click();
+  assert.equal(yearCount, 4);
+  assert.equal(
+    await rail
+      .getByRole("button", { name: "Перейти к 2020", exact: true })
+      .count(),
+    0,
+  );
+  assert.equal(
+    await rail
+      .getByRole("button", { name: "Перейти к 2023", exact: true })
+      .evaluate((mark) => mark.style.top),
+    "50%",
+  );
+  await rail.getByRole("button", { name: "Увеличить масштаб шкалы" }).click();
   assert.ok((await rail.locator(".year-mark").count()) < yearCount);
   assert.ok((await rail.locator(".timeline-mark:not(.year-mark)").count()) > 0);
-  for (let count = 0; count < 3; count++)
-    await rail.getByRole("button", { name: "Уменьшить масштаб шкалы" }).click();
+  await rail.getByRole("button", { name: "Уменьшить масштаб шкалы" }).click();
   await page.locator(".load-more").scrollIntoViewIfNeeded();
   await media.locator('[data-file-id="timeline-recent-16"]').waitFor();
   assert.equal(
@@ -2777,6 +2798,14 @@ try {
           .timelineSince,
     ),
     historicalQuery.timelineBefore,
+  );
+  await rail.getByRole("slider").press("Home");
+  await media.locator('[data-file-id="timeline-recent-00"]').waitFor();
+  await rail.getByRole("slider").press("ArrowDown");
+  await media.locator('[data-file-id="timeline-fall"]').waitFor();
+  assert.match(
+    await rail.getByRole("slider").getAttribute("aria-valuetext"),
+    /сентябр/,
   );
   await rail.getByRole("slider").press("Home");
   await media.locator('[data-file-id="timeline-recent-00"]').waitFor();

@@ -201,7 +201,7 @@ class MobileLibrary {
   final Map<String, (DateTime, Json)> _files = {};
   final Map<String, (DateTime, Future<String?>)> _heads = {};
   Future<void>? _captureSchema;
-  final _mediaDateIndexes = <String, Future<void>>{};
+  final _mediaDateIndexes = <String, Future<bool>>{};
   int _revision = 0;
   String get id => cloud.config.libraryId;
 
@@ -251,16 +251,18 @@ class MobileLibrary {
         });
   }
 
-  Future<void> _ensureMediaDateIndex(String kind) async {
+  Future<bool> _ensureMediaDateIndex(String kind) async {
     await _ensureCaptureSchema();
-    await _mediaDateIndexes.putIfAbsent(kind, () async {
+    return _mediaDateIndexes.putIfAbsent(kind, () async {
       final name = kind == 'all' ? 'media' : kind;
       try {
         await cloud.query(
           'CREATE INDEX IF NOT EXISTS jr_${name}_capture_date ON jr_files(library_id, $mediaDateColumn DESC, id DESC) WHERE trashed_at IS NULL AND ${_mediaPredicate(kind)}',
         );
+        return true;
       } on CloudError {
         // The list remains usable if D1 limits delay the index build.
+        return false;
       }
     });
   }
@@ -442,7 +444,31 @@ class MobileLibrary {
 
   Future<Json> timelineBounds([Object? filter]) async {
     final kind = _mediaKind(filter);
-    await _ensureMediaDateIndex(kind);
+    final now = DateTime.now();
+    final key =
+        'capture-timeline-months:$kind:${now.timeZoneName}:${now.timeZoneOffset}';
+    final revision = _revision;
+    final snapshot = await _readPage(key, 0);
+    try {
+      final head = await _head('active', refresh: false);
+      if (head != null && snapshot?['head'] == head) {
+        return snapshot!['bounds'] as Json;
+      }
+      final bounds = await _loadTimelineBounds(kind);
+      if (head != null && revision == _revision) {
+        await _writePage(key, 0, {'head': head, 'bounds': bounds});
+      }
+      return bounds;
+    } on Object {
+      if (snapshot != null) return snapshot['bounds'] as Json;
+      rethrow;
+    }
+  }
+
+  Future<Json> _loadTimelineBounds(String kind) async {
+    if (!await _ensureMediaDateIndex(kind)) {
+      throw const CloudError('Даты недоступны');
+    }
     final match =
         'FROM jr_files WHERE library_id = ? AND trashed_at IS NULL AND ${_mediaPredicate(kind)}';
     final rows = await cloud.query(
@@ -450,7 +476,41 @@ class MobileLibrary {
       '(SELECT $mediaDateColumn $match ORDER BY $mediaDateColumn DESC LIMIT 1) AS newest',
       [id, id],
     );
-    return rows.single;
+    final bounds = rows.single;
+    int? localMonth(String? value) {
+      if (value == null) return null;
+      final date = DateTime.tryParse(
+        value.length == 10 ? '${value}T00:00:00.000Z' : value,
+      )?.toLocal();
+      return date == null ? null : date.year * 12 + date.month - 1;
+    }
+
+    String boundary(int month) => DateTime(
+      month ~/ 12,
+      month % 12 + 1,
+    ).toUtc().toIso8601String().replaceFirst(RegExp(r'T00:00:00\.000Z$'), '');
+
+    final first = localMonth(bounds['oldest'] as String?);
+    final last = localMonth(bounds['newest'] as String?);
+    if (first == null || last == null) return {...bounds, 'months': <int>[]};
+    final months = [first];
+    for (var start = first + 1; start < last; start += 480) {
+      final end = (start + 480).clamp(start, last);
+      final ranges = [
+        for (var month = start; month < end; month++)
+          [boundary(month), boundary(month + 1)],
+      ];
+      final found = await cloud.query(
+        '''SELECT month.key AS position FROM json_each(?) AS month
+           WHERE EXISTS (SELECT 1 $match
+                         AND $mediaDateColumn >= json_extract(month.value, '\$[0]')
+                         AND $mediaDateColumn < json_extract(month.value, '\$[1]'))''',
+        [jsonEncode(ranges), id],
+      );
+      months.addAll(found.map((row) => start + (row['position'] as int)));
+    }
+    if (last != first) months.add(last);
+    return {...bounds, 'months': months..sort()};
   }
 
   Future<void> setCaptureDates(List<Json> edits) async {

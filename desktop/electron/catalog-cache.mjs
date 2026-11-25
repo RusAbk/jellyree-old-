@@ -391,10 +391,8 @@ export class CatalogCache {
   }
   timelineBounds(kind, fetchBounds) {
     return this.#queue.run(async () => {
-      const key =
-        kind === "all"
-          ? "capture-timeline-bounds"
-          : `capture-timeline-bounds:${kind}`;
+      const timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+      const key = `capture-timeline-months:${kind}:${timeZone}`;
       const snapshot = this.#state(key);
       try {
         const head = await this.#head("active");

@@ -2782,6 +2782,11 @@ button {
   font-weight: 700;
   color: #595371;
 }
+.timeline-mark small {
+  display: block;
+  font-size: 10px;
+  font-weight: 500;
+}
 .timeline-mark:hover,
 .timeline-mark.current-mark {
   background: #eee9fc;

@@ -34,6 +34,7 @@ import {
   mediaDateColumn,
   mediaPredicate,
   normalizeMediaKind,
+  populatedMediaMonths,
 } from "./catalog-query.mjs";
 import { readCaptureDate } from "./capture-date.mjs";
 import { FileNotes } from "./file-notes.mjs";
@@ -256,14 +257,18 @@ export class Library {
     const kind = normalizeMediaKind(filter);
     const fetch = async () => {
       await this.#ensureCaptureSchema();
-      await this.#ensureIndex(kind);
+      if (!(await this.#ensureIndex(kind)))
+        throw new Error(t("Даты недоступны"));
       const match = `FROM jr_files WHERE library_id = ? AND trashed_at IS NULL AND ${mediaPredicate(kind)}`;
       const [bounds] = await this.db.query(
         `SELECT (SELECT ${mediaDateColumn} ${match} ORDER BY ${mediaDateColumn} ASC LIMIT 1) AS oldest,
                 (SELECT ${mediaDateColumn} ${match} ORDER BY ${mediaDateColumn} DESC LIMIT 1) AS newest`,
         [this.id, this.id],
       );
-      return bounds;
+      return {
+        ...bounds,
+        months: await populatedMediaMonths(this.db, match, this.id, bounds),
+      };
     };
     return this.catalog?.timelineBounds(kind, fetch) ?? fetch();
   }

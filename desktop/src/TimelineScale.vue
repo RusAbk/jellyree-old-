@@ -2,10 +2,9 @@
 import { computed, ref, watch } from "vue";
 import { localeCode, t } from "./i18n";
 import { monthIndex, monthStart } from "./timeline-dates";
-import type { TimelineBounds } from "./types";
 
 const props = defineProps<{
-  bounds: TimelineBounds | null;
+  months: number[];
   activeDay?: number;
   loading: boolean;
   failed: boolean;
@@ -25,79 +24,94 @@ const fullMonth = computed(
   () =>
     new Intl.DateTimeFormat(localeCode(), { month: "long", year: "numeric" }),
 );
-const getMonth = (value?: string | null) =>
-  value ? monthIndex(new Date(value)) : monthIndex(new Date());
-const first = computed(() => getMonth(props.bounds?.oldest));
-const last = computed(() => getMonth(props.bounds?.newest));
-const active = computed(() =>
-  props.activeDay === undefined
-    ? last.value
-    : monthIndex(new Date(props.activeDay)),
-);
+const lastIndex = computed(() => Math.max(0, props.months.length - 1));
+const active = computed(() => {
+  if (props.activeDay === undefined) return 0;
+  const value = monthIndex(new Date(props.activeDay));
+  const index = props.months.findIndex((month) => month <= value);
+  return index === -1 ? lastIndex.value : index;
+});
 const spans = computed(() => {
-  const full = Math.max(1, last.value - first.value + 1);
-  return [full, 120, 36, 12].filter(
+  const full = Math.max(1, props.months.length);
+  return [full, 120, 36, 12, 4].filter(
     (size, index) => index === 0 || size < full,
   );
 });
 const visible = computed(() => {
   const span = spans.value[zoom.value] ?? spans.value.at(-1)!;
-  const low = Math.max(
-    first.value,
+  const start = Math.max(
+    0,
     Math.min(
-      last.value - span + 1,
+      lastIndex.value - span + 1,
       Math.round((center.value ?? active.value) - span / 2),
     ),
   );
-  return { low, high: Math.min(last.value, low + span - 1) };
+  return { start, end: Math.min(lastIndex.value, start + span - 1) };
 });
-const month = computed(() =>
+const slot = computed(() =>
   Math.max(
-    visible.value.low,
-    Math.min(visible.value.high, scrub.value ?? active.value),
+    visible.value.start,
+    Math.min(visible.value.end, scrub.value ?? active.value),
   ),
 );
-const label = computed(() => fullMonth.value.format(monthStart(month.value)));
-const offset = (value: number) => {
-  const { high, low } = visible.value;
-  return high === low ? 50 : ((high - value) * 100) / (high - low);
+const month = computed(() => props.months[slot.value]);
+const label = computed(() =>
+  month.value === undefined
+    ? ""
+    : fullMonth.value.format(monthStart(month.value)),
+);
+const offset = (index: number) => {
+  const { start, end } = visible.value;
+  return end === start ? 50 : ((index - start) * 100) / (end - start);
 };
 const marks = computed(() => {
-  const { low, high } = visible.value;
-  const pxPerMonth = Math.max(1, height.value) / Math.max(1, high - low);
-  const yearStep = Math.max(1, Math.ceil(32 / (pxPerMonth * 12)));
-  const years: { at: number; text: string; year: boolean }[] = [];
-  for (
-    let year = Math.floor(high / 12);
-    year >= Math.floor(low / 12);
-    year -= yearStep
-  ) {
+  const { start, end } = visible.value;
+  const pxPerSlot = Math.max(1, height.value) / Math.max(1, end - start);
+  const years: {
+    index: number;
+    text: string;
+    year: boolean;
+    detail?: string;
+  }[] = [];
+  let previous = -Infinity;
+  let previousYear: number | undefined;
+  for (let index = start; index <= end; index++) {
+    const value = props.months[index];
+    if (value === undefined) break;
+    const year = Math.floor(value / 12);
+    if (year === previousYear) continue;
+    previousYear = year;
+    if ((index - previous) * pxPerSlot < 32) continue;
     years.push({
-      at: Math.min(high, year * 12 + 11),
+      index,
       text: String(year),
       year: true,
+      detail:
+        pxPerSlot >= 36
+          ? shortMonth.value.format(monthStart(value))
+          : undefined,
     });
+    previous = index;
   }
-  const step = [1, 2, 3, 6].find((months) => months * pxPerMonth >= 23);
-  if (!step) return years;
   const labels = [...years];
-  for (let at = high - (high % step); at >= low; at -= step) {
-    if (years.some((year) => Math.abs(at - year.at) * pxPerMonth < 21))
+  const step = Math.max(1, Math.ceil(23 / pxPerSlot));
+  for (let index = start; index <= end; index += step) {
+    const value = props.months[index];
+    if (value === undefined) break;
+    if (years.some((year) => Math.abs(index - year.index) * pxPerSlot < 21))
       continue;
     labels.push({
-      at,
-      text: shortMonth.value.format(monthStart(at)),
+      index,
+      text: shortMonth.value.format(monthStart(value)),
       year: false,
     });
   }
-  return labels.sort((a, b) => b.at - a.at);
+  return labels.sort((a, b) => a.index - b.index);
 });
-watch([active, first, last], () => {
+watch([active, () => props.months], () => {
   zoom.value = Math.min(zoom.value, spans.value.length - 1);
-  if (active.value < visible.value.low || active.value > visible.value.high)
+  if (active.value < visible.value.start || active.value > visible.value.end)
     center.value = active.value;
-});
-watch(active, () => {
   keyboardTarget.value = undefined;
 });
 watch(
@@ -120,51 +134,60 @@ function zoomBy(direction: number) {
     Math.min(spans.value.length - 1, zoom.value + direction),
   );
 }
-function jump(value: number) {
-  keyboardTarget.value = Math.max(first.value, Math.min(last.value, value));
-  emit("jump", keyboardTarget.value);
+function jump(index: number) {
+  const target = Math.max(0, Math.min(lastIndex.value, index));
+  const value = props.months[target];
+  if (value === undefined) return;
+  keyboardTarget.value = target;
+  emit("jump", value);
 }
-function trackMonth(event: PointerEvent) {
+function trackSlot(event: PointerEvent) {
   const bounds = track.value!.getBoundingClientRect();
   const ratio = Math.max(
     0,
     Math.min(1, (event.clientY - bounds.top) / Math.max(1, bounds.height)),
   );
-  return Math.round(
-    visible.value.high - ratio * (visible.value.high - visible.value.low),
-  );
+  const { start, end } = visible.value;
+  return Math.round(start + ratio * (end - start));
 }
 function start(event: PointerEvent) {
   if (event.button !== 0 || !event.isPrimary) return;
   pointer.value = event.pointerId;
   (event.currentTarget as HTMLElement).setPointerCapture(event.pointerId);
-  scrub.value = trackMonth(event);
+  scrub.value = trackSlot(event);
 }
 function move(event: PointerEvent) {
-  if (pointer.value === event.pointerId) scrub.value = trackMonth(event);
+  if (pointer.value === event.pointerId) scrub.value = trackSlot(event);
 }
 function stop(event: PointerEvent) {
   if (pointer.value !== event.pointerId) return;
-  if (event.type === "pointerup") jump(trackMonth(event));
+  if (event.type === "pointerup") jump(trackSlot(event));
   scrub.value = undefined;
   pointer.value = undefined;
 }
 function keydown(event: KeyboardEvent) {
   const from = keyboardTarget.value ?? active.value;
+  const year = Math.floor(props.months[from]! / 12);
   const target = {
-    ArrowUp: from + 1,
-    ArrowRight: from + 1,
-    ArrowDown: from - 1,
-    ArrowLeft: from - 1,
-    PageUp: from + 12,
-    PageDown: from - 12,
-    Home: last.value,
-    End: first.value,
+    ArrowUp: from - 1,
+    ArrowRight: from - 1,
+    ArrowDown: from + 1,
+    ArrowLeft: from + 1,
+    PageUp: () =>
+      props.months.findIndex((month) => Math.floor(month / 12) <= year) - 1,
+    PageDown: () => {
+      const index = props.months.findIndex(
+        (month) => Math.floor(month / 12) < year,
+      );
+      return index === -1 ? lastIndex.value : index;
+    },
+    Home: 0,
+    End: lastIndex.value,
   }[event.key];
   if (target === undefined) return;
   event.preventDefault();
   event.stopPropagation();
-  jump(target);
+  jump(typeof target === "number" ? target : target());
 }
 </script>
 
@@ -176,7 +199,7 @@ function keydown(event: KeyboardEvent) {
   >
     <header class="timeline-heading">
       <span>{{ t("Временная шкала") }}</span>
-      <div v-if="bounds" class="timeline-date">
+      <div v-if="months.length" class="timeline-date">
         <output class="timeline-current" :title="label">{{ label }}</output>
         <button
           v-if="failed"
@@ -189,7 +212,7 @@ function keydown(event: KeyboardEvent) {
         </button>
       </div>
     </header>
-    <div v-if="!bounds" class="timeline-track timeline-empty">
+    <div v-if="!months.length" class="timeline-track timeline-empty">
       <div class="timeline-axis" aria-hidden="true"></div>
       <span role="status">{{
         t(loading ? "Загрузка дат…" : failed ? "Даты недоступны" : "Нет дат")
@@ -210,8 +233,8 @@ function keydown(event: KeyboardEvent) {
         tabindex="0"
         aria-orientation="vertical"
         :aria-label="t('Дата на временной шкале')"
-        :aria-valuemin="first"
-        :aria-valuemax="last"
+        :aria-valuemin="months.at(-1)"
+        :aria-valuemax="months[0]"
         :aria-valuenow="month"
         :aria-valuetext="label"
         @pointerdown="start"
@@ -223,26 +246,29 @@ function keydown(event: KeyboardEvent) {
       >
         <span
           class="timeline-thumb"
-          :style="{ top: offset(month) + '%' }"
+          :style="{ top: offset(slot) + '%' }"
         ></span>
       </div>
       <button
         v-for="mark in marks"
-        :key="(mark.year ? 'year-' : 'month-') + mark.at"
+        :key="months[mark.index]"
         class="timeline-mark"
-        :class="{ 'year-mark': mark.year, 'current-mark': mark.at === month }"
-        :style="{ top: offset(mark.at) + '%' }"
+        :class="{ 'year-mark': mark.year, 'current-mark': mark.index === slot }"
+        :style="{ top: offset(mark.index) + '%' }"
         :aria-label="
           t('Перейти к {0}', {
-            '0': mark.year ? mark.text : fullMonth.format(monthStart(mark.at)),
+            '0': mark.year
+              ? mark.text
+              : fullMonth.format(monthStart(months[mark.index]!)),
           })
         "
-        @click="jump(mark.at)"
+        @click="jump(mark.index)"
       >
         {{ mark.text }}
+        <small v-if="mark.detail" aria-hidden="true">{{ mark.detail }}</small>
       </button>
     </div>
-    <div v-if="bounds" class="timeline-zoom">
+    <div v-if="months.length" class="timeline-zoom">
       <button
         class="icon-button small"
         :aria-label="t('Уменьшить масштаб шкалы')"
