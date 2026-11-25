@@ -3,7 +3,8 @@ import assert from "node:assert/strict";
 import { DatabaseSync } from "node:sqlite";
 import { createHash } from "node:crypto";
 import { Readable } from "node:stream";
-import { S3Client } from "@aws-sdk/client-s3";
+import { PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
+import { UploadCancellation } from "../electron/upload-cancellation.mjs";
 import { fileURLToPath } from "node:url";
 import {
   mkdir,
@@ -880,6 +881,56 @@ test("media timeline seeks both ways by date and indexes only active media", asy
   assert.equal(requests.length, requestCount);
 });
 
+test("changing media dates updates distinct dates atomically before moving files in the timeline", async (t) => {
+  const { library, insert } = fixture(t);
+  await library.initialize();
+  insert("photo");
+  insert("video", { mime: "video/mp4", captured: captureDate });
+  insert("foreign", { scope: "other-library" });
+  insert("trashed", { trash: "2026-02-01" });
+  insert("document", { mime: "text/plain" });
+  const photoDate = "2001-02-03T09:20:30.456Z";
+  const videoDate = "2001-02-03T17:36:59.000Z";
+  await library.setCaptureDates([{ id: "photo", capturedAt: photoDate }]);
+  await library.setCaptureDates([
+    { id: "photo", capturedAt: photoDate },
+    { id: "video", capturedAt: videoDate },
+  ]);
+  assert.deepEqual(await library.timelineBounds(), {
+    oldest: photoDate,
+    newest: videoDate,
+  });
+  const { items } = await library.list({
+    section: "timeline",
+    timelineBefore: "2001-02-04T00:00:00.000Z",
+  });
+  assert.deepEqual(
+    items.map(({ id, captured_at }) => [id, captured_at]),
+    [
+      ["video", videoDate],
+      ["photo", photoDate],
+    ],
+  );
+  assert.ok(items.every((item) => item.created_at === "2026-01-01"));
+  assert.ok(items.every((item) => item.updated_at !== item.created_at));
+  for (const id of ["foreign", "trashed", "document", "missing"]) {
+    await assert.rejects(
+      library.setCaptureDates([
+        { id: "photo", capturedAt: videoDate },
+        { id, capturedAt: videoDate },
+      ]),
+      /недоступны в медиаленте/,
+    );
+  }
+  await assert.rejects(
+    library.setCaptureDates([
+      { id: "photo", capturedAt: "2024-02-30T09:20:30.000Z" },
+    ]),
+    /корректные дату и время/,
+  );
+  assert.equal((await library.file("photo")).captured_at, photoDate);
+});
+
 test("catalog cache persists pages and reconciles updates, moves and deletions by revision", async (t) => {
   const dir = await mkdtemp(path.join(os.tmpdir(), "jr-catalog-"));
   t.after(() => rm(dir, { recursive: true, force: true }));
@@ -1710,6 +1761,75 @@ test("configuration validates endpoints indirectly and namespaces each bucket/pr
   );
   assert.notEqual(libraryId(config), libraryId({ ...config, bucket: "other" }));
   assert.notEqual(libraryId(config), libraryId({ ...config, prefix: "other" }));
+});
+
+test("canceling a pending file and an active replacement keeps the original and uploads the remaining file", async (t) => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "jr-cancel-upload-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const paths = ["first.txt", "second.txt", "third.txt"].map((name) =>
+    path.join(directory, name),
+  );
+  await Promise.all(paths.map((source) => writeFile(source, "contents")));
+  const controller = new UploadCancellation();
+  const attempted = [];
+  const { library, insert } = fixture(t, {
+    createUpload: ({ client, params }) => ({
+      on() {},
+      async done() {
+        for await (const chunk of params.Body) assert.ok(chunk.length);
+        await client.send(
+          new PutObjectCommand({ Bucket: params.Bucket, Key: params.Key }),
+        );
+      },
+    }),
+  });
+  await library.initialize();
+  insert("original", { name: "first.txt", mime: "text/plain" });
+  const discarded = [];
+  library.s3.send = async (command, options) => {
+    if (command instanceof PutObjectCommand) {
+      const name = path.basename(command.input.Key);
+      attempted.push(name);
+      if (name === "first.txt") assert.equal(controller.cancel(0), true);
+      options.abortSignal.throwIfAborted();
+    } else if (command.constructor.name === "DeleteObjectCommand") {
+      discarded.push(command.input.Key);
+    }
+    return {};
+  };
+  const plan = await library.planUploadPaths(paths, null);
+  controller.count = plan.jobs.length;
+  assert.equal(controller.cancel(1), true);
+  const progress = [];
+  const result = await library.uploadPlanned(
+    plan,
+    (value) => progress.push(value),
+    async () => ({ action: "replace" }),
+    controller,
+  );
+  assert.deepEqual(attempted, ["first.txt", "third.txt"]);
+  assert.deepEqual(
+    discarded.map((key) => path.basename(key)),
+    ["first.txt"],
+  );
+  assert.ok(discarded.every((key) => key !== "objects/original"));
+  assert.equal(result.done, 1);
+  assert.equal(result.failures.length, 0);
+  assert.equal(result.canceled, false);
+  assert.deepEqual(
+    progress
+      .filter((value) => value.fileState === "canceled")
+      .map((value) => value.fileIndex),
+    [0, 1],
+  );
+  assert.ok(
+    progress.some(
+      (value) => value.fileState === "committing" && value.fileIndex === 2,
+    ),
+  );
+  assert.equal(controller.cancel(2), false);
+  assert.equal((await library.file("original")).object_key, "objects/original");
+  assert.equal((await library.list()).total, 2);
 });
 
 test("upload collisions: skip all applies only to this batch and counts every duplicate", async (t) => {

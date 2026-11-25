@@ -21,6 +21,9 @@ const mobileVisualMedia = '($_visualMedia)';
 const mobileTimelineMedia = "($_visualMedia OR mime_type LIKE 'audio/%')";
 const _photoMedia = '($_imageMedia OR $_photoFormats)';
 const mediaDateColumn = 'COALESCE(captured_at, created_at)';
+final _captureTimestamp = RegExp(
+  r'^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$',
+);
 final _uuid = Uuid();
 
 String _mediaKind(Object? value) => switch (value) {
@@ -448,6 +451,49 @@ class MobileLibrary {
     return rows.single;
   }
 
+  Future<void> setCaptureDates(List<Json> edits) async {
+    if (edits.isEmpty || edits.length > 1000) {
+      throw const CloudError('Выберите от 1 до 1000 файлов.');
+    }
+    final dates = <String, String>{};
+    for (final edit in edits) {
+      final fileId = edit['id'];
+      final value = edit['capturedAt'];
+      if (fileId is! String ||
+          fileId.isEmpty ||
+          dates.containsKey(fileId) ||
+          value is! String ||
+          !_captureTimestamp.hasMatch(value) ||
+          value.startsWith('0000') ||
+          DateTime.tryParse(value)?.toIso8601String() != value) {
+        throw const CloudError('Укажите корректные дату и время.');
+      }
+      dates[fileId] = value;
+    }
+    await _ensureCaptureSchema();
+    try {
+      final updated = await cloud.query(
+        '''WITH edits AS MATERIALIZED (
+             SELECT key AS id, value AS captured_at FROM json_each(?)
+           ), eligible AS MATERIALIZED (
+             SELECT edits.id, edits.captured_at FROM edits JOIN jr_files USING(id)
+             WHERE library_id = ? AND trashed_at IS NULL AND $mobileTimelineMedia
+           )
+           UPDATE jr_files SET captured_at = (SELECT captured_at FROM eligible WHERE id = jr_files.id), updated_at = ?
+           WHERE id IN (SELECT id FROM eligible) AND (SELECT COUNT(*) FROM eligible) = ?
+           RETURNING id''',
+        [jsonEncode(dates), id, timestamp(), dates.length],
+      );
+      if (updated.length != dates.length) {
+        throw const CloudError(
+          'Некоторые выбранные файлы больше недоступны в медиаленте.',
+        );
+      }
+    } finally {
+      await invalidate();
+    }
+  }
+
   Future<Json> stats() async {
     final [summary] = await cloud.query(
       'SELECT COUNT(*) AS files, COALESCE(SUM(size_bytes),0) AS bytes, COALESCE(SUM(trashed_at IS NOT NULL),0) AS trashed FROM jr_files WHERE library_id = ?',
@@ -694,6 +740,8 @@ class MobileLibrary {
     Json? replace,
     bool preserveCaptureDate = false,
     void Function(int)? report,
+    void Function()? onCommit,
+    UploadCancellation? cancellation,
   }) async {
     await _ensureCaptureSchema();
     await requireFolder(folder);
@@ -717,10 +765,29 @@ class MobileLibrary {
     final key = _objectKey(null);
     final fileId = original?['id'] as String? ?? _uuid.v4();
     final type = mimeType ?? lookupMimeType(name) ?? 'application/octet-stream';
-    final capturedAt = preserveCaptureDate
-        ? (original?['captured_at'])
+    final keepCaptureDate = preserveCaptureDate && original != null;
+    final capturedAt = keepCaptureDate
+        ? null
         : await readCaptureDate(bytes, type);
-    await cloud.put(key, bytes, size, type, report ?? (_) {});
+    cancellation?.check();
+    try {
+      await cloud.put(
+        key,
+        bytes,
+        size,
+        type,
+        report ?? (_) {},
+        cancellation: cancellation,
+      );
+      cancellation?.commit();
+    } on Object {
+      if (cancellation?.canceled == true) {
+        await cloud.delete(key);
+        cancellation?.check();
+      }
+      rethrow;
+    }
+    onCommit?.call();
     final now = timestamp();
     final rename = original != null && original['name'] != name;
     final saved = await _register(
@@ -729,7 +796,8 @@ class MobileLibrary {
       name,
       original == null
           ? 'INSERT INTO jr_files (id,library_id,folder_id,object_key,name,mime_type,size_bytes,captured_at,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?) RETURNING *'
-          : "UPDATE jr_files SET object_key=?,name=?,mime_type=?,size_bytes=?,adjustments='{}',captured_at=?,updated_at=? WHERE id=? AND library_id=? AND object_key=? AND trashed_at IS NULL AND name=? AND folder_id IS ?"
+          : "UPDATE jr_files SET object_key=?,name=?,mime_type=?,size_bytes=?,adjustments='{}',"
+                "${keepCaptureDate ? '' : 'captured_at=?,'}updated_at=? WHERE id=? AND library_id=? AND object_key=? AND trashed_at IS NULL AND name=? AND folder_id IS ?"
                 "${rename ? ' AND NOT EXISTS (SELECT 1 FROM jr_files AS other WHERE other.library_id=? AND other.folder_id IS ? AND other.name=? AND other.trashed_at IS NULL)' : ''} RETURNING *",
       original == null
           ? [fileId, id, folder, key, name, type, size, capturedAt, now, now]
@@ -738,7 +806,7 @@ class MobileLibrary {
               name,
               type,
               size,
-              capturedAt,
+              if (!keepCaptureDate) capturedAt,
               now,
               fileId,
               id,

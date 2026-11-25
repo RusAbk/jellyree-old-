@@ -73,6 +73,8 @@ class MobileHost {
   final _session = _uuid.v4();
   var _thumbnailEpoch = 0;
   var _mutations = 0;
+  Future<void> _uploadQueue = Future.value();
+  final _uploadFiles = <String, List<UploadCancellation>>{};
   bool _closing = false;
   bool _pruningThumbnails = false;
   final _prefs = <String, dynamic>{};
@@ -704,11 +706,66 @@ class MobileHost {
     return File('${dir.path}/${cleanName(name)}');
   }
 
-  Future<Json> _upload(
+  Future<Json> _queueUpload(
     MobileLibrary library,
     List<Picked> picked,
     String? root,
     String job, {
+    List<String?>? roots,
+  }) {
+    if (_uploadFiles.containsKey(job)) {
+      throw const CloudError('Дождитесь завершения текущих операций.');
+    }
+    final controls = [for (final _ in picked) UploadCancellation()];
+    _uploadFiles[job] = controls;
+    final prepared = () async {
+      final sizes = <int>[];
+      for (final item in picked) {
+        sizes.add(await item.file.length().catchError((Object _) => 0));
+      }
+      _emit('progress', {
+        'kind': 'upload',
+        'jobId': job,
+        'phase': 'queued',
+        'done': 0,
+        'total': picked.length,
+        'totalBytes': sizes.fold<int>(0, (sum, size) => sum + size),
+        'queuedFiles': [
+          for (final (index, item) in picked.indexed)
+            {
+              'fileIndex': index,
+              'name': item.name,
+              'sizeBytes': sizes[index],
+              if (item.folders.isNotEmpty) 'targetPath': item.folders.join('/'),
+            },
+        ],
+      });
+      return sizes;
+    }();
+    final result = _uploadQueue
+        .then(
+          (_) async => _upload(
+            library,
+            picked,
+            root,
+            job,
+            controls,
+            await prepared,
+            roots: roots,
+          ),
+        )
+        .whenComplete(() => _uploadFiles.remove(job));
+    _uploadQueue = result.then((_) {}, onError: (Object _) {});
+    return result;
+  }
+
+  Future<Json> _upload(
+    MobileLibrary library,
+    List<Picked> picked,
+    String? root,
+    String job,
+    List<UploadCancellation> controls,
+    List<int> sizes, {
     List<String?>? roots,
   }) async {
     final paths = <(String?, String), String>{};
@@ -746,6 +803,7 @@ class MobileHost {
       final unique = <String?, Set<String>>{};
       final candidates = <(String?, String)>[];
       for (var i = index; i < picked.length; i++) {
+        if (controls[i].canceled) continue;
         try {
           final folder = await resolveFolder(i);
           final name = cleanName(picked[i].name);
@@ -767,32 +825,41 @@ class MobileHost {
 
     final failures = <Json>[];
     final warnings = <Json>[];
+    final canceledFiles = <int>[];
     var done = 0, skipped = 0;
+    var bytesCompleted = 0;
+    final totalBytes = sizes.fold<int>(0, (sum, size) => sum + size);
     var canceled = false;
     String? applyToAll;
     for (var index = 0; index < picked.length; index++) {
       final item = picked[index];
-      var size = 0;
+      final control = controls[index];
+      var size = sizes[index];
       var name = item.name;
+      var fileState = 'failed';
       final targetPath = [...item.folders, name].join('/');
-      void progress(String state, int loaded) => _emit('progress', {
-        'kind': 'upload',
-        'jobId': job,
-        'phase': 'uploading',
-        'fileIndex': index,
-        'fileState': state,
-        'name': name,
-        'done': done + skipped,
-        'total': picked.length,
-        'loaded': loaded,
-        'sizeBytes': size,
-        'totalBytes': size,
-        'targetPath': targetPath,
-      });
+      void progress(String state, int loaded, {bool finished = false}) =>
+          _emit('progress', {
+            'kind': 'upload',
+            'jobId': job,
+            'phase': 'uploading',
+            'fileIndex': index,
+            'fileState': state,
+            'name': name,
+            'done': index + (finished ? 1 : 0),
+            'total': picked.length,
+            'loaded': bytesCompleted + loaded,
+            'fileLoaded': loaded,
+            'sizeBytes': size,
+            'totalBytes': totalBytes,
+            'targetPath': targetPath,
+          });
       try {
+        control.check();
         size = await item.file.length();
         final folder = await resolveFolder(index);
         var matches = await library.named(folder, name);
+        control.check();
         Json? replace;
         if (matches.isNotEmpty) {
           final suggested = await library.availableName(folder, name, start: 1);
@@ -800,11 +867,16 @@ class MobileHost {
           if (applyToAll == null) {
             final id = _uuid.v4();
             final count = await remainingConflicts(index);
+            control.check();
             final pending = Completer<Json>();
             _conflicts[id] = pending;
+            final detach = control.onCancel(() {
+              if (!pending.isCompleted) pending.complete({'action': 'cancel'});
+            });
             _emit('conflict', {
               'id': id,
               'jobId': job,
+              'fileIndex': index,
               'name': name,
               'targetPath': targetPath,
               'suggestedName': suggested,
@@ -820,7 +892,9 @@ class MobileHost {
             });
             try {
               answer = await pending.future;
+              control.check();
             } finally {
+              detach();
               _conflicts.remove(id);
             }
           } else {
@@ -830,12 +904,12 @@ class MobileHost {
           if (answer['applyToAll'] == true) applyToAll = action;
           if (action == 'cancel') {
             canceled = true;
-            progress('canceled', 0);
+            fileState = 'canceled';
             break;
           }
           if (action == 'skip') {
             skipped++;
-            progress('skipped', 0);
+            fileState = 'skipped';
             continue;
           }
           if (action == 'replace') {
@@ -857,6 +931,8 @@ class MobileHost {
           folder,
           mimeType: lookupMimeType(item.name),
           replace: replace,
+          cancellation: control,
+          onCommit: () => progress('committing', size),
           report: (loaded) {
             final now = DateTime.now().millisecondsSinceEpoch;
             if (now - lastReport > 120 || loaded == size) {
@@ -872,8 +948,16 @@ class MobileHost {
           });
         }
         done++;
-        progress('uploaded', size);
+        fileState = 'uploaded';
       } on Object catch (error) {
+        if (control.canceled) {
+          fileState = 'canceled';
+          canceledFiles.add(index);
+          if (error is! UploadCanceled) {
+            warnings.add({'key': 'Не удалось завершить операцию в R2.'});
+          }
+          continue;
+        }
         final id = _uuid.v4();
         _failed[id] = (library, item, target(index));
         failures.add({
@@ -886,13 +970,17 @@ class MobileHost {
               ? {'key': error.message, 'values': error.values}
               : {'key': 'Не удалось выполнить операцию.'},
         });
-        progress('failed', 0);
+      } finally {
+        control.finish();
+        progress(fileState, size, finished: true);
+        bytesCompleted += size;
       }
     }
     return {
       'done': done,
       'skipped': skipped,
       'canceled': canceled,
+      if (canceledFiles.isNotEmpty) 'canceledFiles': canceledFiles,
       'failures': failures,
       'warnings': warnings,
     };
@@ -929,6 +1017,13 @@ class MobileHost {
       case 'cancelPreview':
         _cancelPreview(a[0] as String);
         return null;
+      case 'cancelUpload':
+        final files = _uploadFiles[a[0] as String];
+        final index = a[1] as int;
+        return files != null &&
+            index >= 0 &&
+            index < files.length &&
+            files[index].cancel();
       case 'settings.get':
         return _settings();
       case 'settings.test':
@@ -1101,6 +1196,9 @@ class MobileHost {
         case 'update':
           await library.update((a[0] as List).cast<String>(), a[1] as Json);
           return null;
+        case 'setCaptureDates':
+          await library.setCaptureDates((a[0] as List).cast<Json>());
+          return null;
         case 'remove':
           return library.remove((a[0] as List).cast<String>());
         case 'emptyTrash':
@@ -1154,7 +1252,7 @@ class MobileHost {
           }
         case 'pickUpload':
           final picked = await pick(a[1] == true);
-          return _upload(library, picked, a[0] as String?, a[2] as String);
+          return _queueUpload(library, picked, a[0] as String?, a[2] as String);
         case 'retryUpload':
           final ids = (a[0] as List).cast<String>();
           final entries = [
@@ -1165,18 +1263,24 @@ class MobileHost {
               .where((entry) => identical(entry.$2.$1, library))
               .toList();
           if (items.isEmpty) return {'done': 0, 'failures': []};
-          final result = await _upload(
+          final result = await _queueUpload(
             library,
             items.map((entry) => entry.$2.$2).toList(),
             null,
             a[1] as String,
             roots: items.map((entry) => entry.$2.$3).toList(),
           );
+          final canceled =
+              result.remove('canceledFiles') as List<int>? ?? const [];
           if (result['canceled'] != true) {
-            for (final entry in items) {
+            final resolved = [
+              for (final (index, entry) in items.indexed)
+                if (!canceled.contains(index)) entry,
+            ];
+            for (final entry in resolved) {
               _failed.remove(entry.$1);
             }
-            result['resolvedRetryIds'] = items
+            result['resolvedRetryIds'] = resolved
                 .map((entry) => entry.$1)
                 .toList();
           }

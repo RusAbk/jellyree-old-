@@ -5,6 +5,7 @@ import type { UploadJob } from "./use-upload-jobs";
 import {
   uploadPercent,
   uploadFinished,
+  uploadFileFinished,
   uploadSummary,
 } from "./use-upload-jobs";
 import { bytes } from "./format";
@@ -19,11 +20,27 @@ defineEmits<{
   clear: [];
   conflict: [];
   retry: [jobId: string, retryId?: string];
+  cancel: [jobId: string, index: number];
 }>();
 const tab = ref(props.pending ? "active" : "completed"),
   limit = ref(150);
 const summary = computed(() => uploadSummary(props.jobs));
-const active = computed(() => props.jobs.filter((job) => !uploadFinished(job)));
+type ActiveRow = {
+  key: string;
+  job: UploadJob;
+  file?: UploadJob["files"][number];
+};
+const active = computed(() =>
+  props.jobs
+    .filter((job) => !uploadFinished(job))
+    .flatMap<ActiveRow>((job) =>
+      job.files.length
+        ? job.files
+            .filter((file) => !uploadFileFinished(file))
+            .map((file) => ({ key: `${job.id}:${file.index}`, job, file }))
+        : [{ key: job.id, job, file: undefined }],
+    ),
+);
 const completed = computed(() =>
   props.jobs
     .flatMap((job) => {
@@ -36,15 +53,13 @@ const completed = computed(() =>
             ])
           : [],
       );
-      const files = job.files
-        .filter((file) => file.state !== "uploading")
-        .map((file) => ({
-          key: `${job.id}:${file.index}`,
-          job,
-          file,
-          retryId: retryIds.get(file.index),
-          retryIds: [],
-        }));
+      const files = job.files.filter(uploadFileFinished).map((file) => ({
+        key: `${job.id}:${file.index}`,
+        job,
+        file,
+        retryId: retryIds.get(file.index),
+        retryIds: [],
+      }));
       return [
         ...files,
         ...(uploadFinished(job) &&
@@ -88,7 +103,9 @@ watch(
     if (!value && previous) tab.value = "completed";
   },
 );
-function label(state: UploadJob["state"] | "uploaded" | "skipped") {
+function label(
+  state: UploadJob["state"] | UploadJob["files"][number]["state"],
+) {
   return {
     selecting: t("Выбор файлов…"),
     queued: t("В очереди"),
@@ -101,7 +118,17 @@ function label(state: UploadJob["state"] | "uploaded" | "skipped") {
     issues: t("Завершено с замечаниями"),
     failed: t("Ошибка загрузки"),
     canceled: t("Загрузка отменена"),
+    committing: t("Сохранение файла…"),
+    canceling: t("Отмена загрузки…"),
   }[state];
+}
+function filePercent(file: UploadJob["files"][number]) {
+  return uploadPercent({
+    kind: "upload",
+    done: 0,
+    loaded: file.loadedBytes ?? 0,
+    totalBytes: file.sizeBytes,
+  });
 }
 function title(job: UploadJob) {
   return (
@@ -204,49 +231,71 @@ function title(job: UploadJob) {
         {{ t("Нет активных загрузок") }}
       </p>
       <article
-        v-for="job in active"
-        :key="job.id"
+        v-for="{ key, job, file } in active.slice(0, limit)"
+        :key="key"
         class="upload-job compact-upload"
-        :data-state="job.state"
+        :data-state="file?.state || job.state"
       >
         <i
           aria-hidden="true"
           :class="
-            job.state === 'waiting'
+            (file?.state || job.state) === 'waiting'
               ? 'ri-error-warning-line'
-              : job.state === 'uploading'
+              : (file?.state || job.state) === 'uploading'
                 ? 'ri-loader-4-line spinning'
                 : 'ri-time-line'
           "
         ></i>
         <div class="upload-job-content">
           <div class="upload-job-heading">
-            <strong :title="title(job)">{{ title(job) }}</strong><span>{{
-              job.progress && job.state === "uploading"
-                ? `${uploadPercent(job.progress)}%`
-                : label(job.state)
+            <strong :title="file?.name || title(job)">{{
+              file?.name || title(job)
+            }}</strong><span>{{
+              file?.state === "uploading"
+                ? `${label(file.state)} · ${filePercent(file)}%`
+                : label(file?.state || job.state)
             }}</span>
           </div>
-          <small :title="job.destination || t('Мой диск')"
-            >{{ job.destination || t("Мой диск")
-            }}<template v-if="job.progress?.total">
+          <small :title="file?.destination || job.destination || t('Мой диск')"
+            >{{ file?.destination || job.destination || t("Мой диск")
+            }}<template v-if="file?.sizeBytes !== undefined">
+              · {{ bytes(file.sizeBytes) }}</template
+            ><template v-else-if="!file && job.progress?.total">
               · {{ job.progress.done }} / {{ job.progress.total }}</template
             ></small
           ><progress
-            v-if="job.state === 'uploading' && job.progress"
-            :value="uploadPercent(job.progress)"
+            v-if="file?.state === 'uploading'"
+            :value="filePercent(file)"
             max="100"
             :aria-label="t('Прогресс загрузки')"
           ></progress
           ><button
-            v-if="job.state === 'waiting'"
+            v-if="(file?.state || job.state) === 'waiting'"
             class="text-button"
             @click="$emit('conflict')"
           >
             {{ t("Разобрать совпадение") }}
           </button>
+          <p v-if="file?.error" class="error">{{ file.error }}</p>
         </div>
+        <button
+          v-if="file && ['queued', 'uploading', 'waiting'].includes(file.state)"
+          type="button"
+          class="icon-button small upload-file-cancel"
+          :title="t('Отменить загрузку файла {0}', { '0': file.name })"
+          :aria-label="t('Отменить загрузку файла {0}', { '0': file.name })"
+          @click="$emit('cancel', job.id, file.index)"
+        >
+          <i aria-hidden="true" class="ri-close-line"></i>
+        </button>
       </article>
+      <button
+        v-if="active.length > limit"
+        class="text-button upload-history-more"
+        @click="limit += 150"
+      >
+        {{ t("Показать ещё") }}
+      </button>
     </div>
     <div
       v-else

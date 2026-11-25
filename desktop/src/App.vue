@@ -34,7 +34,14 @@ import { bytes, date, dateTime, icon, mediaDate } from "./format";
 import { api } from "./api";
 import { useGalleryLayout } from "./use-gallery-layout";
 import { galleryGap } from "./gallery-layout";
-import { monthIndex, monthStart } from "./timeline-dates";
+import {
+  captureDateOnDay,
+  dateInputValue,
+  localDay,
+  monthIndex,
+  monthStart,
+  timeInputValue,
+} from "./timeline-dates";
 import {
   INTERNAL_DRAG_TYPE,
   canMoveFolder,
@@ -42,6 +49,7 @@ import {
 } from "./drag-items";
 import type {
   Adjustments,
+  CaptureDateEdit,
   CapturedVideoFrame,
   DriveFile,
   FilePatch,
@@ -206,6 +214,7 @@ const {
   resolveConflict: resolveUploadConflict,
   clearFinished: clearFinishedUploads,
   retry: retryUpload,
+  cancel: cancelUpload,
   retrying: retryingUploads,
   reset: resetUploads,
 } = useUploadJobs(api, () => requestUploadRefresh("folders"));
@@ -266,6 +275,11 @@ watch(
   photoZoom.reset,
 );
 const expanded = ref(new Set<string>());
+type CaptureDateDraft = {
+  date: string;
+  time: string;
+  targets: { id: string; previous: string }[];
+};
 const modal = ref<{
   kind: string;
   title: string;
@@ -275,6 +289,7 @@ const modal = ref<{
   target: string;
   folder?: Folder;
   parentId?: string | null;
+  captureDate?: CaptureDateDraft;
 } | null>(null);
 const tagEditor = ref<InstanceType<typeof TagEditor>>();
 let generation = 0,
@@ -512,6 +527,9 @@ const contextItems = computed<MenuItem[]>(() => {
               separator: !single,
             }),
             item("tags", t("Изменить теги"), "ri-price-tag-3-line"),
+            ...(isTimeline.value
+              ? [item("captureDate", t("Изменить дату"), "ri-calendar-line")]
+              : []),
             item(
               "favorite",
               starred ? t("Убрать из избранного") : t("В избранное"),
@@ -638,6 +656,7 @@ function chooseContext(id: string) {
   }
   if (id === "download") void download(menu.ids);
   if (id === "share") void share(menu.ids[0]!);
+  if (id === "captureDate") openCaptureDates(menu.ids);
   if (["rename", "tags", "move", "delete"].includes(id))
     openModal(id, menu.ids);
   if (id === "favorite")
@@ -1349,6 +1368,7 @@ function openModal(
     deleteFolder: t("Удалить пустую папку?"),
     delete: t("Удалить навсегда?"),
     emptyTrash: t("Очистить корзину?"),
+    captureDate: t("Изменить дату"),
     import: t("Добавить существующие объекты R2?"),
   };
   const file = files.value.find((f) => f.id === ids[0]);
@@ -1367,6 +1387,57 @@ function openModal(
     folder,
     parentId,
   };
+}
+function openCaptureDates(ids = selection.value) {
+  if (!isTimeline.value || busy.value) return;
+  const selected = new Set(ids);
+  const targets = files.value
+    .filter((file) => selected.has(file.id))
+    .map((file) => ({ id: file.id, previous: mediaDate(file) }));
+  const first = targets[0];
+  if (!first) return;
+  const currentDay = dateInputValue(new Date(first.previous));
+  openModal(
+    "captureDate",
+    targets.map(({ id }) => id),
+  );
+  if (!modal.value) return;
+  modal.value.captureDate = {
+    date: targets.every(
+      ({ previous }) => dateInputValue(new Date(previous)) === currentDay,
+    )
+      ? currentDay
+      : "",
+    time: targets.length === 1 ? timeInputValue(new Date(first.previous)) : "",
+    targets,
+  };
+}
+async function saveCaptureDates(draft: CaptureDateDraft) {
+  const first = draft.targets[0]!;
+  const time =
+    draft.targets.length === 1 &&
+    draft.time === timeInputValue(new Date(first.previous))
+      ? ""
+      : draft.time;
+  const edits: CaptureDateEdit[] = draft.targets.map(({ id, previous }) => {
+    const capturedAt = captureDateOnDay(previous, draft.date, time);
+    if (!capturedAt) throw new Error(t("Укажите корректные дату и время."));
+    return { id, capturedAt };
+  });
+  await api.setCaptureDates(edits);
+  if (!isTimeline.value) return;
+  await refreshTimelineBounds();
+  const day = localDay(new Date(edits[0]!.capturedAt));
+  const nextDay = new Date(day);
+  nextDay.setDate(day.getDate() + 1);
+  const newest = Date.parse(timelineBounds.value?.newest ?? "");
+  timelineDay.value = day.getTime();
+  timelineBefore.value =
+    newest < nextDay.getTime() || nextDay.getUTCFullYear() > 9999
+      ? undefined
+      : nextDay.toISOString();
+  files.value = [];
+  filesScroll.value?.scrollTo(0, 0);
 }
 function updateDraftTags(tags: string[]) {
   if (modal.value?.kind !== "tags") return false;
@@ -1442,12 +1513,13 @@ async function submitModal() {
           closePreview();
       }
       if (value.kind === "emptyTrash") showTrashResult(await api.emptyTrash());
+      if (value.captureDate) await saveCaptureDates(value.captureDate);
       if (value.kind === "import") {
         const result = await api.importBucket();
         notice.value = t("Проверено объектов: {0}", { "0": result.scanned });
       }
     },
-    "",
+    value.captureDate ? t("Дата изменена.") : "",
     refresh,
   );
   if (success) modal.value = null;
@@ -2557,6 +2629,15 @@ onBeforeUnmount(() => {
                   <i aria-hidden="true" class="ri-price-tag-3-line"></i
                   >{{ t("Теги") }}</button
                 ><button
+                  v-if="isTimeline"
+                  :disabled="busy"
+                  :aria-label="t('Изменить дату')"
+                  :title="t('Изменить дату')"
+                  @click="openCaptureDates()"
+                >
+                  <i aria-hidden="true" class="ri-calendar-line"></i
+                  >{{ t("Дата") }}</button
+                ><button
                   :disabled="busy"
                   @click="
                     patch(
@@ -3163,6 +3244,7 @@ onBeforeUnmount(() => {
     @clear="clearFinishedUploads"
     @conflict="uploadConflictOpen = true"
     @retry="retryUpload"
+    @cancel="cancelUpload"
   />
   <UploadConflictDialog
     v-if="uploadConflict && uploadConflictOpen"
@@ -3218,6 +3300,35 @@ onBeforeUnmount(() => {
           <i aria-hidden="true" class="ri-close-line"></i>
         </button>
       </header>
+      <template v-if="modal.captureDate">
+        <p v-if="modal.ids.length > 1" class="muted">
+          {{ t("Выбрано: {0}", { "0": modal.ids.length }) }}
+        </p>
+        <div class="capture-date-fields">
+          <label>
+            {{ t("Дата") }}
+            <input
+              v-model="modal.captureDate.date"
+              type="date"
+              min="0001-01-01"
+              max="9999-12-31"
+              required
+              :disabled="busy"
+            />
+          </label>
+          <label>
+            {{ t("Время") }}
+            <input
+              v-model="modal.captureDate.time"
+              type="time"
+              :disabled="busy"
+            />
+          </label>
+        </div>
+        <p v-if="modal.ids.length > 1" class="muted">
+          {{ t("Пустое поле времени сохраняет время каждого файла.") }}
+        </p>
+      </template>
       <p v-if="modal.kind === 'tags' && modal.ids.length > 1" class="muted">
         {{ t("Этот набор заменит теги всех выбранных файлов.") }}
       </p>

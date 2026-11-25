@@ -18,6 +18,7 @@ import { Library } from "./library.mjs";
 import { isImageFile } from "./image-formats.mjs";
 import { UploadConflictBroker } from "./upload-conflicts.mjs";
 import { OperationQueue } from "./operation-queue.mjs";
+import { UploadCancellation } from "./upload-cancellation.mjs";
 import { ThumbnailCache, thumbnailKey } from "./thumbnail-cache.mjs";
 import { ThumbnailMedia } from "./thumbnail-media.mjs";
 import { validateVideoFrame, videoFrameName } from "./video-frames.mjs";
@@ -55,6 +56,7 @@ const connectionReads = new Set([
 ]);
 const catalogMutations = new Set([
   "files:update",
+  "files:set-capture-dates",
   "files:delete",
   "files:empty-trash",
   "files:save-text-document",
@@ -71,6 +73,7 @@ const catalogMutations = new Set([
 ]);
 const uploadConflicts = new UploadConflictBroker();
 const uploads = new OperationQueue();
+const cancelUploads = new Map();
 const fileWrites = new OperationQueue();
 let documentDraftOwner = "";
 import { setLanguage } from "./locales.mjs";
@@ -215,30 +218,66 @@ async function transferOperation(fn) {
   }
 }
 function progress(value) {
-  if (!window?.isDestroyed())
+  if (window && !window.isDestroyed())
     window.webContents.send("jellyree:progress", value);
 }
-function runUpload(jobId, task) {
+function runUpload(jobId, prepare) {
+  const current = library;
+  const cancellation = new UploadCancellation();
+  if (cancelUploads.has(jobId))
+    throw new Error(t("Дождитесь завершения текущих операций."));
+  if (jobId) cancelUploads.set(jobId, cancellation);
+  let phase = "queued";
   progress({ kind: "upload", jobId, phase: "queued", done: 0 });
-  return uploads.run(() => {
-    progress({ kind: "upload", jobId, phase: "preparing", done: 0 });
-    return task(
-      (value) =>
-        progress({ kind: "upload", jobId, phase: "uploading", ...value }),
-      (info, validate) =>
-        uploadConflicts.request(info, validate, (value) =>
-          window.webContents.send("jellyree:upload-conflict", {
-            ...value,
-            jobId,
-          }),
-        ),
-    );
-  });
+  const prepared = Promise.resolve()
+    .then(prepare)
+    .then((plan) => {
+      cancellation.count = plan.jobs.length;
+      progress({
+        kind: "upload",
+        jobId,
+        phase,
+        done: 0,
+        total: plan.jobs.length,
+        totalBytes: plan.jobs.reduce((sum, file) => sum + file.size, 0),
+        queuedFiles: plan.jobs.map(({ name, size, folders }, fileIndex) => ({
+          fileIndex,
+          name,
+          sizeBytes: size,
+          targetPath: folders?.length ? folders.join("/") : undefined,
+        })),
+      });
+      return { plan };
+    })
+    .catch((error) => ({ error }));
+  return uploads
+    .run(async () => {
+      phase = "preparing";
+      progress({ kind: "upload", jobId, phase: "preparing", done: 0 });
+      const { plan, error } = await prepared;
+      if (!plan) throw error;
+      return current.uploadPlanned(
+        plan,
+        (value) =>
+          progress({ kind: "upload", jobId, phase: "uploading", ...value }),
+        (info, validate, signal) =>
+          uploadConflicts.request(
+            info,
+            validate,
+            (value) =>
+              window.webContents.send("jellyree:upload-conflict", {
+                ...value,
+                jobId,
+              }),
+            signal,
+          ),
+        cancellation,
+      );
+    })
+    .finally(() => cancelUploads.delete(jobId));
 }
 function uploadPaths(paths, folderId, jobId) {
-  return runUpload(jobId, (report, resolveConflict) =>
-    library.uploadPaths(paths, folderId, report, resolveConflict),
-  );
+  return runUpload(jobId, () => library.planUploadPaths(paths, folderId));
 }
 function refreshMenu() {
   Menu.setApplicationMenu(
@@ -370,6 +409,7 @@ function registerHandlers() {
   handle("files:list", (input) => library.list(input));
   handle("files:timeline-bounds", (kind) => library.timelineBounds(kind));
   handle("files:update", (ids, patch) => library.updateFiles(ids, patch));
+  handle("files:set-capture-dates", (edits) => library.setCaptureDates(edits));
   handle("files:delete", (ids) => library.deletePermanently(ids));
   handle("files:empty-trash", () => library.emptyTrash());
   handle("files:url", (id) => library.url(id));
@@ -624,9 +664,12 @@ function registerHandlers() {
     uploadPaths(paths, folderId, jobId),
   );
   handle("files:retry-upload", (ids, jobId) =>
-    runUpload(jobId, (report, resolveConflict) =>
-      library.retryUploads(ids, report, resolveConflict),
-    ),
+    runUpload(jobId, () => library.planRetryUploads(ids)),
+  );
+  handle(
+    "files:cancel-upload",
+    (jobId, index) => cancelUploads.get(jobId)?.cancel(index) ?? false,
+    false,
   );
   handle("files:import", () =>
     uploads.run(() =>

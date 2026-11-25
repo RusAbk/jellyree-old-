@@ -7,6 +7,48 @@ import 'package:xml/xml.dart';
 
 typedef Json = Map<String, dynamic>;
 
+class UploadCanceled implements Exception {
+  const UploadCanceled();
+}
+
+class UploadCancellation {
+  bool canceled = false;
+  bool _sealed = false;
+  final _listeners = <void Function()>{};
+
+  bool cancel() {
+    if (canceled || _sealed) return false;
+    canceled = true;
+    for (final listener in _listeners.toList()) {
+      listener();
+    }
+    _listeners.clear();
+    return true;
+  }
+
+  void check() {
+    if (canceled) throw const UploadCanceled();
+  }
+
+  void commit() {
+    check();
+    finish();
+  }
+
+  void finish() {
+    _sealed = true;
+  }
+
+  void Function() onCancel(void Function() listener) {
+    if (canceled) {
+      listener();
+    } else {
+      _listeners.add(listener);
+    }
+    return () => _listeners.remove(listener);
+  }
+}
+
 class CloudError implements Exception {
   const CloudError(this.message, [this.values = const {}]);
   final String message;
@@ -223,7 +265,9 @@ class Cloudflare {
     Map<String, String> headers = const {},
     Stream<List<int>>? body,
     int length = 0,
+    UploadCancellation? cancellation,
   ]) async {
+    cancellation?.check();
     final path = s3Path([config['bucket'], if (key != null) ...key.split('/')]);
     final queryString = _queryString(query);
     final auth = _signingKey();
@@ -248,31 +292,41 @@ class Cloudflare {
         'https://$host$path${queryString.isEmpty ? '' : '?$queryString'}',
       ),
     );
-    request.headers.set(
-      HttpHeaders.authorizationHeader,
-      'AWS4-HMAC-SHA256 Credential=${config['accessKeyId']}/${auth.scope}, SignedHeaders=$signed, Signature=$signature',
+    final detach = cancellation?.onCancel(
+      () => request.abort(const UploadCanceled()),
     );
-    fields.forEach(request.headers.set);
-    headers.forEach(request.headers.set);
-    if (body != null) {
-      request.contentLength = length;
-      try {
-        await request.addStream(body.timeout(const Duration(seconds: 60)));
-      } on Object {
-        request.abort();
-        rethrow;
+    try {
+      cancellation?.check();
+      request.headers.set(
+        HttpHeaders.authorizationHeader,
+        'AWS4-HMAC-SHA256 Credential=${config['accessKeyId']}/${auth.scope}, SignedHeaders=$signed, Signature=$signature',
+      );
+      fields.forEach(request.headers.set);
+      headers.forEach(request.headers.set);
+      if (body != null) {
+        request.contentLength = length;
+        try {
+          await request.addStream(body.timeout(const Duration(seconds: 60)));
+        } on Object {
+          request.abort();
+          rethrow;
+        }
+      } else if (method == 'PUT' || method == 'POST') {
+        request.contentLength = 0;
       }
-    } else if (method == 'PUT' || method == 'POST') {
-      request.contentLength = 0;
+      final response = await request.close().timeout(
+        const Duration(seconds: 60),
+      );
+      if (response.statusCode < 200 || response.statusCode >= 300) {
+        await response.drain<void>();
+        throw CloudError('Ошибка Cloudflare R2 (HTTP {0}).', {
+          '0': response.statusCode,
+        });
+      }
+      return response;
+    } finally {
+      detach?.call();
     }
-    final response = await request.close().timeout(const Duration(seconds: 60));
-    if (response.statusCode < 200 || response.statusCode >= 300) {
-      await response.drain<void>();
-      throw CloudError('Ошибка Cloudflare R2 (HTTP {0}).', {
-        '0': response.statusCode,
-      });
-    }
-    return response;
   }
 
   Future<XmlDocument> xmlResponse(HttpClientResponse response) async {
@@ -289,8 +343,10 @@ class Cloudflare {
     File data,
     int length,
     String contentType,
-    void Function(int) report,
-  ) async {
+    void Function(int) report, {
+    UploadCancellation? cancellation,
+  }) async {
+    cancellation?.check();
     Stream<List<int>> chunks(int start, int end) async* {
       var sent = start;
       await for (final chunk in data.openRead(start, end)) {
@@ -308,6 +364,7 @@ class Cloudflare {
         {'content-type': contentType},
         chunks(0, length),
         length,
+        cancellation,
       );
       await response.drain<void>();
       return;
@@ -331,6 +388,7 @@ class Cloudflare {
           const {},
           chunks(start, end),
           end - start,
+          cancellation,
         );
         final tag = part.headers.value(HttpHeaders.etagHeader);
         await part.drain<void>();
@@ -345,6 +403,7 @@ class Cloudflare {
         );
       }
       final bytes = utf8.encode(document.toXmlString());
+      cancellation?.check();
       await xmlResponse(
         await object(
           'POST',

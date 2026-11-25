@@ -70,6 +70,7 @@ export type ListInput = {
   timelineSince?: string;
 };
 export type TimelineBounds = { oldest: string | null; newest: string | null };
+export type CaptureDateEdit = { id: string; capturedAt: string };
 export type TrashResult = { done: number; failed: number };
 export type FilePatch = {
   name?: string;
@@ -113,7 +114,21 @@ export type Progress = {
   totalBytes?: number;
   failures?: number;
   fileIndex?: number;
-  fileState?: "uploading" | "uploaded" | "skipped" | "failed" | "canceled";
+  fileState?:
+    | "queued"
+    | "uploading"
+    | "committing"
+    | "uploaded"
+    | "skipped"
+    | "failed"
+    | "canceled";
+  fileLoaded?: number;
+  queuedFiles?: {
+    fileIndex: number;
+    name: string;
+    sizeBytes?: number;
+    targetPath?: string;
+  }[];
   sizeBytes?: number;
   targetPath?: string;
   message?: string;
@@ -135,6 +150,7 @@ export type UploadResult = {
 };
 export type UploadConflict = {
   jobId?: string;
+  fileIndex?: number;
   id: string;
   name: string;
   targetPath: string;
@@ -184,6 +200,7 @@ export interface Jellyree {
   }>;
   timelineBounds(kind?: MediaKind): Promise<TimelineBounds>;
   update(ids: string[], patch: FilePatch): Promise<void>;
+  setCaptureDates(edits: CaptureDateEdit[]): Promise<void>;
   remove(ids: string[]): Promise<TrashResult>;
   emptyTrash(): Promise<TrashResult>;
   url(id: string): Promise<string>;
@@ -241,6 +258,7 @@ export interface Jellyree {
     jobId?: string,
   ): Promise<UploadResult>;
   retryUpload(ids: string[], jobId?: string): Promise<UploadResult>;
+  cancelUpload(jobId: string, index: number): Promise<boolean>;
   importBucket(): Promise<{ scanned: number }>;
   answerUploadConflict(input: UploadConflictAnswer): Promise<void>;
   onUploadConflict(callback: (conflict: UploadConflict) => void): () => void;

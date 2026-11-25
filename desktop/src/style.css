@@ -1474,6 +1474,11 @@ button {
   font-size: 12px;
   line-height: 1.8;
 }
+.capture-date-fields {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
 .drop-overlay {
   position: fixed;
   inset: 16px;
@@ -3680,6 +3685,9 @@ button {
 .upload-job-content {
   flex: 1;
   min-width: 0;
+}
+.upload-file-cancel {
+  flex-shrink: 0;
 }
 .upload-job-heading {
   display: flex;

@@ -46,7 +46,7 @@ const ascendingDate = {
   direction: "ASC",
   operator: ">",
 };
-const isoDate = (value) =>
+export const isoDate = (value) =>
   typeof value === "string" &&
   /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(value) &&
   Number.isFinite(Date.parse(value))

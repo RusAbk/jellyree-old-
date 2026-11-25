@@ -19,6 +19,21 @@ Connection profile() => Connection({
 });
 
 void main() {
+  test('individual cancellation stops an active request but cannot interrupt commit', () {
+    final active = UploadCancellation();
+    final next = UploadCancellation();
+    var aborted = 0;
+    final detach = active.onCancel(() => aborted++);
+    expect(active.cancel(), isTrue);
+    expect(active.cancel(), isFalse);
+    expect(aborted, 1);
+    expect(active.check, throwsA(isA<UploadCanceled>()));
+    detach();
+    next.commit();
+    expect(next.cancel(), isFalse);
+    expect(next.canceled, isFalse);
+  });
+
   test(
     'R2 batch deletion checksums XML and distinguishes rejected keys',
     () async {
@@ -163,6 +178,7 @@ class _BatchR2 extends Cloudflare {
     Map<String, String> headers = const {},
     Stream<List<int>>? body,
     int length = 0,
+    UploadCancellation? cancellation,
   ]) async {
     expect(method, 'POST');
     expect(key, isNull);

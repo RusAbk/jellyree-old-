@@ -772,6 +772,7 @@ try {
         resolve: null,
         downloads: [],
         retries: [],
+        canceledFiles: [],
       };
       globalThis.__jellyreeBackgroundFixture = state;
       const fixture = globalThis.__jellyreeIpcFixture;
@@ -809,6 +810,18 @@ try {
           jobId: job.id,
           phase,
           name: "background.jpg",
+          fileIndex: 0,
+          fileState: phase,
+          sizeBytes: 100,
+          fileLoaded: phase === "uploading" ? 40 : 0,
+          ...(phase === "queued" && state.records.length === 2
+            ? {
+                queuedFiles: [
+                  { fileIndex: 0, name: "background.jpg", sizeBytes: 100 },
+                  { fileIndex: 1, name: "queued-cancel.jpg", sizeBytes: 0 },
+                ],
+              }
+            : {}),
           done: 0,
           total: 2,
           loaded: 40,
@@ -834,6 +847,11 @@ try {
           });
         });
       }
+      ipcMain.removeHandler("jellyree:files:cancel-upload");
+      ipcMain.handle("jellyree:files:cancel-upload", (_event, jobId, index) => {
+        state.canceledFiles.push({ jobId, index });
+        return { ok: true, value: true };
+      });
       ipcMain.removeHandler("jellyree:files:retry-upload");
       ipcMain.handle("jellyree:files:retry-upload", (_event, ids, jobId) =>
         queue.run(async () => {
@@ -922,7 +940,22 @@ try {
     1,
     "adding another batch opens the panel again",
   );
-  await uploads.locator('.upload-job[data-state="queued"]').waitFor();
+  const queuedFile = uploads
+    .locator('.upload-job[data-state="queued"]')
+    .filter({ hasText: "queued-cancel.jpg" });
+  await queuedFile.waitFor();
+  await queuedFile
+    .getByRole("button", { name: "Отменить загрузку файла queued-cancel.jpg" })
+    .click();
+  await queuedFile.waitFor({ state: "hidden" });
+  assert.ok(
+    await electron.evaluate(() => {
+      const state = globalThis.__jellyreeBackgroundFixture;
+      return state.canceledFiles.some(
+        ({ jobId, index }) => jobId === state.records[1].id && index === 1,
+      );
+    }),
+  );
   assert.equal(
     await uploads.locator('.upload-job[data-state="uploading"]').count(),
     1,
@@ -992,7 +1025,10 @@ try {
   await uploads.getByRole("tab", { name: /Загруженные/ }).click();
   await uploads.getByText("completed-23.jpg", { exact: true }).waitFor();
   assert.equal(
-    await uploads.locator(".upload-job").count(),
+    await uploads
+      .locator(".upload-job")
+      .filter({ hasText: /completed-\d+\.jpg/ })
+      .count(),
     24,
     "individual files enter history before their batch finishes",
   );
@@ -2443,7 +2479,7 @@ try {
     const rows = [
       ...Array.from({ length: 56 }, (_, index) => ({
         id: `timeline-recent-${String(index).padStart(2, "0")}`,
-        created_at: `2026-11-${25 - Math.floor(index / 17)}T12:00:00.000Z`,
+        created_at: `2026-11-${25 - Math.floor(index / 17)}T12:${index === 0 ? "15" : "00"}:00.000Z`,
         mime_type: "image/jpeg",
       })),
       {
@@ -2479,19 +2515,26 @@ try {
     }));
     const queries = [];
     window.__timelineFixture = queries;
+    window.__timelineDates = rows;
     const bounds = new Promise((resolve) => {
       window.__finishTimelineBounds = resolve;
     });
     let attempts = 0;
     const mediaDate = (row) => row.captured_at ?? row.created_at;
     const mediaRows = (kind) =>
-      rows.filter((row) =>
-        kind === "photo"
-          ? row.mime_type.startsWith("image/")
-          : kind === "video"
-            ? row.mime_type.startsWith("video/")
-            : row.mime_type !== "application/pdf",
-      );
+      rows
+        .filter((row) =>
+          kind === "photo"
+            ? row.mime_type.startsWith("image/")
+            : kind === "video"
+              ? row.mime_type.startsWith("video/")
+              : row.mime_type !== "application/pdf",
+        )
+        .sort((a, b) => mediaDate(b).localeCompare(mediaDate(a)));
+    window.jellyree.setCaptureDates = async (edits) => {
+      for (const { id, capturedAt } of edits)
+        rows.find((row) => row.id === id).captured_at = capturedAt;
+    };
     window.jellyree.timelineBounds = async (kind) => {
       if (attempts++ === 0) {
         await bounds;
@@ -2676,8 +2719,66 @@ try {
   await page.getByRole("button", { name: "Медиалента", exact: true }).click();
   await media.locator('[data-file-id="timeline-clip"]').waitFor();
   assert.equal(await videoOnly.getAttribute("aria-pressed"), "true");
+  await media
+    .locator('[data-file-id="timeline-clip"]')
+    .click({ button: "right" });
+  await page
+    .getByRole("menuitem", { name: "Изменить дату", exact: true })
+    .click();
+  const dateDialog = page.getByRole("dialog", { name: "Изменить дату" });
+  await dateDialog.locator('input[type="date"]').fill("2018-04-07");
+  await dateDialog.locator('input[type="time"]').fill("14:35");
+  await dateDialog
+    .getByRole("button", { name: "Сохранить", exact: true })
+    .click();
+  await dateDialog.waitFor({ state: "hidden" });
+  await rail
+    .getByRole("button", { name: "Перейти к 2018", exact: true })
+    .waitFor();
+  await allMedia.click();
+  for (const id of ["timeline-recent-00", "timeline-recent-01"]) {
+    await media.locator(`[data-file-id="${id}"] .file-checkbox`).click();
+  }
+  await page
+    .locator(".selection-toolbar")
+    .getByRole("button", { name: "Изменить дату" })
+    .click();
+  assert.equal(await dateDialog.locator('input[type="time"]').inputValue(), "");
+  await dateDialog.locator('input[type="date"]').fill("2014-06-04");
+  await dateDialog
+    .getByRole("button", { name: "Сохранить", exact: true })
+    .click();
+  await dateDialog.waitFor({ state: "hidden" });
+  await media
+    .locator(".media-day")
+    .filter({ hasText: "2014" })
+    .locator('[data-file-id="timeline-recent-00"]')
+    .waitFor();
+  assert.equal(
+    await media
+      .locator(".media-day")
+      .filter({ hasText: "2014" })
+      .locator(".media-card")
+      .count(),
+    2,
+  );
+  assert.ok(
+    await page.evaluate(() => {
+      const [first, second] = window.__timelineDates;
+      const video = window.__timelineDates.find(
+        ({ id }) => id === "timeline-clip",
+      );
+      return (
+        video.captured_at === new Date("2018-04-07T14:35:00").toISOString() &&
+        video.created_at === "2023-02-02T12:00:00.000Z" &&
+        Date.parse(first.captured_at) - Date.parse(second.captured_at) ===
+          15 * 60 * 1000 &&
+        first.created_at === "2026-11-25T12:15:00.000Z"
+      );
+    }),
+  );
   console.log(
-    "PASS: media timeline groups days across pages, seeks historical dates, zooms and loads in both directions; both media sections filter independently",
+    "PASS: media timeline filters, seeks, paginates, and edits the date of a file or a selection",
   );
 
   await page.evaluate(() => {

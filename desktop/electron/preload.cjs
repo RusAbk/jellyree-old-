@@ -16,6 +16,7 @@ contextBridge.exposeInMainWorld("jellyree", {
   list: (input) => invoke("files:list", input),
   timelineBounds: (kind) => invoke("files:timeline-bounds", kind),
   update: (ids, patch) => invoke("files:update", ids, patch),
+  setCaptureDates: (edits) => invoke("files:set-capture-dates", edits),
   remove: (ids) => invoke("files:delete", ids),
   emptyTrash: () => invoke("files:empty-trash"),
   url: (id) => invoke("files:url", id),
@@ -67,6 +68,7 @@ contextBridge.exposeInMainWorld("jellyree", {
       jobId,
     ),
   retryUpload: (ids, jobId) => invoke("files:retry-upload", ids, jobId),
+  cancelUpload: (jobId, index) => invoke("files:cancel-upload", jobId, index),
   importBucket: () => invoke("files:import"),
   answerUploadConflict: (input) => invoke("uploads:answer", input),
   onUploadConflict: (callback) => {

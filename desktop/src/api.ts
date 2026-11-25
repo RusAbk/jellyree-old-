@@ -34,6 +34,7 @@ export function createApi(bridge: Jellyree): Jellyree {
     list: (input) => bridge.list(toIpcData(input)),
     timelineBounds: (kind) => bridge.timelineBounds(kind),
     update: (ids, patch) => bridge.update(toIpcData(ids), toIpcData(patch)),
+    setCaptureDates: (edits) => bridge.setCaptureDates(toIpcData(edits)),
     remove: (ids) => bridge.remove(toIpcData(ids)),
     emptyTrash: () => bridge.emptyTrash(),
     url: (id) => bridge.url(id),
@@ -62,6 +63,7 @@ export function createApi(bridge: Jellyree): Jellyree {
     dropUpload: (files, folderId, jobId) =>
       bridge.dropUpload(Array.from(files), folderId, jobId),
     retryUpload: (ids, jobId) => bridge.retryUpload(toIpcData(ids), jobId),
+    cancelUpload: (jobId, index) => bridge.cancelUpload(jobId, index),
     importBucket: () => bridge.importBucket(),
     answerUploadConflict: (input) =>
       bridge.answerUploadConflict(toIpcData(input)),

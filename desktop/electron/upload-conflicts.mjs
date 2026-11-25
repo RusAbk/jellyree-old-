@@ -3,15 +3,29 @@ import { randomUUID } from "node:crypto";
 
 export class UploadConflictBroker {
   pending = null;
-  request(info, validate, send) {
+  request(info, validate, send, signal) {
+    signal?.throwIfAborted();
     if (this.pending)
       throw new Error(t("Дождитесь решения предыдущего совпадения."));
     return new Promise((resolve, reject) => {
       const id = randomUUID();
-      this.pending = { id, validate, resolve, settling: false };
+      const abort = () => {
+        if (this.pending?.id === id) this.cancel();
+      };
+      this.pending = {
+        id,
+        validate,
+        settling: false,
+        resolve(value) {
+          signal?.removeEventListener("abort", abort);
+          resolve(value);
+        },
+      };
+      signal?.addEventListener("abort", abort, { once: true });
       try {
         send({ ...info, id });
       } catch (error) {
+        signal?.removeEventListener("abort", abort);
         this.pending = null;
         reject(error);
       }

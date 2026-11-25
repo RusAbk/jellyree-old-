@@ -19,6 +19,8 @@ import {
   CopyObjectCommand,
   DeleteObjectCommand,
   ListObjectsV2Command,
+  PutObjectCommand,
+  UploadPartCommand,
 } from "@aws-sdk/client-s3";
 import { Upload } from "@aws-sdk/lib-storage";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
@@ -27,6 +29,7 @@ import { D1 } from "./d1.mjs";
 import { CatalogCache } from "./catalog-cache.mjs";
 import {
   catalogListing,
+  isoDate,
   mediaDateColumn,
   mediaPredicate,
   normalizeMediaKind,
@@ -384,6 +387,45 @@ export class Library {
           ),
         );
     }
+  }
+  async setCaptureDates(edits) {
+    if (!Array.isArray(edits) || !edits.length || edits.length > 1000)
+      throw new Error(t("Выберите от 1 до 1000 файлов."));
+    const dates = new Map();
+    for (const edit of edits) {
+      if (
+        typeof edit?.id !== "string" ||
+        !edit.id ||
+        dates.has(edit.id) ||
+        typeof edit.capturedAt !== "string" ||
+        edit.capturedAt.startsWith("0000") ||
+        isoDate(edit.capturedAt) !== edit.capturedAt
+      )
+        throw new Error(t("Укажите корректные дату и время."));
+      dates.set(edit.id, edit.capturedAt);
+    }
+    await this.#ensureCaptureSchema();
+    const updated = await this.db.query(
+      `WITH edits AS MATERIALIZED (
+         SELECT key AS id, value AS captured_at FROM json_each(?)
+       ), eligible AS MATERIALIZED (
+         SELECT edits.id, edits.captured_at FROM edits JOIN jr_files USING(id)
+         WHERE library_id = ? AND trashed_at IS NULL AND ${mediaPredicate("all")}
+       )
+       UPDATE jr_files SET captured_at = (SELECT captured_at FROM eligible WHERE id = jr_files.id), updated_at = ?
+       WHERE id IN (SELECT id FROM eligible) AND (SELECT COUNT(*) FROM eligible) = ?
+       RETURNING id`,
+      [
+        JSON.stringify(Object.fromEntries(dates)),
+        this.id,
+        new Date().toISOString(),
+        dates.size,
+      ],
+    );
+    if (updated.length !== dates.size)
+      throw new Error(
+        t("Некоторые выбранные файлы больше недоступны в медиаленте."),
+      );
   }
   async url(id, download = false) {
     const file = await this.file(id);
@@ -750,6 +792,9 @@ export class Library {
     }
   }
   async uploadFile(source, folderId, report = () => {}, options = {}) {
+    const cancellation = options.cancellation;
+    const signal = cancellation?.signal;
+    signal?.throwIfAborted();
     await this.#ensureCaptureSchema();
     await this.folder(folderId);
     const info = await stat(source);
@@ -784,15 +829,27 @@ export class Library {
       options.mimeType ||
       mime.getType(path.basename(source)) ||
       "application/octet-stream";
-    const capturedAt = options.preserveCaptureDate
-      ? (previous?.captured_at ?? null)
+    const keepCaptureDate = previous && options.preserveCaptureDate;
+    const capturedAt = keepCaptureDate
+      ? null
       : await readCaptureDate(source, mimeType);
+    signal?.throwIfAborted();
+    const client = signal
+      ? {
+          config: this.s3.config,
+          send: (command) =>
+            command instanceof PutObjectCommand ||
+            command instanceof UploadPartCommand
+              ? this.s3.send(command, { abortSignal: signal })
+              : this.s3.send(command),
+        }
+      : this.s3;
     const upload = this.createUpload({
-      client: this.s3,
+      client,
       params: {
         Bucket: this.config.bucket,
         Key: key,
-        Body: createReadStream(source),
+        Body: createReadStream(source, { signal }),
         ContentType: mimeType,
         ContentLength: info.size,
       },
@@ -803,13 +860,28 @@ export class Library {
     upload.on("httpUploadProgress", (p) =>
       report({ loaded: p.loaded ?? 0, total: info.size }),
     );
-    await upload.done();
+    try {
+      await upload.done();
+      cancellation?.commit();
+    } catch (error) {
+      if (signal?.aborted) {
+        // The PUT or multipart completion may have reached R2 before abort.
+        // The fresh key is safe to discard and a replaced file still uses its old key.
+        await this.s3.send(
+          new DeleteObjectCommand({ Bucket: this.config.bucket, Key: key }),
+        );
+        signal.throwIfAborted();
+      }
+      throw error;
+    }
+    if (cancellation)
+      report({ loaded: info.size, total: info.size, committing: true });
     const now = new Date().toISOString();
     let replacement;
     try {
       if (previous) {
         const [saved] = await this.db.query(
-          `UPDATE jr_files SET object_key = ?, mime_type = ?, size_bytes = ?, adjustments = '{}', captured_at = ?, updated_at = ?${rename ? ", name = ?" : ""}
+          `UPDATE jr_files SET object_key = ?, mime_type = ?, size_bytes = ?, adjustments = '{}', ${keepCaptureDate ? "" : "captured_at = ?, "}updated_at = ?${rename ? ", name = ?" : ""}
            WHERE id = ? AND library_id = ? AND object_key = ? AND trashed_at IS NULL
            ${rename ? "AND name = ? AND folder_id IS ? AND NOT EXISTS (SELECT 1 FROM jr_files AS other WHERE other.library_id = ? AND other.folder_id IS ? AND other.name = ? AND other.trashed_at IS NULL)" : ""}
            RETURNING *`,
@@ -817,7 +889,7 @@ export class Library {
             key,
             mimeType,
             info.size,
-            capturedAt,
+            ...(keepCaptureDate ? [] : [capturedAt]),
             now,
             ...(rename ? [newName] : []),
             id,
@@ -891,40 +963,62 @@ export class Library {
     }
     return { id, name: newName, warning, file: replacement };
   }
-  async uploadPaths(paths, folderId, report = () => {}, resolveConflict) {
+  async planUploadPaths(paths, folderId) {
     if (!Array.isArray(paths) || paths.length > 10000)
       throw new Error(t("Некорректный список файлов."));
-    await this.folder(folderId);
     const jobs = [];
-    const ensureFolder = async (name, parent) => {
-      const [existing] = await this.db.query(
-        "SELECT id FROM jr_folders WHERE library_id = ? AND parent_id IS ? AND name = ?",
-        [this.id, parent || null, name],
-      );
-      return existing?.id || (await this.createFolder(name, parent)).id;
-    };
-    const walk = async (source, parent) => {
+    const directories = [];
+    const walk = async (source, folders) => {
       const info = await stat(source);
       if (info.isDirectory()) {
-        const folder = await ensureFolder(
-          cleanName(path.basename(source)),
-          parent,
-        );
+        const children = [...folders, cleanName(path.basename(source))];
+        directories.push(children);
         for (const entry of await readdir(source, { withFileTypes: true }))
           if (!entry.isSymbolicLink())
-            await walk(path.join(source, entry.name), folder);
+            await walk(path.join(source, entry.name), children);
       } else if (info.isFile())
         jobs.push({
           source,
-          folder: parent || null,
+          folders,
           size: info.size,
           name: cleanName(path.basename(source)),
         });
     };
-    for (const source of paths) await walk(String(source), folderId || null);
-    return this.#uploadJobs(jobs, report, resolveConflict);
+    for (const source of paths) await walk(String(source), []);
+    return { jobs, directories, folderId };
   }
-  async retryUploads(ids, report = () => {}, resolveConflict) {
+  async uploadPaths(paths, folderId, report = () => {}, resolveConflict) {
+    return this.uploadPlanned(
+      await this.planUploadPaths(paths, folderId),
+      report,
+      resolveConflict,
+    );
+  }
+  async uploadPlanned(
+    { jobs, directories, folderId },
+    report,
+    resolveConflict,
+    cancellation,
+  ) {
+    await this.folder(folderId);
+    const folderIds = new Map([["[]", folderId || null]]);
+    for (const parts of directories) {
+      const parent = folderIds.get(JSON.stringify(parts.slice(0, -1)));
+      const name = parts.at(-1);
+      const [existing] = await this.db.query(
+        "SELECT id FROM jr_folders WHERE library_id = ? AND parent_id IS ? AND name = ?",
+        [this.id, parent || null, name],
+      );
+      folderIds.set(
+        JSON.stringify(parts),
+        existing?.id || (await this.createFolder(name, parent)).id,
+      );
+    }
+    for (const job of jobs)
+      if (job.folders) job.folder = folderIds.get(JSON.stringify(job.folders));
+    return this.#uploadJobs(jobs, report, resolveConflict, cancellation);
+  }
+  async planRetryUploads(ids) {
     if (
       !Array.isArray(ids) ||
       !ids.length ||
@@ -941,9 +1035,16 @@ export class Library {
         size: info?.isFile() ? info.size : job.size,
       });
     }
-    return this.#uploadJobs(jobs, report, resolveConflict);
+    return { jobs, directories: [], folderId: null };
   }
-  async #uploadJobs(jobs, report, resolveConflict) {
+  async retryUploads(ids, report = () => {}, resolveConflict) {
+    return this.uploadPlanned(
+      await this.planRetryUploads(ids),
+      report,
+      resolveConflict,
+    );
+  }
+  async #uploadJobs(jobs, report, resolveConflict, cancellation) {
     const failures = [],
       warnings = [],
       resolvedRetryIds = [];
@@ -1021,16 +1122,21 @@ export class Library {
     const totalBytes = jobs.reduce((sum, job) => sum + job.size, 0);
     report({ done: 0, total: jobs.length, loaded: 0, totalBytes });
     for (const job of jobs) {
+      const file = cancellation?.file(processed);
       let name = job.name,
         replaceId,
+        pendingConflict = job.conflict,
         fileState = "failed",
         fileMessage;
       try {
+        file?.signal.throwIfAborted();
         const matches = await this.#filesNamed(job.folder, name);
+        file?.signal.throwIfAborted();
         if (matches.length) {
           if (!job.conflict) {
             remaining++;
             totalConflicts++;
+            pendingConflict = true;
           }
           const names = reserved.get(job.folder);
           const suggestedName = await uniqueName(name, names, job.folder);
@@ -1052,6 +1158,7 @@ export class Library {
             decision = await resolveConflict(
               {
                 name,
+                fileIndex: processed,
                 targetPath: folderPath(job.folder),
                 suggestedName,
                 remaining,
@@ -1065,7 +1172,9 @@ export class Library {
                 existingCount: matches.length,
               },
               validate,
+              file?.signal,
             );
+            file?.signal.throwIfAborted();
             if (
               !decision ||
               !["skip", "rename", "replace", "cancel"].includes(decision.action)
@@ -1077,6 +1186,7 @@ export class Library {
             if (decision.applyToAll) policy = decision.action;
           }
           remaining = Math.max(0, remaining - 1);
+          pendingConflict = false;
           if (decision.action === "cancel") {
             canceled = true;
             fileState = "canceled";
@@ -1092,29 +1202,42 @@ export class Library {
             names.add(name);
           }
           if (decision.action === "replace") replaceId = matches[0].id;
-        } else if (job.conflict) remaining = Math.max(0, remaining - 1);
+        } else if (job.conflict) {
+          remaining = Math.max(0, remaining - 1);
+          pendingConflict = false;
+        }
+        const reportFile = (p) =>
+          report({
+            name,
+            done: processed,
+            total: jobs.length,
+            loaded: bytes + p.loaded,
+            totalBytes,
+            failures: failures.length,
+            fileIndex: processed,
+            fileState: p.committing ? "committing" : "uploading",
+            fileLoaded: p.loaded,
+            sizeBytes: job.size,
+            targetPath: folderPath(job.folder),
+          });
+        reportFile({ loaded: 0 });
         const result = await this.uploadFile(
           job.source,
           job.folder,
-          (p) =>
-            report({
-              name,
-              done: processed,
-              total: jobs.length,
-              loaded: bytes + p.loaded,
-              totalBytes,
-              failures: failures.length,
-              fileIndex: processed,
-              fileState: "uploading",
-              sizeBytes: job.size,
-              targetPath: folderPath(job.folder),
-            }),
-          { name, replaceId },
+          reportFile,
+          { name, replaceId, cancellation: file },
         );
         done++;
         fileState = "uploaded";
         if (result.warning) warnings.push(result.warning);
       } catch (error) {
+        if (file?.signal.aborted) {
+          fileState = "canceled";
+          if (pendingConflict) remaining = Math.max(0, remaining - 1);
+          if (error !== file.signal.reason && error.name !== "AbortError")
+            warnings.push(error.message);
+          continue;
+        }
         fileMessage = error.message;
         const retryId = job.retryId ?? randomUUID();
         this.#failedUploads.set(retryId, {
@@ -1132,6 +1255,7 @@ export class Library {
           sizeBytes: job.size,
         });
       } finally {
+        cancellation?.finish(processed);
         if (
           job.retryId &&
           (fileState === "uploaded" || fileState === "skipped")

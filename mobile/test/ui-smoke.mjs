@@ -165,7 +165,7 @@ const server = createServer(async (request, response) => {
       case "timelineBounds": {
         timelineKinds.push(args[0]);
         const dates = mediaFiles(args[0])
-          .map((file) => file.created_at)
+          .map((file) => file.captured_at ?? file.created_at)
           .sort();
         return json(response, {
           newest: dates.at(-1) ?? null,
@@ -198,6 +198,10 @@ const server = createServer(async (request, response) => {
         return json(response, { file });
       case "update":
         for (const id of args[0]) Object.assign(fileFor(id), args[1]);
+        return json(response, null);
+      case "setCaptureDates":
+        for (const { id, capturedAt } of args[0])
+          fileFor(id).captured_at = capturedAt;
         return json(response, null);
       case "emptyTrash": {
         const remaining = files.filter((row) => !row.trashed_at);
@@ -391,6 +395,20 @@ try {
     .tap();
   await page.locator('.media-card[data-file-id="clip"]').waitFor();
   assert.equal(await videoFilter.getAttribute("aria-pressed"), "true");
+  await page.locator('.media-card[data-file-id="clip"] .file-checkbox').tap();
+  await page
+    .locator(".selection-toolbar")
+    .getByRole("button", { name: "Change date" })
+    .tap();
+  const dateDialog = page.getByRole("dialog", { name: "Change date" });
+  await dateDialog.locator('input[type="date"]').fill("2017-10-03");
+  await dateDialog.getByRole("button", { name: "Save", exact: true }).tap();
+  await dateDialog.waitFor({ state: "hidden" });
+  await scale
+    .getByRole("button", { name: "Go to 2017", exact: true })
+    .waitFor();
+  assert.equal(fileFor("clip").created_at, "2023-02-02T12:00:00.000Z");
+  assert.ok(rpcCalls.includes("setCaptureDates"));
   assert.deepEqual(errors, []);
   await page.screenshot({
     path: path.join(os.tmpdir(), "jellyree-mobile-timeline.png"),

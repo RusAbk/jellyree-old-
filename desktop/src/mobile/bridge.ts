@@ -199,6 +199,7 @@ export async function installMobileBridge() {
     list: (input) => call("list", [input]),
     timelineBounds: (kind) => call("timelineBounds", [kind]),
     update: (ids, patch) => call("update", [ids, patch]),
+    setCaptureDates: (edits) => call("setCaptureDates", [edits]),
     remove: (ids) => call("remove", [ids]),
     emptyTrash: () => call("emptyTrash"),
     url: (id) => call("url", [id]),
@@ -241,6 +242,7 @@ export async function installMobileBridge() {
     dropUpload: async () => ({ done: 0, canceled: true, failures: [] }),
     retryUpload: async (ids, job) =>
       uploads(await call("retryUpload", [ids, job])),
+    cancelUpload: (job, index) => call("cancelUpload", [job, index]),
     importBucket: () => call("importBucket"),
     answerUploadConflict: (input) => call("answerUploadConflict", [input]),
     onUploadConflict: (callback) =>

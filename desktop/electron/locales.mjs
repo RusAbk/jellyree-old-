@@ -541,6 +541,21 @@ export const messages = {
     es: "Tamaño",
   },
   Дата: { en: "Date", es: "Fecha" },
+  Время: { en: "Time", es: "Hora" },
+  "Изменить дату": { en: "Change date", es: "Cambiar fecha" },
+  "Дата изменена.": { en: "Date updated.", es: "Fecha actualizada." },
+  "Пустое поле времени сохраняет время каждого файла.": {
+    en: "Leave the time blank to keep each file’s original time.",
+    es: "Deja la hora en blanco para conservar la hora original de cada archivo.",
+  },
+  "Укажите корректные дату и время.": {
+    en: "Enter a valid date and time.",
+    es: "Introduce una fecha y una hora válidas.",
+  },
+  "Некоторые выбранные файлы больше недоступны в медиаленте.": {
+    en: "Some of the selected files are no longer available in the media timeline.",
+    es: "Algunos de los archivos seleccionados ya no están disponibles en la cronología.",
+  },
   "Дата съёмки": {
     en: "Date taken",
     es: "Fecha de captura",
@@ -1253,6 +1268,13 @@ Object.assign(messages, {
   },
   "Ошибка загрузки": { en: "Upload failed", es: "Error de subida" },
   "Загрузка отменена": { en: "Upload canceled", es: "Subida cancelada" },
+  "Отменить загрузку файла {0}": {
+    en: "Cancel upload of {0}",
+    es: "Cancelar la subida de {0}",
+  },
+  "Сохранение файла…": { en: "Saving file…", es: "Guardando archivo…" },
+  "Отмена загрузки…": { en: "Canceling upload…", es: "Cancelando subida…" },
+  "Показать ещё": { en: "Show more", es: "Mostrar más" },
   "Активных задач: {0}": { en: "Active tasks: {0}", es: "Tareas activas: {0}" },
   "Все загрузки завершены": {
     en: "All uploads finished",
