@@ -2408,21 +2408,30 @@ try {
       window.__finishTimelineBounds = resolve;
     });
     let attempts = 0;
-    window.jellyree.timelineBounds = async () => {
+    const mediaDate = (row) => row.captured_at ?? row.created_at;
+    const mediaRows = (kind) =>
+      rows.filter((row) =>
+        kind === "photo"
+          ? row.mime_type.startsWith("image/")
+          : kind === "video"
+            ? row.mime_type.startsWith("video/")
+            : row.mime_type !== "application/pdf",
+      );
+    window.jellyree.timelineBounds = async (kind) => {
       if (attempts++ === 0) {
         await bounds;
         throw new Error("Timeline bounds unavailable");
       }
+      const matches = mediaRows(kind);
       return {
-        oldest: "2015-03-07T12:00:00.000Z",
-        newest: "2026-11-25T12:00:00.000Z",
+        oldest: mediaDate(matches.at(-1)),
+        newest: mediaDate(matches[0]),
       };
     };
     window.jellyree.list = async (input) => {
-      if (input.section !== "timeline") return list(input);
+      if (!["timeline", "photos"].includes(input.section)) return list(input);
       queries.push(input);
-      let matches = rows.filter((row) => row.mime_type !== "application/pdf");
-      const mediaDate = (row) => row.captured_at ?? row.created_at;
+      let matches = mediaRows(input.mediaKind);
       if (input.timelineBefore)
         matches = matches.filter(
           (row) => mediaDate(row) < input.timelineBefore,
@@ -2552,8 +2561,48 @@ try {
   );
   await page.mouse.up();
   await media.locator('[data-file-id="timeline-oldest"]').waitFor();
+  const mediaFilters = page.getByRole("group", { name: "Тип медиа" });
+  const allMedia = mediaFilters.getByRole("button", {
+    name: "Все",
+    exact: true,
+  });
+  const photoOnly = mediaFilters.getByRole("button", {
+    name: "Фото",
+    exact: true,
+  });
+  const videoOnly = mediaFilters.getByRole("button", {
+    name: "Видео",
+    exact: true,
+  });
+  assert.equal(await allMedia.getAttribute("aria-pressed"), "true");
+  await videoOnly.click();
+  await media.locator('[data-file-id="timeline-clip"]').waitFor();
+  await rail
+    .getByRole("button", { name: "Перейти к 2023", exact: true })
+    .waitFor();
+  assert.equal(await media.locator(".media-card").count(), 1);
+  assert.equal(await rail.locator(".year-mark").count(), 1);
+  assert.deepEqual(
+    await page.evaluate(() => {
+      const { page, mediaKind, timelineBefore } =
+        window.__timelineFixture.findLast(
+          (entry) => entry.section === "timeline",
+        );
+      return { page, mediaKind, timelineBefore };
+    }),
+    { page: 1, mediaKind: "video", timelineBefore: undefined },
+  );
+  await page.getByRole("button", { name: "Фото и видео", exact: true }).click();
+  assert.equal(await allMedia.getAttribute("aria-pressed"), "true");
+  await photoOnly.click();
+  await page.locator('[data-file-id="timeline-recent-00"]').waitFor();
+  assert.equal(await page.locator('[data-file-id="timeline-clip"]').count(), 0);
+  assert.equal(await photoOnly.getAttribute("aria-pressed"), "true");
+  await page.getByRole("button", { name: "Медиалента", exact: true }).click();
+  await media.locator('[data-file-id="timeline-clip"]').waitFor();
+  assert.equal(await videoOnly.getAttribute("aria-pressed"), "true");
   console.log(
-    "PASS: media timeline groups days across pages, seeks historical dates, zooms and loads in both directions",
+    "PASS: media timeline groups days across pages, seeks historical dates, zooms and loads in both directions; both media sections filter independently",
   );
 
   await page.evaluate(() => {

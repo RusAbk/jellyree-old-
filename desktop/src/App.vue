@@ -46,6 +46,7 @@ import type {
   DriveFile,
   FilePatch,
   Folder,
+  MediaKind,
   Progress,
   Settings,
   Stats,
@@ -111,6 +112,24 @@ const selection = ref<string[]>([]),
   hasMore = ref(false),
   page = ref(1);
 const isTimeline = computed(() => section.value === "timeline");
+const isMediaSection = computed(
+  () => isTimeline.value || section.value === "photos",
+);
+const mediaKinds = ref<Record<"photos" | "timeline", MediaKind>>({
+  photos: "all",
+  timeline: "all",
+});
+const mediaKind = computed(() =>
+  isTimeline.value ? mediaKinds.value.timeline : mediaKinds.value.photos,
+);
+const filteredMedia = computed(
+  () => isMediaSection.value && mediaKind.value !== "all",
+);
+const mediaFilters = [
+  { id: "all", label: "Все" },
+  { id: "photo", label: "Фото" },
+  { id: "video", label: "Видео" },
+] as const;
 const mediaFeed = ref<InstanceType<typeof MediaFeed>>();
 const timelineBefore = ref<string>();
 const timelineBounds = shallowRef<TimelineBounds>();
@@ -152,6 +171,7 @@ const listing = computed(() => ({
   search: search.value,
   tag: tag.value,
   sort: isTimeline.value ? "date" : sort.value,
+  ...(isMediaSection.value ? { mediaKind: mediaKind.value } : {}),
   ...(isTimeline.value && timelineBefore.value
     ? { timelineBefore: timelineBefore.value }
     : {}),
@@ -674,12 +694,33 @@ function navigate(next: string, id: string | null = null, nextTag = "") {
   void reload();
   if (next === "timeline") void refreshTimelineBounds();
 }
+function setMediaKind(kind: MediaKind) {
+  const current = section.value;
+  if (current !== "photos" && current !== "timeline") return;
+  if (mediaKinds.value[current] === kind || busy.value) return;
+  closeContextMenu();
+  files.value = [];
+  selection.value = [];
+  timelineBefore.value = undefined;
+  timelineDay.value = undefined;
+  mediaKinds.value[current] = kind;
+  void reload();
+  if (current === "timeline") {
+    resetTimelineBounds();
+    void refreshTimelineBounds();
+  }
+}
+function resetTimelineBounds() {
+  ++boundsRequest;
+  timelineBounds.value = undefined;
+  timelineBoundsState.value = "loading";
+}
 async function refreshTimelineBounds() {
   if (!settings.value.configured) return;
   const id = ++boundsRequest;
   timelineBoundsState.value = "loading";
   try {
-    const result = await api.timelineBounds();
+    const result = await api.timelineBounds(mediaKind.value);
     if (id !== boundsRequest) return;
     timelineBounds.value = result;
     timelineBoundsState.value = "ready";
@@ -821,9 +862,7 @@ function resetCatalog() {
   clearTimeout(usageTimer);
   usageTimer = undefined;
   usageRequestedAt = 0;
-  ++boundsRequest;
-  timelineBounds.value = undefined;
-  timelineBoundsState.value = "loading";
+  resetTimelineBounds();
   uploadRefreshPending = uploadFoldersPending = false;
   catalogError.value = "";
   stats.value = { files: 0, bytes: 0, trashed: 0, tags: [] };
@@ -2342,12 +2381,32 @@ onBeforeUnmount(() => {
               </button></template
             >
           </div>
-          <header class="page-header">
+          <header
+            class="page-header"
+            :class="{ 'media-page-header': isMediaSection }"
+          >
             <div>
               <h1>{{ title }}</h1>
               <p v-if="settings.configured && listingSummary">
                 {{ listingSummary }}
               </p>
+            </div>
+            <div
+              v-if="isMediaSection && settings.configured"
+              class="media-filters"
+              role="group"
+              :aria-label="t('Тип медиа')"
+            >
+              <button
+                v-for="filter in mediaFilters"
+                :key="filter.id"
+                type="button"
+                :aria-pressed="filter.id === mediaKind"
+                :disabled="busy"
+                @click="setMediaKind(filter.id)"
+              >
+                {{ t(filter.label) }}
+              </button>
             </div>
             <div v-if="!isTimeline" class="page-actions">
               <template v-if="currentFolder && section === 'drive'"
@@ -2838,16 +2897,29 @@ onBeforeUnmount(() => {
                     ? t("Ничего не найдено")
                     : section === "trash"
                       ? t("Корзина пуста")
-                      : isTimeline
-                        ? knownTimelineBounds
-                          ? t("Нет медиафайлов на эту дату")
-                          : t("Здесь будут ваши медиафайлы")
-                        : section === "favorites"
-                          ? t("Здесь будет избранное")
-                          : t("Здесь пока свободно")
+                      : isTimeline && knownTimelineBounds
+                        ? t("Нет медиафайлов на эту дату")
+                        : filteredMedia
+                          ? t(
+                              mediaKind === "photo"
+                                ? "Нет фотографий"
+                                : "Нет видео",
+                            )
+                          : isTimeline
+                            ? t("Здесь будут ваши медиафайлы")
+                            : section === "favorites"
+                              ? t("Здесь будет избранное")
+                              : t("Здесь пока свободно")
                 }}
               </h2>
-              <p>
+              <p
+                v-if="
+                  !filteredMedia ||
+                  search ||
+                  tag ||
+                  (isTimeline && knownTimelineBounds)
+                "
+              >
                 {{
                   search || tag
                     ? t("Попробуйте другое имя или тег.")

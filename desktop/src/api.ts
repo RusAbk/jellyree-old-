@@ -32,7 +32,7 @@ export function createApi(bridge: Jellyree): Jellyree {
       clear: (id) => bridge.settings.clear(id),
     },
     list: (input) => bridge.list(toIpcData(input)),
-    timelineBounds: () => bridge.timelineBounds(),
+    timelineBounds: (kind) => bridge.timelineBounds(kind),
     update: (ids, patch) => bridge.update(toIpcData(ids), toIpcData(patch)),
     remove: (ids) => bridge.remove(toIpcData(ids)),
     url: (id) => bridge.url(id),

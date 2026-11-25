@@ -389,14 +389,18 @@ export class CatalogCache {
       }
     });
   }
-  timelineBounds(fetchBounds) {
+  timelineBounds(kind, fetchBounds) {
     return this.#queue.run(async () => {
-      const snapshot = this.#state("capture-timeline-bounds");
+      const key =
+        kind === "all"
+          ? "capture-timeline-bounds"
+          : `capture-timeline-bounds:${kind}`;
+      const snapshot = this.#state(key);
       try {
         const head = await this.#head("active");
         if (snapshot && unchanged(head, snapshot.head)) return snapshot.bounds;
         const bounds = await fetchBounds();
-        this.#setState("capture-timeline-bounds", { head, bounds });
+        this.#setState(key, { head, bounds });
         return bounds;
       } catch (error) {
         if (snapshot) return snapshot.bounds;

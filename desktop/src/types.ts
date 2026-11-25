@@ -54,6 +54,7 @@ export type DriveFile = {
   created_at: string;
   updated_at: string;
 };
+export type MediaKind = "all" | "photo" | "video";
 export type ListInput = {
   section: string;
   folderId?: string | null;
@@ -64,6 +65,7 @@ export type ListInput = {
   throughPage?: number;
   includeTotal?: boolean;
   refresh?: boolean;
+  mediaKind?: MediaKind;
   timelineBefore?: string;
   timelineSince?: string;
 };
@@ -179,7 +181,7 @@ export interface Jellyree {
     hasMore: boolean;
     page: number;
   }>;
-  timelineBounds(): Promise<TimelineBounds>;
+  timelineBounds(kind?: MediaKind): Promise<TimelineBounds>;
   update(ids: string[], patch: FilePatch): Promise<void>;
   remove(ids: string[]): Promise<{ done: number }>;
   url(id: string): Promise<string>;

@@ -14,7 +14,7 @@ contextBridge.exposeInMainWorld("jellyree", {
     clear: (id) => invoke("settings:clear", id),
   },
   list: (input) => invoke("files:list", input),
-  timelineBounds: () => invoke("files:timeline-bounds"),
+  timelineBounds: (kind) => invoke("files:timeline-bounds", kind),
   update: (ids, patch) => invoke("files:update", ids, patch),
   remove: (ids) => invoke("files:delete", ids),
   url: (id) => invoke("files:url", id),

@@ -651,6 +651,41 @@ button {
   font-size: 11px;
   color: #9ca4b5;
 }
+.media-page-header {
+  flex-wrap: wrap;
+}
+.media-filters {
+  display: inline-flex;
+  gap: 2px;
+  margin-inline-end: auto;
+  padding: 2px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: #f6f4fa;
+}
+.media-filters button {
+  min-width: 56px;
+  min-height: 27px;
+  padding-inline: 9px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: #5e5774;
+  font-size: 12px;
+  font-weight: 600;
+}
+.media-filters button:hover:not(:disabled) {
+  color: #51409a;
+}
+.media-filters button[aria-pressed="true"] {
+  background: #e8e0ff;
+  color: #4e3a99;
+}
+@container catalog (max-width: 520px) {
+  .media-filters {
+    order: 1;
+  }
+}
 .page-actions {
   display: flex;
   gap: 4px;

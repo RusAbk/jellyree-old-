@@ -19,15 +19,26 @@ const sorts = {
   },
 };
 const sections = ["drive", "all", "favorites", "photos", "timeline", "trash"];
-const visualMedia = [
-  "mime_type LIKE 'image/%'",
-  "mime_type LIKE 'video/%'",
+const imageMedia = "mime_type LIKE 'image/%'";
+const videoMedia = "mime_type LIKE 'video/%'";
+const photoFormats = [
   "LOWER(name) LIKE '%.heic'",
   "LOWER(name) LIKE '%.heif'",
   "LOWER(name) LIKE '%.pxz'",
   "LOWER(mime_type) = 'application/pxz'",
-];
-export const timelineMedia = `(${[...visualMedia, "mime_type LIKE 'audio/%'"].join(" OR ")})`;
+].join(" OR ");
+const visualTypes = `${imageMedia} OR ${videoMedia} OR ${photoFormats}`;
+const visualMedia = `(${visualTypes})`;
+const timelineMedia = `(${visualTypes} OR mime_type LIKE 'audio/%')`;
+const photoMedia = `(${imageMedia} OR ${photoFormats})`;
+export function normalizeMediaKind(value) {
+  return value === "photo" || value === "video" ? value : "all";
+}
+export function mediaPredicate(kind, section = "timeline") {
+  if (kind === "photo") return photoMedia;
+  if (kind === "video") return videoMedia;
+  return section === "photos" ? visualMedia : timelineMedia;
+}
 export const mediaDateColumn = "COALESCE(captured_at, created_at)";
 const captureDate = { ...sorts.date, column: mediaDateColumn };
 const ascendingDate = {
@@ -61,8 +72,9 @@ export function catalogListing(input, libraryId) {
     section !== "timeline" && Object.hasOwn(sorts, input.sort)
       ? input.sort
       : "date";
-  const usesCaptureDate =
-    sortName === "date" && (section === "photos" || section === "timeline");
+  const isMedia = section === "photos" || section === "timeline";
+  const mediaKind = isMedia ? normalizeMediaKind(input.mediaKind) : "all";
+  const usesCaptureDate = sortName === "date" && isMedia;
   const sort = since
     ? ascendingDate
     : usesCaptureDate
@@ -78,12 +90,10 @@ export function catalogListing(input, libraryId) {
     params.push(folderId);
   }
   if (section === "favorites") where.push("favorite = 1");
-  if (section === "photos") {
-    if (usesCaptureDate) where.push(timelineMedia);
-    where.push(`(${visualMedia.join(" OR ")})`);
-  }
-  if (section === "timeline") {
+  if (section === "photos" && mediaKind === "all" && usesCaptureDate)
     where.push(timelineMedia);
+  if (isMedia) where.push(mediaPredicate(mediaKind, section));
+  if (section === "timeline") {
     if (before || since) {
       where.push(`${mediaDateColumn} ${before ? "<" : ">="} ?`);
       params.push(before ?? since);
@@ -126,6 +136,7 @@ export function catalogListing(input, libraryId) {
     search,
     tag,
     usesCaptureDate ? "capture-date" : sortName,
+    ...(mediaKind === "all" ? [] : [mediaKind]),
     ...(before || since ? [before, since] : []),
   ]);
   const conditions = (after, through) => {
@@ -155,6 +166,7 @@ export function catalogListing(input, libraryId) {
     section,
     sortName,
     usesCaptureDate,
+    mediaKind,
     page,
     throughPage,
     limit,

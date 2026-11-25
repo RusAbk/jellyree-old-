@@ -990,7 +990,7 @@ class MobileHost {
       case 'list':
         return library.list(a[0] as Json);
       case 'timelineBounds':
-        return library.timelineBounds();
+        return library.timelineBounds(a.firstOrNull);
       case 'folders':
         return library.folders();
       case 'stats':

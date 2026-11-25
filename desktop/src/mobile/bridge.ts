@@ -197,7 +197,7 @@ export async function installMobileBridge() {
     },
     setLocale: (locale) => call("setLocale", [locale]),
     list: (input) => call("list", [input]),
-    timelineBounds: () => call("timelineBounds"),
+    timelineBounds: (kind) => call("timelineBounds", [kind]),
     update: (ids, patch) => call("update", [ids, patch]),
     remove: (ids) => call("remove", [ids]),
     url: (id) => call("url", [id]),

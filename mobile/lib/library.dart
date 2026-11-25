@@ -10,14 +10,30 @@ import 'capture_date.dart';
 import 'cloudflare.dart';
 
 const mobilePageSize = 80;
-const _visualMedia =
-    "mime_type LIKE 'image/%' OR mime_type LIKE 'video/%' OR "
+const _imageMedia = "mime_type LIKE 'image/%'";
+const _videoMedia = "mime_type LIKE 'video/%'";
+const _photoFormats =
     "LOWER(name) LIKE '%.heic' OR LOWER(name) LIKE '%.heif' OR "
     "LOWER(name) LIKE '%.pxz' OR LOWER(mime_type) = 'application/pxz'";
+const _visualMedia = '$_imageMedia OR $_videoMedia OR $_photoFormats';
 const mobileVisualMedia = '($_visualMedia)';
 const mobileTimelineMedia = "($_visualMedia OR mime_type LIKE 'audio/%')";
+const _photoMedia = '($_imageMedia OR $_photoFormats)';
 const mediaDateColumn = 'COALESCE(captured_at, created_at)';
 final _uuid = Uuid();
+
+String _mediaKind(Object? value) => switch (value) {
+  'photo' => 'photo',
+  'video' => 'video',
+  _ => 'all',
+};
+
+String _mediaPredicate(String kind, {String section = 'timeline'}) =>
+    switch (kind) {
+      'photo' => _photoMedia,
+      'video' => _videoMedia,
+      _ => section == 'photos' ? mobileVisualMedia : mobileTimelineMedia,
+    };
 
 String cleanName(Object? value) {
   final name = (value as String? ?? '').trim();
@@ -87,16 +103,17 @@ class ListingQuery {
       params.add(input['folderId']);
     }
     if (section == 'favorites') where.add('favorite = 1');
+    final isMedia = section == 'photos' || section == 'timeline';
+    mediaKind = isMedia ? _mediaKind(input['mediaKind']) : 'all';
     usesCaptureDate =
         section == 'timeline' ||
         (section == 'photos' && !['name', 'size'].contains(input['sort']));
-    if (section == 'photos') {
-      if (usesCaptureDate) where.add(mobileTimelineMedia);
-      where.add(mobileVisualMedia);
+    if (section == 'photos' && mediaKind == 'all' && usesCaptureDate) {
+      where.add(mobileTimelineMedia);
     }
+    if (isMedia) where.add(_mediaPredicate(mediaKind, section: section));
     bool ascending = false;
     if (section == 'timeline') {
-      where.add(mobileTimelineMedia);
       final before = DateTime.tryParse(
         input['timelineBefore'] as String? ?? '',
       );
@@ -142,7 +159,7 @@ class ListingQuery {
 
   late final List<String> where;
   late final List<Object?> params;
-  late final String sortKey, column, dir, feedScope;
+  late final String sortKey, column, dir, feedScope, mediaKind;
   late final bool usesCaptureDate;
   String get base => 'FROM jr_files WHERE ${where.join(' AND ')}';
   String get cacheKey => jsonEncode([where, params, column, dir]);
@@ -177,7 +194,7 @@ class MobileLibrary {
   final Map<String, (DateTime, Json)> _files = {};
   final Map<String, (DateTime, Future<String?>)> _heads = {};
   Future<void>? _captureSchema;
-  Future<void>? _mediaDateIndex;
+  final _mediaDateIndexes = <String, Future<void>>{};
   int _revision = 0;
   String get id => cloud.config.libraryId;
 
@@ -227,17 +244,18 @@ class MobileLibrary {
         });
   }
 
-  Future<void> _ensureMediaDateIndex() async {
+  Future<void> _ensureMediaDateIndex(String kind) async {
     await _ensureCaptureSchema();
-    await (_mediaDateIndex ??= (() async {
+    await _mediaDateIndexes.putIfAbsent(kind, () async {
+      final name = kind == 'all' ? 'media' : kind;
       try {
         await cloud.query(
-          'CREATE INDEX IF NOT EXISTS jr_media_capture_date ON jr_files(library_id, $mediaDateColumn DESC, id DESC) WHERE trashed_at IS NULL AND $mobileTimelineMedia',
+          'CREATE INDEX IF NOT EXISTS jr_${name}_capture_date ON jr_files(library_id, $mediaDateColumn DESC, id DESC) WHERE trashed_at IS NULL AND ${_mediaPredicate(kind)}',
         );
       } on CloudError {
         // The list remains usable if D1 limits delay the index build.
       }
-    })());
+    });
   }
 
   void remember(Json file) {
@@ -377,7 +395,7 @@ class MobileLibrary {
       return result(stored, cached.last!['hasMore'] == true);
     }
     try {
-      if (query.usesCaptureDate) await _ensureMediaDateIndex();
+      if (query.usesCaptureDate) await _ensureMediaDateIndex(query.mediaKind);
       final previous = page > 1 ? await _readPage(scope, page - 1) : null;
       final priorItems = previous?['items'] as List?;
       final after =
@@ -415,10 +433,11 @@ class MobileLibrary {
     }
   }
 
-  Future<Json> timelineBounds() async {
-    await _ensureMediaDateIndex();
+  Future<Json> timelineBounds([Object? filter]) async {
+    final kind = _mediaKind(filter);
+    await _ensureMediaDateIndex(kind);
     final match =
-        'FROM jr_files WHERE library_id = ? AND trashed_at IS NULL AND $mobileTimelineMedia';
+        'FROM jr_files WHERE library_id = ? AND trashed_at IS NULL AND ${_mediaPredicate(kind)}';
     final rows = await cloud.query(
       'SELECT (SELECT $mediaDateColumn $match ORDER BY $mediaDateColumn ASC LIMIT 1) AS oldest, '
       '(SELECT $mediaDateColumn $match ORDER BY $mediaDateColumn DESC LIMIT 1) AS newest',

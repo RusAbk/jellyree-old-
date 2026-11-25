@@ -89,6 +89,36 @@ void main() {
     );
   });
 
+  test('media filters use distinct cached queries and keep the timeline date window', () {
+    for (final section in ['timeline', 'photos']) {
+      final base = {
+        'section': section,
+        'timelineSince': '2021-09-01T00:00:00.000Z',
+      };
+      final all = ListingQuery(base, 'library');
+      final photos = ListingQuery({...base, 'mediaKind': 'photo'}, 'library');
+      final videos = ListingQuery({...base, 'mediaKind': 'video'}, 'library');
+      expect({all.cacheKey, photos.cacheKey, videos.cacheKey}, hasLength(3));
+      expect(photos.base, contains("mime_type LIKE 'image/%'"));
+      expect(photos.base, contains("%.heic"));
+      expect(photos.base, isNot(contains("video/%")));
+      expect(videos.base, contains("mime_type LIKE 'video/%'"));
+      expect(videos.base, isNot(contains("image/%")));
+      if (section == 'timeline') {
+        expect(all.base, contains("audio/%"));
+        expect(videos.base, contains('$mediaDateColumn >= ?'));
+      } else {
+        expect(all.base, contains("image/%"));
+      }
+    }
+    final drive = ListingQuery({
+      'section': 'drive',
+      'mediaKind': 'video',
+    }, 'library');
+    expect(drive.mediaKind, 'all');
+    expect(drive.base, isNot(contains("video/%")));
+  });
+
   test(
     'photo and video metadata use the most reliable recording date',
     () async {

@@ -367,7 +367,7 @@ function registerHandlers() {
     false,
   );
   handle("files:list", (input) => library.list(input));
-  handle("files:timeline-bounds", () => library.timelineBounds());
+  handle("files:timeline-bounds", (kind) => library.timelineBounds(kind));
   handle("files:update", (ids, patch) => library.updateFiles(ids, patch));
   handle("files:delete", (ids) => library.deletePermanently(ids));
   handle("files:url", (id) => library.url(id));

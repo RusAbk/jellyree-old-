@@ -71,8 +71,17 @@ const binary = (response, buffer, type) => {
   response.end(buffer);
 };
 const fileFor = (id) => files.find((file) => file.id === id);
+const mediaFiles = (kind) =>
+  files.filter((file) =>
+    kind === "photo"
+      ? file.mime_type.startsWith("image/")
+      : kind === "video"
+        ? file.mime_type.startsWith("video/")
+        : true,
+  );
 const root = "/fixture/";
 const rpcCalls = [];
+const timelineKinds = [];
 const server = createServer(async (request, response) => {
   const url = new URL(request.url, "http://127.0.0.1");
   const route = url.pathname.slice(root.length);
@@ -136,7 +145,7 @@ const server = createServer(async (request, response) => {
           items:
             activeProfile.id === "work"
               ? [{ ...files[0], name: "Work-only.png" }]
-              : files.filter(
+              : mediaFiles(args[0].mediaKind).filter(
                   (row) => args[0].section !== "favorites" || row.favorite,
                 ),
           hasMore: false,
@@ -151,11 +160,16 @@ const server = createServer(async (request, response) => {
           trashed: 0,
           tags: ["summer", "lake"],
         });
-      case "timelineBounds":
+      case "timelineBounds": {
+        timelineKinds.push(args[0]);
+        const dates = mediaFiles(args[0])
+          .map((file) => file.created_at)
+          .sort();
         return json(response, {
-          newest: files[0].created_at,
-          oldest: files[1].created_at,
+          newest: dates.at(-1) ?? null,
+          oldest: dates[0] ?? null,
         });
+      }
       case "thumb.get":
         return json(response, { epoch: 0, entry: null });
       case "thumb.dimensions":
@@ -321,6 +335,14 @@ try {
   await viewer
     .getByRole("button", { name: "Close preview", exact: true })
     .tap();
+  files.push({
+    ...files[0],
+    id: "clip",
+    name: "Clip.mp4",
+    mime_type: "video/mp4",
+    object_key: "clip",
+    created_at: "2023-02-02T12:00:00.000Z",
+  });
   await page
     .locator(".mobile-tab-bar")
     .getByRole("button", { name: "Media timeline" })
@@ -329,12 +351,44 @@ try {
     .getByRole("complementary", { name: "Timeline" })
     .getByRole("slider")
     .waitFor();
+  const mediaFilters = page.getByRole("group", { name: "Media type" });
+  const videoFilter = mediaFilters.getByRole("button", {
+    name: "Videos",
+    exact: true,
+  });
+  await videoFilter.tap();
+  await page.locator('.media-card[data-file-id="clip"]').waitFor();
+  const scale = page.getByRole("complementary", { name: "Timeline" });
+  await scale
+    .getByRole("button", { name: "Go to 2023", exact: true })
+    .waitFor();
+  assert.equal(await page.locator(".media-card").count(), 1);
+  assert.ok(timelineKinds.includes("video"));
+  assert.equal(await scale.locator(".year-mark").count(), 1);
+  const filterBox = await mediaFilters.boundingBox();
+  assert.ok(filterBox.x >= 0 && filterBox.x + filterBox.width <= 390);
+  await page.getByRole("button", { name: "Open menu", exact: true }).tap();
+  await page
+    .getByRole("button", { name: "Photos and videos", exact: true })
+    .tap();
+  await mediaFilters.getByRole("button", { name: "Photos", exact: true }).tap();
+  await page.locator('.file-card[data-file-id="first"]').waitFor();
+  assert.equal(
+    await page.locator('.file-card[data-file-id="clip"]').count(),
+    0,
+  );
+  await page
+    .locator(".mobile-tab-bar")
+    .getByRole("button", { name: "Media timeline" })
+    .tap();
+  await page.locator('.media-card[data-file-id="clip"]').waitFor();
+  assert.equal(await videoFilter.getAttribute("aria-pressed"), "true");
   assert.deepEqual(errors, []);
   await page.screenshot({
     path: path.join(os.tmpdir(), "jellyree-mobile-timeline.png"),
   });
   console.log(
-    "PASS: bundled UI, mobile RPC, navigation, touch swipe, tags, photo replacement, and timeline",
+    "PASS: bundled UI, mobile RPC, navigation, touch swipe, tags, photo replacement, and media filters",
   );
 } finally {
   await browser?.close();

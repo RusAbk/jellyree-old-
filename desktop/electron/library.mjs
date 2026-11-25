@@ -28,7 +28,8 @@ import { CatalogCache } from "./catalog-cache.mjs";
 import {
   catalogListing,
   mediaDateColumn,
-  timelineMedia,
+  mediaPredicate,
+  normalizeMediaKind,
 } from "./catalog-query.mjs";
 import { readCaptureDate } from "./capture-date.mjs";
 import { libraryId } from "./config.mjs";
@@ -47,7 +48,12 @@ import { PXZ_LIMIT, PxzRangeReader, readPxz } from "./pxz-archive.mjs";
 
 const schema = await readFile(new URL("./schema.sql", import.meta.url), "utf8");
 const catalogIndexes = {
-  timeline: `CREATE INDEX IF NOT EXISTS jr_media_capture_date ON jr_files(library_id, ${mediaDateColumn} DESC, id DESC) WHERE trashed_at IS NULL AND ${timelineMedia}`,
+  ...Object.fromEntries(
+    ["all", "photo", "video"].map((kind) => [
+      kind,
+      `CREATE INDEX IF NOT EXISTS jr_${kind === "all" ? "media" : kind}_capture_date ON jr_files(library_id, ${mediaDateColumn} DESC, id DESC) WHERE trashed_at IS NULL AND ${mediaPredicate(kind)}`,
+    ]),
+  ),
   folderDate:
     "CREATE INDEX IF NOT EXISTS jr_active_folder_date ON jr_files(library_id, folder_id, created_at DESC, id DESC) WHERE trashed_at IS NULL",
   date: "CREATE INDEX IF NOT EXISTS jr_active_date ON jr_files(library_id, created_at DESC, id DESC) WHERE trashed_at IS NULL",
@@ -233,11 +239,12 @@ export class Library {
   cachedStats() {
     return this.catalog?.stats(() => this.stats()) ?? this.stats();
   }
-  timelineBounds() {
+  timelineBounds(filter) {
+    const kind = normalizeMediaKind(filter);
     const fetch = async () => {
       await this.#ensureCaptureSchema();
-      await this.#ensureIndex("timeline");
-      const match = `FROM jr_files WHERE library_id = ? AND trashed_at IS NULL AND ${timelineMedia}`;
+      await this.#ensureIndex(kind);
+      const match = `FROM jr_files WHERE library_id = ? AND trashed_at IS NULL AND ${mediaPredicate(kind)}`;
       const [bounds] = await this.db.query(
         `SELECT (SELECT ${mediaDateColumn} ${match} ORDER BY ${mediaDateColumn} ASC LIMIT 1) AS oldest,
                 (SELECT ${mediaDateColumn} ${match} ORDER BY ${mediaDateColumn} DESC LIMIT 1) AS newest`,
@@ -245,7 +252,7 @@ export class Library {
       );
       return bounds;
     };
-    return this.catalog?.timelineBounds(fetch) ?? fetch();
+    return this.catalog?.timelineBounds(kind, fetch) ?? fetch();
   }
   async list(input = {}) {
     const query = catalogListing(input, this.id);
@@ -253,7 +260,7 @@ export class Library {
     const fetchRows = async (sql, params) => {
       if (query.usesCaptureDate) {
         await this.#ensureCaptureSchema();
-        await this.#ensureIndex("timeline");
+        await this.#ensureIndex(query.mediaKind);
       } else if (query.sortName === "date" && query.section !== "trash")
         await this.#ensureIndex(
           query.section === "drive" ? "folderDate" : "date",

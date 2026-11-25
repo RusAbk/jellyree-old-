@@ -137,6 +137,9 @@
 .mobile-app .page-header h1 {
   font-size: 20px;
 }
+.mobile-app .media-filters button {
+  min-height: 36px;
+}
 .mobile-app .page-actions {
   justify-content: flex-start;
 }

@@ -791,6 +791,85 @@ test("media timeline seeks both ways by date and indexes only active media", asy
   );
   const all = await library.list({ section: "all", includeTotal: false });
   assert.equal(all.items[0].id, "archive");
+
+  for (const section of ["timeline", "photos"]) {
+    const onlyPhotos = await library.list({
+      section,
+      mediaKind: "photo",
+      includeTotal: false,
+    });
+    assert.deepEqual(
+      onlyPhotos.items.map(({ id }) => id),
+      ["photo", "heic", "archive"],
+    );
+    const onlyVideo = await library.list({
+      section,
+      mediaKind: "video",
+      includeTotal: false,
+    });
+    assert.deepEqual(
+      onlyVideo.items.map(({ id }) => id),
+      ["video"],
+    );
+    const videoQuery = requests.at(-1);
+    const videoPlan = sqlite
+      .prepare(`EXPLAIN QUERY PLAN ${videoQuery.sql}`)
+      .all(...videoQuery.params);
+    assert.ok(
+      videoPlan.some(({ detail }) => detail.includes("jr_video_capture_date")),
+    );
+  }
+  const beforeVideos = await library.list({
+    section: "timeline",
+    mediaKind: "video",
+    timelineBefore: boundary,
+  });
+  assert.deepEqual(beforeVideos.items, []);
+  const sincePhotos = await library.list({
+    section: "timeline",
+    mediaKind: "photo",
+    timelineSince: boundary,
+  });
+  assert.deepEqual(
+    sincePhotos.items.map(({ id }) => id),
+    ["photo"],
+  );
+
+  const directory = await mkdtemp(path.join(os.tmpdir(), "jr-media-filter-"));
+  library.enableCatalogCache(path.join(directory, "catalog.sqlite"));
+  t.after(async () => {
+    library.catalog.close();
+    await rm(directory, { recursive: true, force: true });
+  });
+  const videoDate = "2021-04-08T12:00:00.000Z";
+  assert.deepEqual(await library.timelineBounds("video"), {
+    oldest: videoDate,
+    newest: videoDate,
+  });
+  assert.deepEqual(await library.timelineBounds("photo"), {
+    oldest: captureDate,
+    newest: "2026-02-01T12:00:00.000Z",
+  });
+  assert.deepEqual(await library.timelineBounds(), {
+    oldest: captureDate,
+    newest: "2026-02-01T12:00:00.000Z",
+  });
+  const cachedAll = await library.list({ section: "timeline" });
+  assert.ok(cachedAll.items.some(({ id }) => id === "audio"));
+  const cachedVideo = await library.list({
+    section: "timeline",
+    mediaKind: "video",
+  });
+  assert.deepEqual(
+    cachedVideo.items.map(({ id }) => id),
+    ["video"],
+  );
+  const requestCount = requests.length;
+  assert.deepEqual(await library.timelineBounds("video"), {
+    oldest: videoDate,
+    newest: videoDate,
+  });
+  assert.equal(requests.length, requestCount);
 });
 
 test("catalog cache persists pages and reconciles updates, moves and deletions by revision", async (t) => {
