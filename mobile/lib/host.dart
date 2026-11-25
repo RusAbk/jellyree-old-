@@ -1086,6 +1086,8 @@ class MobileHost {
         return library.list(a[0] as Json);
       case 'timelineBounds':
         return library.timelineBounds(a.firstOrNull);
+      case 'listFileNotes':
+        return library.notes.list(a[0] as String);
       case 'folders':
         return library.folders();
       case 'stats':
@@ -1198,6 +1200,15 @@ class MobileHost {
           return null;
         case 'setCaptureDates':
           await library.setCaptureDates((a[0] as List).cast<Json>());
+          return null;
+        case 'saveFileNote':
+          return library.notes.save(a[0] as String, a[1] as Json);
+        case 'deleteFileNote':
+          await library.notes.remove(
+            a[0] as String,
+            a[1] as String,
+            a[2] as int,
+          );
           return null;
         case 'remove':
           return library.remove((a[0] as List).cast<String>());

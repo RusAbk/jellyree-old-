@@ -2,6 +2,7 @@
 import { localeCode, t } from "./i18n";
 import {
   computed,
+  defineAsyncComponent,
   nextTick,
   onBeforeUnmount,
   onMounted,
@@ -62,6 +63,7 @@ import type {
   TrashResult,
   ListInput,
 } from "./types";
+const FileNotes = defineAsyncComponent(() => import("./FileNotes.vue"));
 
 const settings = ref<Settings>({ configured: false, persisted: false });
 const mobile = document.documentElement.classList.contains("mobile-app");
@@ -290,6 +292,7 @@ const modal = ref<{
   folder?: Folder;
   parentId?: string | null;
   captureDate?: CaptureDateDraft;
+  notesFile?: { id: string; name: string };
 } | null>(null);
 const tagEditor = ref<InstanceType<typeof TagEditor>>();
 let generation = 0,
@@ -495,6 +498,7 @@ const contextItems = computed<MenuItem[]>(() => {
         ? [
             item("open", t("Открыть"), "ri-eye-line"),
             item("info", t("Информация"), "ri-information-line"),
+            item("notes", t("Заметки"), "ri-sticky-note-line"),
             ...(isImageFile(files.value.find((f) => f.id === menu.ids[0]))
               ? [item("editPhoto", t("Коррекция фото"), "ri-equalizer-line")]
               : []),
@@ -654,6 +658,8 @@ function chooseContext(id: string) {
     if (mobile && menu.ids[0]) selectOnly(menu.ids[0]);
     inspectorOpen.value = true;
   }
+  if (id === "notes")
+    openNotes(files.value.find((file) => file.id === menu.ids[0]));
   if (id === "download") void download(menu.ids);
   if (id === "share") void share(menu.ids[0]!);
   if (id === "captureDate") openCaptureDates(menu.ids);
@@ -1369,6 +1375,7 @@ function openModal(
     delete: t("Удалить навсегда?"),
     emptyTrash: t("Очистить корзину?"),
     captureDate: t("Изменить дату"),
+    notes: t("Заметки"),
     import: t("Добавить существующие объекты R2?"),
   };
   const file = files.value.find((f) => f.id === ids[0]);
@@ -1387,6 +1394,11 @@ function openModal(
     folder,
     parentId,
   };
+}
+function openNotes(file?: DriveFile) {
+  if (!file || busy.value) return;
+  openModal("notes", [file.id]);
+  if (modal.value) modal.value.notesFile = { id: file.id, name: file.name };
 }
 function openCaptureDates(ids = selection.value) {
   if (!isTimeline.value || busy.value) return;
@@ -1463,7 +1475,7 @@ function showTrashResult(result: TrashResult) {
 }
 async function submitModal() {
   const value = modal.value;
-  if (!value) return;
+  if (!value || value.kind === "notes") return;
   if (
     value.kind === "delete" &&
     photo.value &&
@@ -3197,6 +3209,14 @@ onBeforeUnmount(() => {
         }}</small>
       </div>
       <div class="inspector-actions">
+        <button
+          class="button"
+          :disabled="busy"
+          @click="openNotes(selectedFile)"
+        >
+          <i aria-hidden="true" class="ri-sticky-note-line"></i
+          >{{ t("Заметки") }}
+        </button>
         <button class="button" :disabled="busy" @click="openModal('rename')">
           <i aria-hidden="true" class="ri-edit-line"></i
           >{{ t("Переименовать") }}</button
@@ -3279,9 +3299,14 @@ onBeforeUnmount(() => {
     @selected="selectedConnection"
     @removed="removedConnection"
   />
-  <div v-if="modal" class="overlay" @click.self="!busy && (modal = null)">
+  <div
+    v-if="modal"
+    class="overlay"
+    @click.self="!busy && modal.kind !== 'notes' && (modal = null)"
+  >
     <form
       class="dialog action-dialog"
+      :class="{ 'file-notes-dialog': modal.kind === 'notes' }"
       role="dialog"
       aria-modal="true"
       aria-labelledby="modal-title"
@@ -3300,6 +3325,12 @@ onBeforeUnmount(() => {
           <i aria-hidden="true" class="ri-close-line"></i>
         </button>
       </header>
+      <FileNotes
+        v-if="modal.notesFile"
+        :key="modal.notesFile.id"
+        :file-id="modal.notesFile.id"
+        :file-name="modal.notesFile.name"
+      />
       <template v-if="modal.captureDate">
         <p v-if="modal.ids.length > 1" class="muted">
           {{ t("Выбрано: {0}", { "0": modal.ids.length }) }}
@@ -3397,8 +3428,10 @@ onBeforeUnmount(() => {
           )
         }}
       </p>
-      <p v-if="error" class="error" role="alert">{{ error }}</p>
-      <footer class="dialog-footer">
+      <p v-if="error && modal.kind !== 'notes'" class="error" role="alert">
+        {{ error }}
+      </p>
+      <footer v-if="modal.kind !== 'notes'" class="dialog-footer">
         <button
           type="button"
           class="button"
@@ -3471,6 +3504,14 @@ onBeforeUnmount(() => {
         >
           <i aria-hidden="true" class="ri-equalizer-line"></i
           >{{ t("Коррекция") }}</button
+        ><button
+          class="icon-button"
+          :disabled="busy"
+          :aria-label="t('Заметки')"
+          :title="t('Заметки')"
+          @click="openNotes(preview)"
+        >
+          <i aria-hidden="true" class="ri-sticky-note-line"></i></button
         ><button
           v-if="photo"
           ref="previewTagsButton"

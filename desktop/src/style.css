@@ -1474,6 +1474,102 @@ button {
   font-size: 12px;
   line-height: 1.8;
 }
+.file-notes-dialog {
+  width: 520px;
+}
+.file-notes-name {
+  overflow-wrap: anywhere;
+}
+.file-note-editor,
+.file-note-card {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+}
+.file-note-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px;
+  padding: 4px;
+  border-bottom: 1px solid var(--border);
+}
+.file-note-toolbar .icon-button {
+  width: 32px;
+  height: 32px;
+}
+.file-note-toolbar .icon-button[aria-pressed="true"] {
+  background: #e8e0ff;
+  color: #4e3a99;
+}
+.file-note-body {
+  font-size: 13px;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+.file-note-body .tiptap {
+  min-height: 100px;
+  padding: 9px 11px;
+  outline: none;
+}
+.file-note-editor:focus-within {
+  border-color: var(--accent);
+}
+.file-note-body :is(h1, h2, h3) {
+  line-height: 1.25;
+  margin: 5px 0;
+}
+.file-note-body h1 {
+  font-size: 21px;
+}
+.file-note-body h2 {
+  font-size: 18px;
+}
+.file-note-body h3 {
+  font-size: 15px;
+}
+.file-note-body :is(ul, ol) {
+  padding-inline-start: 22px;
+  margin-block: 5px;
+}
+.file-note-body ul {
+  list-style-type: disc;
+}
+.file-note-body ol {
+  list-style-type: decimal;
+}
+.file-note-count {
+  color: #716986;
+  text-align: end;
+  font-size: 11px;
+  margin-top: 5px;
+}
+.file-note-list {
+  display: grid;
+  gap: 8px;
+  margin-top: 10px;
+}
+.file-note-card {
+  padding: 8px 11px 11px;
+}
+.file-note-card > header,
+.file-note-confirm,
+.file-note-error {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+}
+.file-note-card time,
+.file-note-confirm,
+.file-note-empty {
+  font-size: 11px;
+  color: #716986;
+}
+.file-note-confirm,
+.file-note-empty,
+.file-note-error {
+  margin-top: 10px;
+}
 .capture-date-fields {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));

@@ -35,6 +35,7 @@ import {
   normalizeMediaKind,
 } from "./catalog-query.mjs";
 import { readCaptureDate } from "./capture-date.mjs";
+import { FileNotes } from "./file-notes.mjs";
 import { pendingRestoreError, Trash } from "./trash.mjs";
 import { libraryId } from "./config.mjs";
 import { normalizeImageAdjustments } from "./image-adjustments.mjs";
@@ -106,6 +107,7 @@ export class Library {
     this.config = config;
     this.id = libraryId(config);
     this.db = db ?? new D1(config);
+    this.notes = new FileNotes(this.db, this.id);
     this.s3 =
       s3 ??
       new S3Client({

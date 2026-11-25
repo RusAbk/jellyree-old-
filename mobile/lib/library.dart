@@ -8,6 +8,7 @@ import 'package:xml/xml.dart';
 
 import 'capture_date.dart';
 import 'cloudflare.dart';
+import 'file_notes.dart';
 import 'trash.dart';
 
 const mobilePageSize = 80;
@@ -194,6 +195,7 @@ class ListingQuery {
 class MobileLibrary {
   MobileLibrary(this.cloud, this.cache);
   final Cloudflare cloud;
+  late final notes = FileNotes(cloud, timestamp);
   late final _trash = TrashOperations(cloud);
   final Directory cache;
   final Map<String, (DateTime, Json)> _files = {};

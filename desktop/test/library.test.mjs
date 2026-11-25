@@ -1417,6 +1417,71 @@ test("image source reads private R2 bytes with size limits and library isolation
   assert.equal(destroyed, 2);
 });
 
+test("file notes store multiple formatted entries, enforce the text limit and follow file lifetime", async (t) => {
+  const { library, insert, sqlite, db } = fixture(t);
+  await library.initialize();
+  insert("own");
+  insert("foreign", { scope: "another-library" });
+  const paragraph = (text) => ({
+    type: "doc",
+    content: [
+      {
+        type: "paragraph",
+        content: [{ type: "text", text, marks: [{ type: "bold" }] }],
+      },
+    ],
+  });
+  const first = await library.notes.save("own", {
+    body: paragraph("😀".repeat(500)),
+  });
+  const second = await library.notes.save("own", {
+    body: paragraph("Second note"),
+  });
+  assert.equal((await library.notes.list("own")).length, 2);
+  assert.deepEqual(first.body, paragraph("😀".repeat(500)));
+  await assert.rejects(
+    library.notes.save("own", { body: paragraph("😀".repeat(501)) }),
+    /500 символов/,
+  );
+  await assert.rejects(
+    library.notes.save("own", {
+      body: { type: "doc", content: [{ type: "image" }] },
+    }),
+    /формат заметки/,
+  );
+  await assert.rejects(
+    library.notes.save("foreign", { body: paragraph("text") }),
+    /Файл не найден/,
+  );
+  const saved = await library.notes.save("own", {
+    id: second.id,
+    revision: second.revision,
+    body: paragraph("Edited"),
+  });
+  const other = new Library(
+    { ...library.config, prefix: "separate" },
+    { db, s3: library.s3 },
+  );
+  assert.deepEqual(await other.notes.list("own"), []);
+  await assert.rejects(
+    other.notes.remove("own", saved.id, saved.revision),
+    /заметка уже изменилась/i,
+  );
+  await assert.rejects(
+    library.notes.remove("own", second.id, second.revision),
+    /заметка уже изменилась/i,
+  );
+  await library.notes.remove("own", saved.id, saved.revision);
+  await library.updateFiles(["own"], { name: "Renamed.jpg" });
+  assert.deepEqual(await library.notes.list("own"), [first]);
+  await library.updateFiles(["own"], { trashed: true });
+  await library.deletePermanently(["own"]);
+  assert.equal(
+    sqlite.prepare("SELECT COUNT(*) AS count FROM jr_file_notes").get().count,
+    0,
+  );
+});
+
 test("permanent deletion refuses active files and keeps records when R2 fails", async (t) => {
   const { library, insert, deleted } = fixture(t);
   await library.initialize();

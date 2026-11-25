@@ -81,6 +81,7 @@ const mediaFiles = (kind) =>
   );
 const root = "/fixture/";
 const rpcCalls = [];
+const notes = new Map();
 const timelineKinds = [];
 const server = createServer(async (request, response) => {
   const url = new URL(request.url, "http://127.0.0.1");
@@ -203,6 +204,19 @@ const server = createServer(async (request, response) => {
         for (const { id, capturedAt } of args[0])
           fileFor(id).captured_at = capturedAt;
         return json(response, null);
+      case "listFileNotes":
+        return json(response, notes.get(args[0]) ?? []);
+      case "saveFileNote": {
+        const note = {
+          id: "mobile-note",
+          body: args[1].body,
+          revision: 1,
+          created_at: "2026-11-24T12:00:00.000Z",
+          updated_at: "2026-11-24T12:00:00.000Z",
+        };
+        notes.set(args[0], [note]);
+        return json(response, note);
+      }
       case "emptyTrash": {
         const remaining = files.filter((row) => !row.trashed_at);
         const done = files.length - remaining.length;
@@ -344,6 +358,16 @@ try {
   assert.ok(rpcCalls.includes("saveEditedImage"));
   assert.equal(fileFor("first").object_key, "lake-edited");
   await editor.locator(".photo-editor-header .icon-button").last().tap();
+  await viewer.getByRole("button", { name: "Notes", exact: true }).tap();
+  const noteDialog = page.getByRole("dialog", { name: "Notes", exact: true });
+  await noteDialog.getByRole("button", { name: "Add note", exact: true }).tap();
+  await noteDialog
+    .getByRole("textbox", { name: "Note text" })
+    .fill("A note from mobile");
+  await noteDialog.getByRole("button", { name: "Save", exact: true }).tap();
+  await noteDialog.getByText("A note from mobile", { exact: true }).waitFor();
+  assert.equal(notes.get("first").length, 1);
+  await noteDialog.getByRole("button", { name: "Close", exact: true }).tap();
   await viewer
     .getByRole("button", { name: "Close preview", exact: true })
     .tap();

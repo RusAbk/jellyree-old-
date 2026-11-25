@@ -43,6 +43,7 @@ const cacheNamespace = () => `${library.id}:${library.config.databaseId}`;
 const connectionReads = new Set([
   "files:list",
   "files:timeline-bounds",
+  "notes:list",
   "files:url",
   "files:image-source",
   "files:document-source",
@@ -410,6 +411,11 @@ function registerHandlers() {
   handle("files:timeline-bounds", (kind) => library.timelineBounds(kind));
   handle("files:update", (ids, patch) => library.updateFiles(ids, patch));
   handle("files:set-capture-dates", (edits) => library.setCaptureDates(edits));
+  handle("notes:list", (id) => library.notes.list(id));
+  handle("notes:save", (id, note) => library.notes.save(id, note));
+  handle("notes:delete", (id, noteId, revision) =>
+    library.notes.remove(id, noteId, revision),
+  );
   handle("files:delete", (ids) => library.deletePermanently(ids));
   handle("files:empty-trash", () => library.emptyTrash());
   handle("files:url", (id) => library.url(id));

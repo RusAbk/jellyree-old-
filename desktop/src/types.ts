@@ -71,6 +71,15 @@ export type ListInput = {
 };
 export type TimelineBounds = { oldest: string | null; newest: string | null };
 export type CaptureDateEdit = { id: string; capturedAt: string };
+export type FileNote = {
+  id: string;
+  body: import("@tiptap/core").JSONContent;
+  revision: number;
+  created_at: string;
+  updated_at: string;
+};
+export type FileNoteInput = Pick<FileNote, "body"> &
+  Partial<Pick<FileNote, "id" | "revision">>;
 export type TrashResult = { done: number; failed: number };
 export type FilePatch = {
   name?: string;
@@ -201,6 +210,9 @@ export interface Jellyree {
   timelineBounds(kind?: MediaKind): Promise<TimelineBounds>;
   update(ids: string[], patch: FilePatch): Promise<void>;
   setCaptureDates(edits: CaptureDateEdit[]): Promise<void>;
+  listFileNotes(id: string): Promise<FileNote[]>;
+  saveFileNote(id: string, note: FileNoteInput): Promise<FileNote>;
+  deleteFileNote(id: string, noteId: string, revision: number): Promise<void>;
   remove(ids: string[]): Promise<TrashResult>;
   emptyTrash(): Promise<TrashResult>;
   url(id: string): Promise<string>;

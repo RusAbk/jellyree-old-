@@ -344,6 +344,8 @@ try {
       calls: [],
     };
     globalThis.__jellyreeIpcFixture = state;
+    const notes = new Map();
+    let noteIndex = 0;
     const replace = (channel, fn) => {
       ipcMain.removeHandler(`jellyree:${channel}`);
       ipcMain.handle(`jellyree:${channel}`, (_event, ...args) => ({
@@ -391,6 +393,28 @@ try {
       state.files = state.files.filter((f) => !ids.includes(f.id));
       return { done: ids.length, failed: 0 };
     });
+    replace("notes:list", (id) => notes.get(id) ?? []);
+    replace("notes:save", (id, input) => {
+      const list = notes.get(id) ?? [];
+      const note = {
+        id: input.id ?? String(++noteIndex),
+        body: input.body,
+        revision: (input.revision ?? 0) + 1,
+        created_at: "2026-11-24T12:00:00.000Z",
+        updated_at: "2026-11-24T12:00:00.000Z",
+      };
+      notes.set(id, [
+        note,
+        ...list.filter((previous) => previous.id !== note.id),
+      ]);
+      return note;
+    });
+    replace("notes:delete", (id, noteId) => {
+      notes.set(
+        id,
+        (notes.get(id) ?? []).filter((note) => note.id !== noteId),
+      );
+    });
     replace("files:empty-trash", () => {
       const retry = state.calls.some(
         ({ channel }) => channel === "empty-trash",
@@ -410,6 +434,94 @@ try {
   });
   await window.reload();
   await window.getByText("delete-me.txt", { exact: true }).waitFor();
+  const openTestNotes = async () => {
+    await window
+      .getByText("delete-me.txt", { exact: true })
+      .click({ button: "right" });
+    await window
+      .getByRole("menuitem", { name: "Заметки", exact: true })
+      .click();
+  };
+  await openTestNotes();
+  const noteDialog = window.getByRole("dialog", {
+    name: "Заметки",
+    exact: true,
+  });
+  const addNote = noteDialog.getByRole("button", { name: "Добавить заметку" });
+  const saveNote = noteDialog.getByRole("button", {
+    name: "Сохранить",
+    exact: true,
+  });
+  const editor = noteDialog.getByRole("textbox", { name: "Текст заметки" });
+  const format = (name) =>
+    noteDialog.getByRole("button", { name, exact: true });
+  await addNote.click();
+  for (const level of [1, 2, 3]) {
+    await format("Заголовок " + level).click();
+    await window.keyboard.insertText("Уровень " + level);
+    await editor.press("End");
+    await editor.press("Enter");
+  }
+  for (const mark of ["Жирный текст", "Курсив", "Подчёркнутый текст"])
+    await format(mark).click();
+  await window.keyboard.insertText("Важное");
+  await editor.press("Enter");
+  await format("Маркированный список").click();
+  await window.keyboard.insertText("Пункт с маркером");
+  await editor.press("Enter");
+  await editor.press("Enter");
+  await format("Нумерованный список").click();
+  await window.keyboard.insertText("Первый пункт");
+  await saveNote.click();
+  const richNote = noteDialog
+    .locator(".file-note-card")
+    .filter({ hasText: "Уровень 1" });
+  for (const level of [1, 2, 3])
+    await richNote
+      .locator("h" + level)
+      .filter({ hasText: "Уровень " + level })
+      .waitFor();
+  for (const tag of ["strong", "em", "u"])
+    await richNote.locator(tag).filter({ hasText: "Важное" }).waitFor();
+  await richNote
+    .locator("ul li")
+    .filter({ hasText: "Пункт с маркером" })
+    .waitFor();
+  await richNote.locator("ol li").filter({ hasText: "Первый пункт" }).waitFor();
+  await addNote.click();
+  await editor.fill("а".repeat(501));
+  await noteDialog.getByText("501 / 500", { exact: true }).waitFor();
+  assert.equal(await saveNote.isDisabled(), true);
+  await editor.fill("Вторая заметка");
+  await saveNote.click();
+  await noteDialog.getByText("Вторая заметка", { exact: true }).waitFor();
+  await noteDialog
+    .getByRole("button", { name: "Закрыть", exact: true })
+    .click();
+  await openTestNotes();
+  const secondNote = noteDialog
+    .locator(".file-note-card")
+    .filter({ hasText: "Вторая заметка" });
+  await secondNote.getByRole("button", { name: "Изменить заметку" }).click();
+  await editor.fill("Изменённая заметка");
+  await saveNote.click();
+  const changedNote = noteDialog
+    .locator(".file-note-card")
+    .filter({ hasText: "Изменённая заметка" });
+  await changedNote
+    .getByRole("button", { name: "Удалить заметку", exact: true })
+    .click();
+  await changedNote
+    .getByRole("button", { name: "Удалить", exact: true })
+    .click();
+  await changedNote.waitFor({ state: "hidden" });
+  await richNote.waitFor();
+  await noteDialog
+    .getByRole("button", { name: "Закрыть", exact: true })
+    .click();
+  console.log(
+    "PASS: rich file notes, length limit, editing and deletion through Electron IPC",
+  );
   await window
     .getByText("delete-me.txt", { exact: true })
     .click({ button: "right" });

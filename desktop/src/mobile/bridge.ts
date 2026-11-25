@@ -200,6 +200,10 @@ export async function installMobileBridge() {
     timelineBounds: (kind) => call("timelineBounds", [kind]),
     update: (ids, patch) => call("update", [ids, patch]),
     setCaptureDates: (edits) => call("setCaptureDates", [edits]),
+    listFileNotes: (id) => call("listFileNotes", [id]),
+    saveFileNote: (id, note) => call("saveFileNote", [id, note]),
+    deleteFileNote: (id, noteId, revision) =>
+      call("deleteFileNote", [id, noteId, revision]),
     remove: (ids) => call("remove", [ids]),
     emptyTrash: () => call("emptyTrash"),
     url: (id) => call("url", [id]),

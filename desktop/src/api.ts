@@ -35,6 +35,10 @@ export function createApi(bridge: Jellyree): Jellyree {
     timelineBounds: (kind) => bridge.timelineBounds(kind),
     update: (ids, patch) => bridge.update(toIpcData(ids), toIpcData(patch)),
     setCaptureDates: (edits) => bridge.setCaptureDates(toIpcData(edits)),
+    listFileNotes: (id) => bridge.listFileNotes(id),
+    saveFileNote: (id, note) => bridge.saveFileNote(id, toIpcData(note)),
+    deleteFileNote: (id, noteId, revision) =>
+      bridge.deleteFileNote(id, noteId, revision),
     remove: (ids) => bridge.remove(toIpcData(ids)),
     emptyTrash: () => bridge.emptyTrash(),
     url: (id) => bridge.url(id),

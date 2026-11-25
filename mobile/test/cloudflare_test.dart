@@ -6,6 +6,7 @@ import 'package:crypto/crypto.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:jellyree_mobile/capture_date.dart';
 import 'package:jellyree_mobile/cloudflare.dart';
+import 'package:jellyree_mobile/file_notes.dart';
 import 'package:jellyree_mobile/library.dart';
 
 Connection profile() => Connection({
@@ -19,6 +20,36 @@ Connection profile() => Connection({
 });
 
 void main() {
+  test(
+    'Note length counts visible Unicode characters independently of marks',
+    () {
+      Json formatted(String value) => {
+        'type': 'doc',
+        'content': [
+          {
+            'type': 'paragraph',
+            'content': [
+              {
+                'type': 'text',
+                'text': value,
+                'marks': [
+                  {'type': 'bold'},
+                  {'type': 'underline'},
+                ],
+              },
+            ],
+          },
+        ],
+      };
+      expect(normalizeNote(formatted('🌅' * 500)), formatted('🌅' * 500));
+      expect(
+        () => normalizeNote(formatted('🌅' * 501)),
+        throwsA(isA<CloudError>()),
+      );
+      expect(() => normalizeNote(formatted('   ')), throwsA(isA<CloudError>()));
+    },
+  );
+
   test('individual cancellation stops an active request but cannot interrupt commit', () {
     final active = UploadCancellation();
     final next = UploadCancellation();
